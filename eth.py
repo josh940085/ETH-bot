@@ -9,6 +9,7 @@ import websocket
 import json
 import pickle
 import os
+import sys
 import re
 import html
 from collections import deque
@@ -1708,6 +1709,9 @@ Volume Spike: {context.get('volume_spike')}
         except Exception as e:
             return f"📰 新聞讀取失敗: {e}"
 
+    if text.strip() == "/restart":
+        return "__RESTART__"
+
     return None
 
 load_model()
@@ -1809,6 +1813,15 @@ def run_bot():
                     }
 
                     reply = handle_ai_command(text, context)
+
+                    if reply == "__RESTART__":
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            data={"chat_id": chat_id, "text": "🔄 Bot 正在重新啟動..."},
+                            timeout=5
+                        )
+                        time.sleep(1)
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
 
                     if reply:
                         requests.post(
