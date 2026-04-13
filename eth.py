@@ -1139,7 +1139,7 @@ def manage_position_scaling(current_price, atr=None):
             new_entry = ((entry * size) + (current_price * delta)) / max(new_size, 1e-9)
             tp_text = f"{_safe_float(active_trade.get('tp'), 0.0):.2f}" if active_trade.get("tp") is not None else "N/A"
             sl_text = f"{_safe_float(active_trade.get('sl'), 0.0):.2f}" if active_trade.get("sl") is not None else "N/A"
-            active_trade["entry"] = float(new_entry)
+            # 只更新均價，不修改原始進場價（避免影響原始止損位）
             active_trade["avg_entry"] = float(new_entry)
             active_trade["size"] = float(new_size)
             active_trade["add_count"] = add_count + 1
