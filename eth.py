@@ -1296,6 +1296,8 @@ active_trade = {
     "add_count": 0,
     "reduce_count": 0,
     "last_adjust_ts": 0.0,
+    "open_time": None,
+    "tp_sl_adjusted_4h": False,
 }
 
 # =============================
@@ -1931,6 +1933,8 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_time"] = None
+                        active_trade["tp_sl_adjusted_4h"] = False
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
@@ -1948,6 +1952,8 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_time"] = None
+                        active_trade["tp_sl_adjusted_4h"] = False
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
@@ -1970,6 +1976,8 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_time"] = None
+                        active_trade["tp_sl_adjusted_4h"] = False
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
@@ -1987,6 +1995,8 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_time"] = None
+                        active_trade["tp_sl_adjusted_4h"] = False
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
@@ -2000,6 +2010,36 @@ def run_bot():
             # 命中止盈止損前提下，持倉中允許補倉/減倉
             if active_trade["open"]:
                 manage_position_scaling(current)
+
+            # ===== 持倉超過4小時，縮減止盈止損範圍 =====
+            if (
+                active_trade["open"]
+                and not active_trade.get("tp_sl_adjusted_4h", False)
+                and active_trade.get("open_time") is not None
+                and (time.time() - active_trade["open_time"]) >= 4 * 3600
+            ):
+                entry_ref = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+                old_tp = _safe_float(active_trade["tp"], entry_ref)
+                old_sl = _safe_float(active_trade["sl"], entry_ref)
+
+                if active_trade["direction"] == "long":
+                    new_tp = entry_ref + (old_tp - entry_ref) * 0.6
+                    new_sl = entry_ref - (entry_ref - old_sl) * 0.6
+                else:
+                    new_tp = entry_ref - (entry_ref - old_tp) * 0.6
+                    new_sl = entry_ref + (old_sl - entry_ref) * 0.6
+
+                active_trade["tp"] = round(new_tp, 2)
+                active_trade["sl"] = round(new_sl, 2)
+                active_trade["tp_sl_adjusted_4h"] = True
+                print(f"⏱️ 持倉已超4小時，縮減TP/SL | 新TP: {active_trade['tp']:.2f} | 新SL: {active_trade['sl']:.2f}")
+                send_telegram(
+                    f"⏱️ 持倉已超4小時，縮減止盈止損\n"
+                    f"方向: {active_trade['direction']} | 進場均價: {entry_ref:.2f}\n"
+                    f"TP: {old_tp:.2f} → {active_trade['tp']:.2f}\n"
+                    f"SL: {old_sl:.2f} → {active_trade['sl']:.2f}",
+                    priority=True
+                )
 
             # ===== 核心限制：未平倉禁止開新單，但新聞照常推 =====
             if active_trade["open"]:
@@ -2654,6 +2694,8 @@ def run_bot():
                 active_trade["add_count"] = 0
                 active_trade["reduce_count"] = 0
                 active_trade["last_adjust_ts"] = 0.0
+                active_trade["open_time"] = time.time()
+                active_trade["tp_sl_adjusted_4h"] = False
                 active_trade["open"] = True
 
             # ===== 記錄（未來價格）=====
