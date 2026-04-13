@@ -29,6 +29,8 @@ NEWS_CACHE = {"news": 0, "event": 0, "news_list": [], "ts": 0}
 # ===== AI 新聞分類 =====
 NEWS_MODEL_PATH = "news_model.pkl"
 NEWS_VECTORIZER_PATH = "news_vectorizer.pkl"
+NEWS_MODEL_VERSION_PATH = "news_model_version.txt"
+NEWS_MODEL_VERSION = "2"  # 訓練資料更新時遞增，強制重新訓練
 NEWS_PERFORMANCE_LOG = "news_predictions.jsonl"   # 記錄所有預測結果用於評估
 NEWS_LEARNING_BUFFER = "learning_buffer.pkl"       # 增量學習緩衝區
 news_model = None
@@ -389,17 +391,39 @@ NEWS_TRAINING_DATA = [
     ("Bearish sentiment market", -1),
     ("Price decline", -1),
     ("Whale dump", -1),
-    # 宏觀 / 事件類
-    ("Fed raises interest rates", 0),
-    ("FOMC meeting decision", 0),
+    # 宏觀 / 事件類 — 升息/緊縮偏空加密貨幣；降息/寬鬆偏多
+    ("Fed raises interest rates", -2),
+    ("Federal Reserve hikes rates aggressively", -2),
+    ("FOMC raises rates by 75 basis points", -2),
+    ("Interest rate hike announced", -2),
+    ("Quantitative tightening begins", -2),
+    ("Fed rate hike crypto selloff", -2),
+    ("Fed cuts interest rates", 2),
+    ("Federal Reserve pivots to rate cuts", 2),
+    ("FOMC rate cut surprise", 2),
+    ("Fed signals rate cuts ahead", 1),
+    ("Federal Reserve pauses rate hikes", 1),
+    ("Stimulus package announced", 1),
+    ("Quantitative easing expansion", 1),
+    # CPI / 通膨 — 高通膨促升息偏空；低通膨偏多
+    ("CPI higher than expected inflation surges", -2),
+    ("Inflation data hotter than expected", -2),
+    ("CPI report misses expectations high", -1),
+    ("Inflation lower than expected", 1),
+    ("CPI cools below forecast", 1),
     ("Inflation data released", 0),
-    ("War tensions Middle East", 0),
-    ("Tariff announcement", 0),
-    ("CPI report misses", 0),
-    ("Labor data released", 0),
-    ("Economic event scheduled", 0),
-    ("Geopolitical news", 0),
-    ("Policy announcement", 0),
+    # 地緣政治 / 貿易
+    ("War tensions escalate Middle East", -1),
+    ("Tariff trade war escalation", -1),
+    ("Tariff announcement trade tensions", -1),
+    ("Ceasefire deal reached", 1),
+    ("Trade deal signed", 1),
+    # 中性事件
+    ("FOMC meeting decision no change", 0),
+    ("Labor data released mixed", 0),
+    ("Economic event scheduled data release", 0),
+    ("Geopolitical news ceasefire talks", 0),
+    ("Policy announcement awaited", 0),
 ]
 
 def train_news_model():
@@ -438,12 +462,24 @@ def train_news_model():
             pickle.dump(news_model, f)
         with open(NEWS_VECTORIZER_PATH, "wb") as f:
             pickle.dump(news_vectorizer, f)
+        with open(NEWS_MODEL_VERSION_PATH, "w") as f:
+            f.write(NEWS_MODEL_VERSION)
     except:
         pass
 
 def load_news_model():
     global news_model, news_vectorizer
     try:
+        # 如訓練資料版本已更新，強制重新訓練
+        saved_version = ""
+        try:
+            with open(NEWS_MODEL_VERSION_PATH, "r") as f:
+                saved_version = f.read().strip()
+        except:
+            pass
+        if saved_version != NEWS_MODEL_VERSION:
+            train_news_model()
+            return
         with open(NEWS_MODEL_PATH, "rb") as f:
             news_model = pickle.load(f)
         with open(NEWS_VECTORIZER_PATH, "rb") as f:
@@ -490,14 +526,16 @@ def _keyword_bias_score(text):
     low = str(text or "").lower()
 
     bull_words = [
-        "approval", "approved", "etf", "inflow", "surge", "rally", "breakout",
-        "partnership", "adoption", "upgrade", "listing", "launch", "buyback",
+        "approval", "approved", "etf", "inflow", "rally", "breakout to upside",
+        "partnership", "adoption", "upgrade", "listing", "buyback",
         "accumulation", "institutional", "rate cut", "stimulus"
     ]
     bear_words = [
         "hack", "exploit", "lawsuit", "ban", "fraud", "bankruptcy", "delist",
         "outflow", "dump", "sell-off", "crash", "plunge", "investigation",
-        "sanction", "rate hike", "liquidation", "withdrawal halt"
+        "sanction", "rate hike", "liquidation", "withdrawal halt",
+        "surge in inflation", "surge in losses", "launch bankruptcy",
+        "launch investigation", "breakout to downside"
     ]
 
     score = 0
@@ -2270,10 +2308,9 @@ def run_bot():
                 score *= 0.95
 
             # ===== 新聞影響強化（增加時事判斷權重）=====
-            if news_text:
-                analysis = analyze_news_text(news_text)
-                news_bias = analysis["bias"]  # -2 到 2
-                news_score_adjust = news_bias * 0.08  # 將新聞 bias 轉換為 score 調整（-0.16 到 0.16）
+            # 使用來自 get_macro_bias() 的原始英文新聞 bias，避免對格式化中文摘要誤判
+            if news_bias != 0:
+                news_score_adjust = news_bias * 0.08  # 將新聞 bias 轉換為 score 調整（-0.24 到 0.24）
                 score += news_score_adjust
                 score = max(0.05, min(score, 0.95))  # 確保在範圍內
 
