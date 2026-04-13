@@ -11,6 +11,7 @@ import pickle
 import os
 import re
 import html
+import subprocess
 from collections import deque
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -42,6 +43,7 @@ HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 
 TRANSLATION_CACHE = {}
+BOT_SOFT_RESTART_REQUESTED = False
 
 # ===== Environment variables / secrets =====
 def _load_local_env():
@@ -82,6 +84,7 @@ TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "")
 # ===== Telegram =====
 LAST_TELEGRAM_TS = 0
+TELEGRAM_PINNED_MESSAGE_ID = None
 
 # ===== Discord（同步通知） =====
 DISCORD_WEBHOOK = _get_required_env("DISCORD_WEBHOOK", "", mask=True)
@@ -1172,6 +1175,63 @@ def manage_position_scaling(current_price, atr=None):
             )
 
 
+def maybe_decay_take_profit(current_price):
+    """同一張單持倉超過 4 小時後，逐步降低止盈位。"""
+    if not active_trade.get("open"):
+        return
+
+    direction = active_trade.get("direction")
+    if direction not in ("long", "short"):
+        return
+
+    entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+    tp = _safe_float(active_trade.get("tp"), 0.0)
+    open_ts = _safe_float(active_trade.get("open_ts"), 0.0)
+    if entry <= 0 or tp <= 0 or open_ts <= 0:
+        return
+
+    start_after = 4 * 60 * 60
+    every = 60 * 60
+    decay_ratio = 0.18
+
+    held_sec = time.time() - open_ts
+    if held_sec < start_after:
+        return
+
+    expected_count = int((held_sec - start_after) // every) + 1
+    current_count = int(active_trade.get("tp_decay_count", 0))
+    steps = expected_count - current_count
+    if steps <= 0:
+        return
+
+    old_tp = tp
+    for _ in range(steps):
+        if direction == "long":
+            dist = max(tp - entry, 0.0)
+            if dist <= 0:
+                break
+            tp = entry + dist * (1.0 - decay_ratio)
+            tp = max(tp, current_price * 1.0004)
+        else:
+            dist = max(entry - tp, 0.0)
+            if dist <= 0:
+                break
+            tp = entry - dist * (1.0 - decay_ratio)
+            tp = min(tp, current_price * 0.9996)
+
+    active_trade["tp"] = float(tp)
+    active_trade["tp_decay_count"] = expected_count
+
+    if abs(tp - old_tp) > 1e-9:
+        hours = held_sec / 3600.0
+        send_telegram(
+            f"⏱️ 持倉超時下修止盈（{direction}）\n"
+            f"持倉: {hours:.1f}h | 現價: {current_price:.2f}\n"
+            f"TP: {old_tp:.2f} → {tp:.2f}",
+            priority=True,
+        )
+
+
 def get_signal_direction(signal):
     s = str(signal or "")
     if "做多" in s:
@@ -1296,6 +1356,8 @@ active_trade = {
     "add_count": 0,
     "reduce_count": 0,
     "last_adjust_ts": 0.0,
+    "open_ts": 0.0,
+    "tp_decay_count": 0,
 }
 
 # =============================
@@ -1576,8 +1638,8 @@ def log_data(features, label):
 
         log_buffer = []
 
-def send_telegram(msg, priority=False):
-    global LAST_TELEGRAM_TS
+def send_telegram(msg, priority=False, pin=False):
+    global LAST_TELEGRAM_TS, TELEGRAM_PINNED_MESSAGE_ID
 
     now = time.time()
 
@@ -1604,10 +1666,17 @@ def send_telegram(msg, priority=False):
             # fallback without any特殊字元問題
             payload["text"] = str(msg).replace("<", "").replace(">", "")
             res = requests.post(url, data=payload, timeout=5)
+        sent_message_id = None
+
         if res.status_code != 200:
             print("❌ Telegram 發送失敗:", res.status_code, res.text)
         else:
             print("✅ Telegram 已送出")
+            try:
+                body = res.json()
+                sent_message_id = body.get("result", {}).get("message_id")
+            except Exception:
+                sent_message_id = None
 
         # ===== retry（避免偶發失敗） =====
         if res.status_code != 200:
@@ -1625,10 +1694,51 @@ def send_telegram(msg, priority=False):
         except Exception as e:
             print("Discord error:", e)
 
+        if pin and sent_message_id is not None:
+            try:
+                pin_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/pinChatMessage"
+                pin_res = requests.post(
+                    pin_url,
+                    data={
+                        "chat_id": TELEGRAM_CHAT_ID,
+                        "message_id": sent_message_id,
+                        "disable_notification": True,
+                    },
+                    timeout=5,
+                )
+                if pin_res.status_code == 200:
+                    TELEGRAM_PINNED_MESSAGE_ID = sent_message_id
+            except Exception as e:
+                print("⚠️ Telegram 置頂失敗:", e)
+
         LAST_TELEGRAM_TS = now
 
     except Exception as e:
         print("❌ Telegram error:", e, "| msg:", msg[:50])
+
+
+def clear_telegram_pin():
+    """解除目前開倉通知置頂（若有）。"""
+    global TELEGRAM_PINNED_MESSAGE_ID
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    if TELEGRAM_PINNED_MESSAGE_ID is None:
+        return
+
+    try:
+        unpin_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/unpinChatMessage"
+        requests.post(
+            unpin_url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "message_id": TELEGRAM_PINNED_MESSAGE_ID,
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        print("⚠️ Telegram 解除置頂失敗:", e)
+    finally:
+        TELEGRAM_PINNED_MESSAGE_ID = None
 
 
 # ===== AI分析（OpenClaw / OpenAI） =====
@@ -1660,8 +1770,46 @@ def ask_ai_analysis(prompt):
     except Exception as e:
         return f"AI分析失敗: {e}"
 
+
+def request_soft_restart():
+    """由 Telegram 指令觸發的軟重啟旗標。"""
+    global BOT_SOFT_RESTART_REQUESTED
+    BOT_SOFT_RESTART_REQUESTED = True
+
+
+def sync_repo_from_github_main():
+    """同步 GitHub origin/main 到本機工作樹（追蹤檔案）。"""
+    repo_dir = Path(__file__).resolve().parent
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", "main"],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        subprocess.run(
+            ["git", "checkout", "origin/main", "--", "."],
+            cwd=str(repo_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=25,
+        )
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 # ===== Telegram 指令（AI分析） =====
 def handle_ai_command(text, context=None):
+    if text.startswith("/restart"):
+        ok, err = sync_repo_from_github_main()
+        if not ok:
+            return f"⚠️ /restart 同步 GitHub 失敗: {err[:180]}"
+        request_soft_restart()
+        return "♻️ 已同步 GitHub 最新版本，正在軟重啟策略（重載模型與清空快取）"
+
     if text.startswith("/ai"):
         question = text.replace("/ai", "").strip()
 
@@ -1745,7 +1893,7 @@ def get_kline(interval, limit=100):
 # 主邏輯（AI接管）
 # =============================
 def run_bot():
-    global performance
+    global performance, BOT_SOFT_RESTART_REQUESTED, KLINE_CACHE, MACRO_CACHE, NEWS_CACHE
 
     load_model()  # 加載所有模型，包括新聞模型
     retrain_model()  # 啟動時重新訓練 AI 模型
@@ -1772,6 +1920,20 @@ def run_bot():
 
     while True:
         try:
+            if BOT_SOFT_RESTART_REQUESTED:
+                BOT_SOFT_RESTART_REQUESTED = False
+                KLINE_CACHE.clear()
+                MACRO_CACHE = {"sp": 0, "nq": 0, "btc": 0, "dxy": 0, "news": 0, "event": 0, "news_list": [], "ts": 0}
+                NEWS_CACHE = {"news": 0, "event": 0, "news_list": [], "ts": 0}
+                last_signal = None
+                last_trade_time = 0
+                last_trade_signal = None
+                last_entry_price = None
+                last_direction = None
+                last_signal_cache = None
+                load_model()
+                print("♻️ 已完成軟重啟：模型重載、快取清空")
+
             # ===== Telegram 指令接收 =====
             params = {"timeout": 5}
             if last_update_id:
@@ -1919,6 +2081,9 @@ def run_bot():
                 candle_high = float(df_1m["high"].iloc[-1]) if len(df_1m) > 0 else current
                 candle_low = float(df_1m["low"].iloc[-1]) if len(df_1m) > 0 else current
 
+                # 同一張單持倉超過 4 小時，自動下修 TP
+                maybe_decay_take_profit(current)
+
                 if active_trade["direction"] == "long":
                     tp_hit = (current >= active_trade["tp"]) or (candle_high >= active_trade["tp"])
                     sl_hit = (current <= active_trade["sl"]) or (candle_low <= active_trade["sl"])
@@ -1931,6 +2096,9 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_ts"] = 0.0
+                        active_trade["tp_decay_count"] = 0
+                        clear_telegram_pin()
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
@@ -1948,6 +2116,9 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_ts"] = 0.0
+                        active_trade["tp_decay_count"] = 0
+                        clear_telegram_pin()
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
@@ -1970,6 +2141,9 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_ts"] = 0.0
+                        active_trade["tp_decay_count"] = 0
+                        clear_telegram_pin()
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
@@ -1987,6 +2161,9 @@ def run_bot():
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["open_ts"] = 0.0
+                        active_trade["tp_decay_count"] = 0
+                        clear_telegram_pin()
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
@@ -2630,7 +2807,7 @@ def run_bot():
                     continue
 
                 print("📤 發送 Telegram")
-                send_telegram(msg, priority=True)
+                send_telegram(msg, priority=True, pin=True)
                 last_signal_cache = msg
                 last_trade_time = now_ts
                 last_trade_signal = final
@@ -2654,6 +2831,8 @@ def run_bot():
                 active_trade["add_count"] = 0
                 active_trade["reduce_count"] = 0
                 active_trade["last_adjust_ts"] = 0.0
+                active_trade["open_ts"] = time.time()
+                active_trade["tp_decay_count"] = 0
                 active_trade["open"] = True
 
             # ===== 記錄（未來價格）=====
