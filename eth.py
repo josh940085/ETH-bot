@@ -528,7 +528,9 @@ def _keyword_bias_score(text):
     bull_words = [
         "approval", "approved", "etf", "inflow", "rally", "breakout to upside",
         "partnership", "adoption", "upgrade", "listing", "buyback",
-        "accumulation", "institutional", "rate cut", "stimulus"
+        "accumulation", "institutional", "rate cut", "stimulus",
+        "surge in adoption", "surge in inflows", "surge in institutional",
+        "launch new product", "launch partnership", "launch mainnet"
     ]
     bear_words = [
         "hack", "exploit", "lawsuit", "ban", "fraud", "bankruptcy", "delist",
@@ -2308,7 +2310,8 @@ def run_bot():
                 score *= 0.95
 
             # ===== 新聞影響強化（增加時事判斷權重）=====
-            # 使用來自 get_macro_bias() 的原始英文新聞 bias，避免對格式化中文摘要誤判
+            # news_bias 由 get_macro_bias() 從各則英文新聞原文聚合而來（見上方 line ~1852）
+            # 避免對格式化中文摘要字串 (news_text) 重複分析，防止 TF-IDF 模型誤判
             if news_bias != 0:
                 news_score_adjust = news_bias * 0.08  # 將新聞 bias 轉換為 score 調整（-0.24 到 0.24）
                 score += news_score_adjust
