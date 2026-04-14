@@ -9,6 +9,7 @@ import websocket
 import json
 import pickle
 import os
+import sys
 import re
 import html
 import subprocess
@@ -1825,8 +1826,18 @@ def handle_ai_command(text, context=None):
         ok, err = sync_repo_from_github_main()
         if not ok:
             return f"⚠️ /restart 同步 GitHub 失敗: {err[:180]}"
-        request_soft_restart()
-        return "♻️ 已同步 GitHub 最新版本，正在軟重啟策略（重載模型與清空快取）"
+        # Send confirmation before restarting the process
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={"chat_id": TELEGRAM_CHAT_ID, "text": "♻️ 已同步 GitHub 最新版本，正在重新啟動程序以載入新程式碼…"},
+                timeout=5,
+            )
+        except Exception:
+            pass
+        # Replace the current process with a fresh Python instance so new code takes effect
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+        return ""  # unreachable
 
     if text.startswith("/ai"):
         question = text.replace("/ai", "").strip()
