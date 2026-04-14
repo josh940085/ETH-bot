@@ -1209,7 +1209,7 @@ def maybe_decay_take_profit(current_price):
     if entry <= 0 or tp <= 0 or open_ts <= 0:
         return
 
-    start_after = 24 * 60 * 60
+    start_after = 4 * 60 * 60
     every = 60 * 60
     decay_ratio = 0.18
 
