@@ -729,13 +729,31 @@ def build_news_message(news_text, now_time=None):
     sentiment = analysis["sentiment"]
     impact = analysis["impact"]
     confidence = analysis["ai_confidence"]
+    bias = analysis["bias"]
+
+    # ===== 根據利多/利空選擇對應 emoji 與標題 =====
+    if bias >= 2:
+        header_emoji = "🟢"
+        header_label = "市場利多快訊（即時）"
+    elif bias == 1:
+        header_emoji = "🟢"
+        header_label = "市場輕微利多快訊（即時）"
+    elif bias == -1:
+        header_emoji = "🔴"
+        header_label = "市場輕微利空快訊（即時）"
+    elif bias <= -2:
+        header_emoji = "🔴"
+        header_label = "市場利空快訊（即時）"
+    else:
+        header_emoji = "🟡"
+        header_label = "市場快訊（即時）"
     
     # ===== 顯示 AI 學習狀態 =====
     accuracy_info = get_prediction_accuracy()
     accuracy_str = f"準率: {accuracy_info['accuracy']}% ({accuracy_info['correct']}/{accuracy_info['total']})" if accuracy_info['total'] > 0 else "準率: 初始化中"
 
     return (
-        f"🟡 市場快訊（即時）\n"
+        f"{header_emoji} {header_label}\n"
         f"⏰ {now_time}\n"
         f"━━━━━━━━━━━━━━\n"
         f"來源: {source}\n"
