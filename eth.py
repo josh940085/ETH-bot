@@ -1194,7 +1194,7 @@ def manage_position_scaling(current_price, atr=None):
 
 
 def maybe_decay_take_profit(current_price):
-    """同一張單持倉超過 4 小時後，逐步降低止盈位。"""
+    """同一張單持倉超過 1 天後，逐步降低止盈位。"""
     if not active_trade.get("open"):
         return
 
@@ -1208,7 +1208,7 @@ def maybe_decay_take_profit(current_price):
     if entry <= 0 or tp <= 0 or open_ts <= 0:
         return
 
-    start_after = 4 * 60 * 60
+    start_after = 24 * 60 * 60
     every = 60 * 60
     decay_ratio = 0.18
 
