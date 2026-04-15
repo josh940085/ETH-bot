@@ -1,13 +1,7 @@
 #!/bin/bash
 
-while true
-do
-  echo "🔄 更新程式..."
-  git pull origin main
+set -e
+cd "$(dirname "$0")"
 
-  echo "🚀 執行策略..."
-  python3 eth.py
-
-  echo "⏱ 等待60秒..."
-  sleep 60
-done
+echo "🚀 啟動 ETH 監督器..."
+python3 program.py

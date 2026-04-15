@@ -45,6 +45,7 @@ HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 
 TRANSLATION_CACHE = {}
 BOT_SOFT_RESTART_REQUESTED = False
+TELEGRAM_STATE_PATH = Path(__file__).resolve().parent / ".telegram_state.json"
 
 # ===== Environment variables / secrets =====
 def _load_local_env():
@@ -1790,54 +1791,31 @@ def ask_ai_analysis(prompt):
         return f"AI分析失敗: {e}"
 
 
-def request_soft_restart():
-    """由 Telegram 指令觸發的軟重啟旗標。"""
-    global BOT_SOFT_RESTART_REQUESTED
-    BOT_SOFT_RESTART_REQUESTED = True
-
-
-def sync_repo_from_github_main():
-    """同步 GitHub origin/main 到本機工作樹（追蹤檔案）。"""
-    repo_dir = Path(__file__).resolve().parent
+def load_last_update_id():
     try:
-        subprocess.run(
-            ["git", "fetch", "origin", "main"],
-            cwd=str(repo_dir),
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=25,
+        if not TELEGRAM_STATE_PATH.exists():
+            return None
+        payload = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
+        value = payload.get("last_update_id")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
+
+
+def save_last_update_id(update_id):
+    try:
+        TELEGRAM_STATE_PATH.write_text(
+            json.dumps({"last_update_id": int(update_id)}),
+            encoding="utf-8",
         )
-        subprocess.run(
-            ["git", "checkout", "origin/main", "--", "."],
-            cwd=str(repo_dir),
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=25,
-        )
-        return True, ""
-    except Exception as e:
-        return False, str(e)
+    except Exception:
+        pass
+
 
 # ===== Telegram 指令（AI分析） =====
 def handle_ai_command(text, context=None):
     if text.startswith("/restart"):
-        ok, err = sync_repo_from_github_main()
-        if not ok:
-            return f"⚠️ /restart 同步 GitHub 失敗: {err[:180]}"
-        # Send confirmation before restarting the process
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json={"chat_id": TELEGRAM_CHAT_ID, "text": "♻️ 已同步 GitHub 最新版本，正在重新啟動程序以載入新程式碼…"},
-                timeout=5,
-            )
-        except Exception:
-            pass
-        # Replace the current process with a fresh Python instance so new code takes effect
-        os.execv(sys.executable, [sys.executable] + sys.argv)
-        return ""  # unreachable
+        return "⚠️ /restart 已停用，目前不會再透過 Telegram 觸發同步或重啟。"
 
     if text.startswith("/ai"):
         question = text.replace("/ai", "").strip()
@@ -1942,7 +1920,7 @@ def run_bot():
     # ===== 每日報告 =====
     last_report_time = 0
 
-    last_update_id = None
+    last_update_id = load_last_update_id()
 
     # ===== V7 防洗單（訊號記憶）=====
     last_signal_cache = None
@@ -1980,6 +1958,8 @@ def run_bot():
 
             for u in updates:
                 last_update_id = u.get("update_id")
+                if last_update_id is not None:
+                    save_last_update_id(last_update_id)
                 try:
                     text = u.get("message", {}).get("text", "")
                     chat_id = u.get("message", {}).get("chat", {}).get("id")

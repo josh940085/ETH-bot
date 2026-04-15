@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^git stash push -m 'copilot-pre-sync-20260414' -- eth\\.py && git pull --ff-only origin main && echo 'NEW_HEAD='\\$\\(git rev-parse HEAD\\) && git status --short && git stash list \\| head -n 3$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
