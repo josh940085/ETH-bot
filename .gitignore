@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 *.pkl
 *.jsonl
+.telegram_state.json
