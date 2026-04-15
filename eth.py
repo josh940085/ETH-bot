@@ -1740,27 +1740,27 @@ def send_telegram(msg, priority=False, pin=False):
 WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/"
 
 
-def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None):
+def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, tp_display=None, sl_display=None):
     """進場後在 Telegram 底部送出「開啟倉位面板」Web App 按鈕。
-    entry_display: 若提供則使用此字串確保訊息與網址進場價一致。"""
+    entry_display, tp_display, sl_display: 若提供則使用此字串確保訊息與網址一致。"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     try:
         dir_param  = "long" if direction == "long" else "short"
         size_pct   = int(float(size) * 100)
-        tp_val     = float(tp)  if tp  is not None else 0.0
-        sl_val     = float(sl)  if sl  is not None else 0.0
         
-        # 使用傳入的顯示進場價，確保與訊息一致
+        # 使用傳入的顯示價格，確保與訊息一致
         entry_str = entry_display if entry_display else f"{entry:.2f}"
+        tp_str = tp_display if tp_display else (f"{tp:.2f}" if tp is not None else "0.0")
+        sl_str = sl_display if sl_display else (f"{sl:.2f}" if sl is not None else "0.0")
         
         url = (
             f"{WEBAPP_BASE_URL}"
             f"?dir={dir_param}"
             f"&entry={entry_str}"
-            f"&tp={tp_val:.2f}"
-            f"&sl={sl_val:.2f}"
+            f"&tp={tp_str}"
+            f"&sl={sl_str}"
             f"&size={size_pct}"
             f"&pair=ETHUSDT"
             f"&lev=10"
@@ -2860,8 +2860,10 @@ def run_bot():
 
                 msg += f"💰 倉位: {int(position_size*100)}%\n\n"
             
-            # 提取訊息中的進場價格（確保與網址一致）
+            # 提取訊息中的進場/止盈/止損價格（確保與網址一致）
             entry_display_str = f"{entry:.2f}" if final != "觀望" else None
+            tp_display_str = f"{tp:.2f}" if (final != "觀望" and tp is not None) else None
+            sl_display_str = f"{sl:.2f}" if (final != "觀望" and sl is not None) else None
 
             msg += (
                 f"🤖 AI信號：{display_signal}\n"
@@ -2984,6 +2986,8 @@ def run_bot():
                     sl,
                     active_trade["size"],
                     entry_display=entry_display_str,
+                    tp_display=tp_display_str,
+                    sl_display=sl_display_str,
                 )
 
             # ===== 記錄（未來價格）=====
