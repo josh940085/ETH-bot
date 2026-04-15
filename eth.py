@@ -1174,6 +1174,7 @@ def manage_position_scaling(current_price, atr=None):
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
             )
+            refresh_position_panel_from_active_trade()
             return
 
     # 減倉：有利方向浮盈時鎖定部分利潤（保留底倉）
@@ -1193,6 +1194,7 @@ def manage_position_scaling(current_price, atr=None):
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
             )
+            refresh_position_panel_from_active_trade()
 
 
 def maybe_decay_take_profit(current_price):
@@ -1250,6 +1252,7 @@ def maybe_decay_take_profit(current_price):
             f"TP: {old_tp:.2f} → {tp:.2f}",
             priority=True,
         )
+        refresh_position_panel_from_active_trade()
 
 
 def get_signal_direction(signal):
@@ -1740,7 +1743,7 @@ def send_telegram(msg, priority=False, pin=False):
 WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/"
 
 
-def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, tp_display=None, sl_display=None):
+def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, tp_display=None, sl_display=None, is_update=False):
     """進場後在 Telegram 發出倉位面板按鈕（私聊用 Web App，群組/頻道用 URL 按鈕）。
     entry_display, tp_display, sl_display: 若提供則使用此字串確保訊息與網址一致。"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -1780,7 +1783,7 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
                 "resize_keyboard": True,
                 "persistent": True,
             }
-            text = "📊 倉位已建立，點擊底部按鈕查看即時面板"
+            text = "📊 倉位面板已更新，點擊底部按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊底部按鈕查看即時面板"
         else:
             # 群組/頻道：使用 inline 按鈕（URL）
             keyboard = {
@@ -1788,7 +1791,7 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
                     {"text": "📊 開啟倉位面板", "url": url}
                 ]]
             }
-            text = "📊 倉位已建立，點擊按鈕查看即時面板"
+            text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
         
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -1801,6 +1804,40 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
         )
     except Exception as e:
         print(f"⚠️ 倉位面板按鈕發送失敗: {e}")
+
+
+def refresh_position_panel_from_active_trade():
+    """依照目前 active_trade 狀態重送面板按鈕，保持 URL 參數與交易狀態同步。"""
+    if not active_trade.get("open"):
+        return
+
+    direction = active_trade.get("direction")
+    if direction not in ("long", "short"):
+        return
+
+    entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+    size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+    tp = active_trade.get("tp")
+    sl = active_trade.get("sl")
+
+    if entry <= 0 or size <= 0:
+        return
+
+    entry_str = f"{entry:.2f}"
+    tp_str = f"{_safe_float(tp, 0.0):.2f}" if tp is not None else "0.0"
+    sl_str = f"{_safe_float(sl, 0.0):.2f}" if sl is not None else "0.0"
+
+    send_position_keyboard(
+        direction,
+        entry,
+        tp,
+        sl,
+        size,
+        entry_display=entry_str,
+        tp_display=tp_str,
+        sl_display=sl_str,
+        is_update=True,
+    )
 
 
 def remove_position_keyboard():
