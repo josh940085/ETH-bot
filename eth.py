@@ -1741,7 +1741,7 @@ WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/"
 
 
 def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, tp_display=None, sl_display=None):
-    """進場後在 Telegram 發出倉位面板按鈕（群組用 URL 按鈕，私聊用 Web App）。
+    """進場後在 Telegram 發出倉位面板按鈕（私聊用 Web App，群組/頻道用 URL 按鈕）。
     entry_display, tp_display, sl_display: 若提供則使用此字串確保訊息與網址一致。"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -1766,18 +1766,35 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
             f"&lev=10"
         )
         
-        # 同時支援群組（URL 按鈕）與私聊（Web App）
-        keyboard = {
-            "inline_keyboard": [[
-                {"text": "📊 開啟倉位面板", "url": url}
-            ]]
-        }
+        # 判斷是否為私聊（chat_id 為正數）或群組/頻道（負數）
+        try:
+            chat_id_int = int(TELEGRAM_CHAT_ID)
+            is_private = chat_id_int > 0
+        except (ValueError, TypeError):
+            is_private = True  # 預設為私聊
+        
+        if is_private:
+            # 私聊：使用 Web App 按鈕（底部按鈕）
+            keyboard = {
+                "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
+                "resize_keyboard": True,
+                "persistent": True,
+            }
+            text = "📊 倉位已建立，點擊底部按鈕查看即時面板"
+        else:
+            # 群組/頻道：使用 inline 按鈕（URL）
+            keyboard = {
+                "inline_keyboard": [[
+                    {"text": "📊 開啟倉位面板", "url": url}
+                ]]
+            }
+            text = "📊 倉位已建立，點擊按鈕查看即時面板"
         
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": "📊 倉位已建立，點擊按鈕查看即時面板",
+                "text": text,
                 "reply_markup": keyboard,
             },
             timeout=5,
