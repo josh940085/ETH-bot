@@ -1804,18 +1804,70 @@ def load_last_update_id():
 
 def save_last_update_id(update_id):
     try:
-        TELEGRAM_STATE_PATH.write_text(
-            json.dumps({"last_update_id": int(update_id)}),
-            encoding="utf-8",
-        )
+        payload = {}
+        if TELEGRAM_STATE_PATH.exists():
+            try:
+                data = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    payload = data
+            except Exception:
+                payload = {}
+
+        payload["last_update_id"] = int(update_id)
+        TELEGRAM_STATE_PATH.write_text(json.dumps(payload), encoding="utf-8")
     except Exception:
         pass
 
 
+def request_supervisor_restart():
+    try:
+        payload = {}
+        if TELEGRAM_STATE_PATH.exists():
+            try:
+                data = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    payload = data
+            except Exception:
+                payload = {}
+
+        payload["restart_requested"] = True
+        payload["restart_requested_at"] = int(time.time())
+        TELEGRAM_STATE_PATH.write_text(json.dumps(payload), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def pop_pending_commands():
+    try:
+        if not TELEGRAM_STATE_PATH.exists():
+            return []
+
+        payload = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return []
+
+        pending = payload.get("pending_commands")
+        commands = pending if isinstance(pending, list) else []
+        payload["pending_commands"] = []
+        TELEGRAM_STATE_PATH.write_text(json.dumps(payload), encoding="utf-8")
+        return commands
+    except Exception:
+        return []
+
+
 # ===== Telegram 指令（AI分析） =====
 def handle_ai_command(text, context=None):
+    global BOT_SOFT_RESTART_REQUESTED
+
     if text.startswith("/restart"):
-        return "⚠️ /restart 已停用，目前不會再透過 Telegram 觸發同步或重啟。"
+        if os.getenv("BOT_SUPERVISOR") == "1":
+            if request_supervisor_restart():
+                return "♻️ 已收到 /restart，將由 program.py 執行同步並重啟。"
+            return "⚠️ /restart 失敗：無法寫入重啟請求。"
+
+        BOT_SOFT_RESTART_REQUESTED = True
+        return "♻️ 已收到 /restart，將在本程序內執行軟重啟。"
 
     if text.startswith("/ai"):
         question = text.replace("/ai", "").strip()
@@ -1942,28 +1994,38 @@ def run_bot():
                 print("♻️ 已完成軟重啟：模型重載、快取清空")
 
             # ===== Telegram 指令接收 =====
-            params = {"timeout": 5}
-            if last_update_id:
-                params["offset"] = last_update_id + 1
+            if os.getenv("BOT_SUPERVISOR") == "1":
+                updates = pop_pending_commands()
+            else:
+                params = {"timeout": 5}
+                if last_update_id:
+                    params["offset"] = last_update_id + 1
 
-            try:
-                res = requests.get(
-                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-                    params=params,
-                    timeout=6
-                )
-                updates = res.json().get("result", [])
-            except:
-                updates = []
+                try:
+                    res = requests.get(
+                        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+                        params=params,
+                        timeout=6
+                    )
+                    updates = res.json().get("result", [])
+                except:
+                    updates = []
 
             for u in updates:
-                last_update_id = u.get("update_id")
-                if last_update_id is not None:
-                    save_last_update_id(last_update_id)
-                try:
+                if os.getenv("BOT_SUPERVISOR") == "1":
+                    text = u.get("text", "")
+                    chat_id = u.get("chat_id")
+                    last_update_id = u.get("update_id", last_update_id)
+                    if last_update_id is not None:
+                        save_last_update_id(last_update_id)
+                else:
+                    last_update_id = u.get("update_id")
+                    if last_update_id is not None:
+                        save_last_update_id(last_update_id)
                     text = u.get("message", {}).get("text", "")
                     chat_id = u.get("message", {}).get("chat", {}).get("id")
 
+                try:
                     if not text:
                         continue
 
