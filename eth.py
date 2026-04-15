@@ -1741,7 +1741,7 @@ WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/"
 
 
 def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, tp_display=None, sl_display=None):
-    """進場後在 Telegram 底部送出「開啟倉位面板」Web App 按鈕。
+    """進場後在 Telegram 發出倉位面板按鈕（群組用 URL 按鈕，私聊用 Web App）。
     entry_display, tp_display, sl_display: 若提供則使用此字串確保訊息與網址一致。"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -1765,22 +1765,25 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
             f"&pair=ETHUSDT"
             f"&lev=10"
         )
+        
+        # 同時支援群組（URL 按鈕）與私聊（Web App）
         keyboard = {
-            "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
-            "resize_keyboard": True,
-            "persistent": True,
+            "inline_keyboard": [[
+                {"text": "📊 開啟倉位面板", "url": url}
+            ]]
         }
+        
         requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": "📊 倉位已建立，點擊底部按鈕查看即時面板",
+                "text": "📊 倉位已建立，點擊按鈕查看即時面板",
                 "reply_markup": keyboard,
             },
             timeout=5,
         )
     except Exception as e:
-        print(f"⚠️ 倉位面板鍵盤發送失敗: {e}")
+        print(f"⚠️ 倉位面板按鈕發送失敗: {e}")
 
 
 def remove_position_keyboard():
