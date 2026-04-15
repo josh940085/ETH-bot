@@ -1737,6 +1737,66 @@ def send_telegram(msg, priority=False, pin=False):
         print("❌ Telegram error:", e, "| msg:", msg[:50])
 
 
+WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/"
+
+
+def send_position_keyboard(direction, entry, tp, sl, size):
+    """進場後在 Telegram 底部送出「開啟倉位面板」Web App 按鈕。"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    try:
+        dir_param  = "long" if direction == "long" else "short"
+        size_pct   = int(float(size) * 100)
+        tp_val     = float(tp)  if tp  is not None else 0.0
+        sl_val     = float(sl)  if sl  is not None else 0.0
+        url = (
+            f"{WEBAPP_BASE_URL}"
+            f"?dir={dir_param}"
+            f"&entry={entry:.2f}"
+            f"&tp={tp_val:.2f}"
+            f"&sl={sl_val:.2f}"
+            f"&size={size_pct}"
+            f"&pair=ETHUSDT"
+            f"&lev=10"
+        )
+        keyboard = {
+            "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
+            "resize_keyboard": True,
+            "persistent": True,
+        }
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": "📊 倉位已建立，點擊底部按鈕查看即時面板",
+                "reply_markup": keyboard,
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"⚠️ 倉位面板鍵盤發送失敗: {e}")
+
+
+def remove_position_keyboard():
+    """平倉後移除底部 Web App 鍵盤。"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": "📋 倉位已平倉，面板已關閉",
+                "reply_markup": {"remove_keyboard": True},
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"⚠️ 移除鍵盤失敗: {e}")
+
+
 def clear_telegram_pin():
     """解除目前開倉通知置頂（若有）。"""
     global TELEGRAM_PINNED_MESSAGE_ID
@@ -2170,6 +2230,7 @@ def run_bot():
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
                         clear_telegram_pin()
+                        remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
@@ -2190,6 +2251,7 @@ def run_bot():
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
                         clear_telegram_pin()
+                        remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
@@ -2215,6 +2277,7 @@ def run_bot():
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
                         clear_telegram_pin()
+                        remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
@@ -2235,6 +2298,7 @@ def run_bot():
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
                         clear_telegram_pin()
+                        remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
@@ -2905,6 +2969,13 @@ def run_bot():
                 active_trade["open_ts"] = time.time()
                 active_trade["tp_decay_count"] = 0
                 active_trade["open"] = True
+                send_position_keyboard(
+                    direction,
+                    float(entry),
+                    tp,
+                    sl,
+                    active_trade["size"],
+                )
 
             # ===== 記錄（未來價格）=====
             future_price = price

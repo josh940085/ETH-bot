@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>倉位面板</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f0f0f;
+      color: #ffffff;
+      min-height: 100vh;
+      padding: 12px 14px 24px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 16px;
+    }
+
+    .pair-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .eth-icon {
+      width: 36px; height: 36px;
+      background: linear-gradient(135deg, #627eea, #8498f0);
+      border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 18px;
+    }
+
+    .pair-name { font-size: 18px; font-weight: 700; }
+    .pair-sub  { font-size: 11px; color: #888; }
+
+    .badge-open {
+      background: #1a3a28;
+      color: #2ecc71;
+      font-size: 11px;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+      border: 1px solid #2ecc71;
+    }
+
+    .card {
+      background: #1a1a1a;
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+
+    .card-title {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 10px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .label { font-size: 11px; color: #888; margin-bottom: 3px; }
+
+    .direction-val {
+      font-size: 22px;
+      font-weight: 800;
+      line-height: 1;
+    }
+    .long  { color: #e74c3c; }
+    .short { color: #2ecc71; }
+
+    .size-val {
+      font-size: 22px;
+      font-weight: 800;
+      color: #e74c3c;
+    }
+
+    .progress-wrap {
+      background: #2a2a2a;
+      border-radius: 4px;
+      height: 6px;
+      margin-top: 8px;
+    }
+    .progress-bar {
+      height: 6px;
+      border-radius: 4px;
+      background: #e74c3c;
+      transition: width 0.4s;
+    }
+
+    .price-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 8px;
+    }
+
+    .price-block { flex: 1; }
+
+    .price-entry { font-size: 20px; font-weight: 700; }
+
+    .live-wrap {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .live-badge {
+      font-size: 9px;
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #e74c3c;
+      color: #fff;
+      font-weight: 700;
+    }
+    .price-live { font-size: 20px; font-weight: 700; }
+
+    .pnl-block { text-align: right; }
+    .pnl-pct   { font-size: 17px; font-weight: 700; }
+    .pnl-usdt  { font-size: 12px; margin-top: 2px; }
+    .profit { color: #e74c3c; }
+    .loss   { color: #2ecc71; }
+
+    .tp-sl-row {
+      display: flex;
+      gap: 10px;
+    }
+    .tp-box, .sl-box {
+      flex: 1;
+      background: #111;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+
+    .tp-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .tp-icon {
+      font-size: 14px;
+    }
+    .tp-label { font-size: 12px; font-weight: 600; color: #888; }
+
+    .tp-val { font-size: 16px; font-weight: 700; margin: 3px 0; }
+
+    .sl-status {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-weight: 600;
+      display: inline-block;
+      margin-top: 4px;
+    }
+    .sl-active    { background: #1a3a28; color: #2ecc71; border: 1px solid #2ecc71; }
+    .sl-triggered { background: #3a1a1a; color: #e74c3c; border: 1px solid #e74c3c; }
+
+    .legend {
+      font-size: 10px;
+      color: #666;
+      margin-top: 10px;
+      text-align: center;
+    }
+    .legend span { margin: 0 6px; }
+
+    .update-time {
+      font-size: 10px;
+      color: #555;
+      text-align: center;
+      margin-top: 8px;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+
+<div id="app" class="loading">載入倉位資料中...</div>
+
+<script>
+  // ── 讀取 URL 參數 ──
+  const p = new URLSearchParams(location.search);
+  const DIR    = p.get("dir")   || "long";
+  const ENTRY  = parseFloat(p.get("entry") || "0");
+  const TP     = parseFloat(p.get("tp")    || "0");
+  const SL     = parseFloat(p.get("sl")    || "0");
+  const SIZE   = parseInt(p.get("size")    || "20", 10);
+  const PAIR   = p.get("pair")  || "ETHUSDT";
+  const LEV    = parseInt(p.get("lev")     || "10", 10);
+
+  let livePrice = 0;
+
+  // ── Telegram Web App 初始化 ──
+  if (window.Telegram && window.Telegram.WebApp) {
+    Telegram.WebApp.ready();
+    Telegram.WebApp.expand();
+  }
+
+  // ── 取得即時價格 ──
+  async function fetchPrice() {
+    try {
+      const res = await fetch(
+        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${PAIR}`
+      );
+      const data = await res.json();
+      livePrice = parseFloat(data.price || 0);
+    } catch (_) {}
+    render();
+  }
+
+  // ── 計算未實現盈虧 ──
+  function calcPnl(live) {
+    if (!live || !ENTRY) return { pct: 0, usdt: 0 };
+    const raw = DIR === "long"
+      ? (live - ENTRY) / ENTRY
+      : (ENTRY - live) / ENTRY;
+    const pct  = raw * LEV * 100;
+    const usdt = raw * ENTRY * (SIZE / 100) * LEV;
+    return { pct, usdt };
+  }
+
+  // ── 判斷 SL 是否已觸發 ──
+  function slTriggered(live) {
+    if (!live || !SL) return false;
+    return DIR === "long" ? live <= SL : live >= SL;
+  }
+
+  // ── 格式化 ──
+  function fmt(n, dec = 2) {
+    return n.toLocaleString("zh-TW", {
+      minimumFractionDigits: dec,
+      maximumFractionDigits: dec
+    });
+  }
+
+  function fmt_signed(n) {
+    return (n >= 0 ? "+" : "") + n.toFixed(2);
+  }
+
+  function now_str() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  // ── 渲染 UI ──
+  function render() {
+    const live = livePrice;
+    const pnl  = calcPnl(live);
+    const sl_off = slTriggered(live);
+    const isLong  = DIR === "long";
+
+    const dirLabel = isLong ? "多單 ↑" : "空單 ↓";
+    const dirClass = isLong ? "long" : "short";
+
+    const pnlClass  = pnl.pct >= 0 ? "profit" : "loss";
+
+    const liveDiff  = live ? live - ENTRY : 0;
+    const liveDiffStr = `${liveDiff >= 0 ? "↑" : "↓"} ${Math.abs(liveDiff).toFixed(2)} (${(liveDiff / ENTRY * 100).toFixed(2)}%)`;
+
+    document.getElementById("app").outerHTML = `
+<div id="app">
+  <!-- Header -->
+  <div class="header">
+    <div class="pair-info">
+      <div class="eth-icon">◆</div>
+      <div>
+        <div class="pair-name">${PAIR}</div>
+        <div class="pair-sub">永續合約 · ${LEV}x</div>
+      </div>
+    </div>
+    <div class="badge-open">● 持倉中</div>
+  </div>
+
+  <!-- Direction + Size -->
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="label">方向</div>
+        <div class="direction-val ${dirClass}">${dirLabel}</div>
+      </div>
+      <div style="text-align:right">
+        <div class="label">目前倉位</div>
+        <div class="size-val">${SIZE}.00%</div>
+      </div>
+    </div>
+    <div class="progress-wrap">
+      <div class="progress-bar" style="width:${Math.min(SIZE, 100)}%"></div>
+    </div>
+  </div>
+
+  <!-- Prices + PnL -->
+  <div class="card">
+    <div class="price-row">
+      <div class="price-block">
+        <div class="label">進場價</div>
+        <div class="price-entry">${fmt(ENTRY)}</div>
+      </div>
+      <div class="price-block">
+        <div class="label">現價</div>
+        <div class="live-wrap">
+          <span class="live-badge">LIVE</span>
+        </div>
+        <div class="price-live">${live ? fmt(live) : "─"}</div>
+        <div style="font-size:11px;color:#888;margin-top:2px">${live ? liveDiffStr : ""}</div>
+      </div>
+      <div class="pnl-block">
+        <div class="label">未實現盈虧</div>
+        <div class="pnl-pct ${pnlClass}">${live ? fmt_signed(pnl.pct) + "%" : "─"}</div>
+        <div class="pnl-usdt ${pnlClass}">${live ? fmt_signed(pnl.usdt) + " USDT" : ""}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TP / SL -->
+  <div class="tp-sl-row">
+    <div class="tp-box">
+      <div class="tp-header">
+        <span class="tp-icon">🎯</span>
+        <span class="tp-label">止盈 (TP)</span>
+      </div>
+      <div class="tp-val">${fmt(TP)}</div>
+    </div>
+    <div class="sl-box">
+      <div class="tp-header">
+        <span class="tp-icon">🛑</span>
+        <span class="tp-label">止損 (SL)</span>
+      </div>
+      <div class="tp-val">${fmt(SL)}</div>
+      <div class="sl-status ${sl_off ? "sl-triggered" : "sl-active"}">
+        ${sl_off ? "⚠️ 已觸發" : "✅ 監控中"}
+      </div>
+    </div>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <span>盈利增加 → 紅色</span>｜<span>觸發止損 → 綠色</span>
+  </div>
+
+  <div class="update-time">最後更新：${now_str()}</div>
+</div>`;
+  }
+
+  // ── 啟動 ──
+  fetchPrice();
+  setInterval(fetchPrice, 3000);
+</script>
+</body>
+</html>
