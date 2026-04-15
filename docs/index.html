@@ -204,6 +204,10 @@
   const PAIR   = p.get("pair")  || "ETHUSDT";
   const LEV    = parseInt(p.get("lev")     || "10", 10);
 
+  // 調試：確認參數被正確讀取
+  console.log("URL Params:", { DIR, ENTRY, TP, SL, SIZE, PAIR, LEV });
+  console.log("URL:", location.href);
+
   let livePrice = 0;
 
   // ── Telegram Web App 初始化 ──

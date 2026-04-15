@@ -2862,8 +2862,8 @@ def run_bot():
             
             # 提取訊息中的進場/止盈/止損價格（確保與網址一致）
             entry_display_str = f"{entry:.2f}" if final != "觀望" else None
-            tp_display_str = f"{tp:.2f}" if (final != "觀望" and tp is not None) else None
-            sl_display_str = f"{sl:.2f}" if (final != "觀望" and sl is not None) else None
+            tp_display_str = f"{tp:.2f}" if (final != "觀望" and tp is not None) else "0.0"
+            sl_display_str = f"{sl:.2f}" if (final != "觀望" and sl is not None) else "0.0"
 
             msg += (
                 f"🤖 AI信號：{display_signal}\n"
