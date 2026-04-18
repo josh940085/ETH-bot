@@ -1844,7 +1844,8 @@ def refresh_position_panel_from_active_trade():
 
 
 _last_position_push_ts = 0
-_POSITION_PUSH_MIN_INTERVAL = 60  # 最短推送間隔（秒）
+_POSITION_PUSH_MIN_INTERVAL = 60  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
+_position_push_lock = Lock()
 
 
 def write_position_json():
@@ -1878,10 +1879,12 @@ def write_position_json():
 def push_position_json():
     """在背景執行緒中 git commit + push docs/position.json（有節流保護）。"""
     global _last_position_push_ts
+    min_interval = float(os.getenv("POSITION_PUSH_INTERVAL", str(_POSITION_PUSH_MIN_INTERVAL)))
     now = time.time()
-    if now - _last_position_push_ts < _POSITION_PUSH_MIN_INTERVAL:
-        return
-    _last_position_push_ts = now
+    with _position_push_lock:
+        if now - _last_position_push_ts < min_interval:
+            return
+        _last_position_push_ts = now
 
     repo_dir = str(POSITION_JSON_PATH.parent.parent)
     rel_path = "docs/position.json"
@@ -1900,7 +1903,7 @@ def push_position_json():
             )
             if result.returncode == 0:
                 subprocess.run(
-                    ["git", "push", "origin", "main"],
+                    ["git", "push"],
                     cwd=repo_dir, timeout=30, check=False,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 )

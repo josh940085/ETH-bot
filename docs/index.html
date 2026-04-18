@@ -218,7 +218,9 @@
   }
 
   // ── 取得即時倉位資料（position.json）──
-  const POSITION_JSON_URL = location.origin + location.pathname.replace(/\/[^/]*$/, "/") + "position.json";
+  const _pathParts = location.pathname.split("/");
+  _pathParts[_pathParts.length - 1] = "position.json";
+  const POSITION_JSON_URL = location.origin + _pathParts.join("/");
 
   async function fetchPositionData() {
     try {
