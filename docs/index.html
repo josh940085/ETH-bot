@@ -194,15 +194,16 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  // ── 讀取 URL 參數 ──
+  // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
-  const DIR    = p.get("dir")   || "long";
-  const ENTRY  = parseFloat(p.get("entry") || "0");
-  const TP     = parseFloat(p.get("tp")    || "0");
-  const SL     = parseFloat(p.get("sl")    || "0");
-  const SIZE   = parseInt(p.get("size")    || "20", 10);
+  let DIR    = p.get("dir")   || "long";
+  let ENTRY  = parseFloat(p.get("entry") || "0");
+  let TP     = parseFloat(p.get("tp")    || "0");
+  let SL     = parseFloat(p.get("sl")    || "0");
+  let SIZE   = parseInt(p.get("size")    || "20", 10);
   const PAIR   = p.get("pair")  || "ETHUSDT";
   const LEV    = parseInt(p.get("lev")     || "10", 10);
+  let POSITION_OPEN = true;
 
   // 調試：確認參數被正確讀取
   console.log("URL Params:", { DIR, ENTRY, TP, SL, SIZE, PAIR, LEV });
@@ -216,6 +217,27 @@
     Telegram.WebApp.expand();
   }
 
+  // ── 取得即時倉位資料（position.json）──
+  const POSITION_JSON_URL = location.origin + location.pathname.replace(/\/[^/]*$/, "/") + "position.json";
+
+  async function fetchPositionData() {
+    try {
+      const res = await fetch(POSITION_JSON_URL + "?t=" + Date.now());
+      if (!res.ok) return;
+      const data = await res.json();
+      if (typeof data !== "object" || data === null) return;
+
+      POSITION_OPEN = !!data.open;
+      if (data.open) {
+        if (data.direction) DIR = data.direction;
+        if (data.entry)     ENTRY = parseFloat(data.entry);
+        if (data.tp)        TP    = parseFloat(data.tp);
+        if (data.sl)        SL    = parseFloat(data.sl);
+        if (typeof data.size === "number") SIZE = Math.round(data.size * 100);
+      }
+    } catch (_) {}
+  }
+
   // ── 取得即時價格 ──
   async function fetchPrice() {
     try {
@@ -226,6 +248,12 @@
       livePrice = parseFloat(data.price || 0);
     } catch (_) {}
     render();
+  }
+
+  // ── 同時更新倉位資料與即時價格 ──
+  async function refresh() {
+    await fetchPositionData();
+    await fetchPrice();
   }
 
   // ── 計算未實現盈虧 ──
@@ -267,6 +295,30 @@
 
   // ── 渲染 UI ──
   function render() {
+    // 已平倉：顯示簡單的已平倉面板
+    if (!POSITION_OPEN) {
+      document.getElementById("app").outerHTML = `
+<div id="app">
+  <div class="header">
+    <div class="pair-info">
+      <div class="eth-icon">◆</div>
+      <div>
+        <div class="pair-name">${PAIR}</div>
+        <div class="pair-sub">永續合約 · ${LEV}x</div>
+      </div>
+    </div>
+    <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
+  </div>
+  <div class="card" style="text-align:center;padding:32px 16px;">
+    <div style="font-size:32px;margin-bottom:12px;">📋</div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px;">目前無持倉</div>
+    <div style="font-size:13px;color:#888;">等待下一次交易訊號</div>
+  </div>
+  <div class="update-time">最後更新：${now_str()}</div>
+</div>`;
+      return;
+    }
+
     const live = livePrice;
     const pnl  = calcPnl(live);
     const sl_off = slTriggered(live);
@@ -365,8 +417,8 @@
   }
 
   // ── 啟動 ──
-  fetchPrice();
-  setInterval(fetchPrice, 3000);
+  refresh();
+  setInterval(refresh, 3000);
 </script>
 </body>
 </html>

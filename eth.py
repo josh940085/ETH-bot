@@ -46,6 +46,7 @@ HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 TRANSLATION_CACHE = {}
 BOT_SOFT_RESTART_REQUESTED = False
 TELEGRAM_STATE_PATH = Path(__file__).resolve().parent / ".telegram_state.json"
+POSITION_JSON_PATH = Path(__file__).resolve().parent / "docs" / "position.json"
 
 # ===== Environment variables / secrets =====
 def _load_local_env():
@@ -1838,6 +1839,75 @@ def refresh_position_panel_from_active_trade():
         sl_display=sl_str,
         is_update=True,
     )
+    write_position_json()
+    push_position_json()
+
+
+_last_position_push_ts = 0
+_POSITION_PUSH_MIN_INTERVAL = 60  # 最短推送間隔（秒）
+
+
+def write_position_json():
+    """將目前 active_trade 狀態寫入 docs/position.json，供 mini app / web app 即時讀取。"""
+    try:
+        is_open = bool(active_trade.get("open", False))
+        entry = _safe_float(active_trade.get("avg_entry") or active_trade.get("entry"), 0.0)
+        tp = _safe_float(active_trade.get("tp"), 0.0)
+        sl = _safe_float(active_trade.get("sl"), 0.0)
+        size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+        data = {
+            "open": is_open,
+            "direction": active_trade.get("direction") or "",
+            "entry": round(entry, 4),
+            "tp": round(tp, 4),
+            "sl": round(sl, 4),
+            "size": round(size, 4),
+            "pair": "ETHUSDT",
+            "lev": 10,
+            "ts": int(time.time()),
+        }
+        POSITION_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+        POSITION_JSON_PATH.write_text(
+            json.dumps(data, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"⚠️ 寫入 position.json 失敗: {e}")
+
+
+def push_position_json():
+    """在背景執行緒中 git commit + push docs/position.json（有節流保護）。"""
+    global _last_position_push_ts
+    now = time.time()
+    if now - _last_position_push_ts < _POSITION_PUSH_MIN_INTERVAL:
+        return
+    _last_position_push_ts = now
+
+    repo_dir = str(POSITION_JSON_PATH.parent.parent)
+    rel_path = "docs/position.json"
+
+    def _push():
+        try:
+            subprocess.run(
+                ["git", "add", rel_path],
+                cwd=repo_dir, timeout=10, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            result = subprocess.run(
+                ["git", "commit", "-m", "chore: update position data"],
+                cwd=repo_dir, timeout=10, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            )
+            if result.returncode == 0:
+                subprocess.run(
+                    ["git", "push", "origin", "main"],
+                    cwd=repo_dir, timeout=30, check=False,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                )
+        except Exception as e:
+            print(f"⚠️ 推送 position.json 失敗: {e}")
+
+    threading.Thread(target=_push, daemon=True).start()
 
 
 def remove_position_keyboard():
@@ -1857,6 +1927,9 @@ def remove_position_keyboard():
         )
     except Exception as e:
         print(f"⚠️ 移除鍵盤失敗: {e}")
+
+    write_position_json()
+    push_position_json()
 
 
 def clear_telegram_pin():
@@ -3046,6 +3119,8 @@ def run_bot():
                     tp_display=tp_display_str,
                     sl_display=sl_display_str,
                 )
+                write_position_json()
+                push_position_json()
 
             # ===== 記錄（未來價格）=====
             future_price = price
