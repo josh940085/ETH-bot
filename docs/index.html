@@ -218,9 +218,8 @@
   }
 
   // ── 取得即時倉位資料（position.json）──
-  const _pathParts = location.pathname.split("/");
-  _pathParts[_pathParts.length - 1] = "position.json";
-  const POSITION_JSON_URL = location.origin + _pathParts.join("/");
+  // 以 URL 物件解析，避免 /ETH-bot 與 /ETH-bot/ 差異導致抓到錯誤路徑 /position.json
+  const POSITION_JSON_URL = new URL("position.json", location.href).toString();
 
   async function fetchPositionData() {
     try {

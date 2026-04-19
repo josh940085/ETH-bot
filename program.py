@@ -31,7 +31,8 @@ def load_local_env():
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
+        if key:
+            # 以 .env 為準，避免既有空值/舊值影響啟動器
             os.environ[key] = value
 
 

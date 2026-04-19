@@ -68,7 +68,8 @@ def _load_local_env():
             key = key.strip()
             value = value.strip().strip('"').strip("'")
 
-            if key and key not in os.environ:
+            if key:
+                # 以 .env 為準，避免既有空值/舊值蓋掉最新設定
                 os.environ[key] = value
     except Exception as e:
         print(f"⚠️ .env 載入失敗: {e}")
@@ -84,11 +85,22 @@ def _get_required_env(name, default=None, mask=False):
     return value
 
 
+def _get_env_with_alias(primary, aliases=None, default=""):
+    keys = [primary] + list(aliases or [])
+    for k in keys:
+        v = os.getenv(k)
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
+    return default
+
+
 _load_local_env()
 
 TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "")
-TELEGRAM_PRIVATE_CHAT_ID = _get_required_env("TELEGRAM_PRIVATE_CHAT_ID", "")
+TELEGRAM_PRIVATE_CHAT_ID = _get_env_with_alias("TELEGRAM_PRIVATE_CHAT_ID", ["TELEGRAM_USER_CHAT_ID"], "")
+if not TELEGRAM_PRIVATE_CHAT_ID:
+    print("⚠️ 缺少環境變數: TELEGRAM_PRIVATE_CHAT_ID")
 # ===== Telegram =====
 LAST_TELEGRAM_TS = 0
 TELEGRAM_PINNED_MESSAGE_ID = None
@@ -103,13 +115,17 @@ BINANCE_BASE_URL = str(os.getenv("BINANCE_BASE_URL", "https://fapi.binance.com")
 BINANCE_REAL_COPY_ENABLED = str(os.getenv("BINANCE_REAL_COPY_ENABLED", "0")).strip() == "1"
 BINANCE_SYMBOL = str(os.getenv("BINANCE_SYMBOL", "ETHUSDT")).strip() or "ETHUSDT"
 try:
-    BINANCE_LEVERAGE = int(float(os.getenv("BINANCE_LEVERAGE", "10")))
+    BINANCE_LEVERAGE = int(float(_get_env_with_alias("BINANCE_LEVERAGE", ["COPY_TRADE_LEVERAGE"], "10")))
 except Exception:
     BINANCE_LEVERAGE = 10
 try:
-    BINANCE_ORDER_NOTIONAL_USDT = max(10.0, float(os.getenv("BINANCE_ORDER_NOTIONAL_USDT", "150")))
+    BINANCE_ORDER_NOTIONAL_USDT = max(10.0, float(_get_env_with_alias("BINANCE_ORDER_NOTIONAL_USDT", ["COPY_TRADE_USDT"], "150")))
 except Exception:
     BINANCE_ORDER_NOTIONAL_USDT = 150.0
+try:
+    BINANCE_MIN_NOTIONAL_USDT = max(5.0, float(os.getenv("BINANCE_MIN_NOTIONAL_USDT", "20")))
+except Exception:
+    BINANCE_MIN_NOTIONAL_USDT = 20.0
 try:
     BINANCE_QTY_STEP = max(0.0001, float(os.getenv("BINANCE_QTY_STEP", "0.001")))
 except Exception:
@@ -121,7 +137,15 @@ except Exception:
 
 
 def _is_binance_copy_ready():
-    if not BINANCE_REAL_COPY_ENABLED:
+    # 由跟單按鈕（FOLLOW_MODE_ENABLED）控制，API Key 需存在
+    # BINANCE_REAL_COPY_ENABLED=0 可強制停用（安全開關）
+    if BINANCE_REAL_COPY_ENABLED is False and os.getenv("BINANCE_REAL_COPY_ENABLED", "").strip() == "0":
+        return False
+    try:
+        follow_on = FOLLOW_MODE_ENABLED
+    except NameError:
+        follow_on = False
+    if not follow_on:
         return False
     return bool(BINANCE_API_KEY and BINANCE_API_SECRET)
 
@@ -189,13 +213,15 @@ def _round_down_step(value, step):
     return max(0.0, (int(value / step)) * step)
 
 
-def _binance_qty_from_size_ratio(size_ratio, current_price):
+def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=False):
     ratio = max(0.0, min(float(size_ratio), 1.0))
     px = max(0.0, _safe_float(current_price, 0.0))
     if ratio <= 0 or px <= 0:
         return 0.0
 
     notional = BINANCE_ORDER_NOTIONAL_USDT * ratio
+    if enforce_min_notional and notional > 0:
+        notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
     raw_qty = notional / px
     qty = _round_down_step(raw_qty, BINANCE_QTY_STEP)
     if qty < BINANCE_MIN_QTY:
@@ -249,7 +275,7 @@ def sync_binance_open_position(direction, size_ratio, current_price):
     if not _is_binance_copy_ready():
         return True, "skip_not_enabled"
 
-    qty = _binance_qty_from_size_ratio(size_ratio, current_price)
+    qty = _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=True)
     if qty <= 0:
         return False, "quantity_too_small"
 
@@ -265,7 +291,8 @@ def sync_binance_adjust_position(direction, action, delta_ratio, current_price):
     if not _is_binance_copy_ready():
         return True, "skip_not_enabled"
 
-    qty = _binance_qty_from_size_ratio(delta_ratio, current_price)
+    enforce_min_notional = action == "add"
+    qty = _binance_qty_from_size_ratio(delta_ratio, current_price, enforce_min_notional=enforce_min_notional)
     if qty <= 0:
         return False, "quantity_too_small"
 
@@ -2082,7 +2109,7 @@ def refresh_position_panel_from_active_trade():
 
 
 _last_position_push_ts = 0
-_POSITION_PUSH_MIN_INTERVAL = 60  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
+_POSITION_PUSH_MIN_INTERVAL = 15  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
 _position_push_lock = Lock()
 
 
@@ -2117,7 +2144,10 @@ def write_position_json():
 def push_position_json():
     """在背景執行緒中 git commit + push docs/position.json（有節流保護）。"""
     global _last_position_push_ts
-    min_interval = float(os.getenv("POSITION_PUSH_INTERVAL", str(_POSITION_PUSH_MIN_INTERVAL)))
+    try:
+        min_interval = max(3.0, float(os.getenv("POSITION_PUSH_INTERVAL", str(_POSITION_PUSH_MIN_INTERVAL))))
+    except Exception:
+        min_interval = float(_POSITION_PUSH_MIN_INTERVAL)
     now = time.time()
     with _position_push_lock:
         if now - _last_position_push_ts < min_interval:
@@ -2138,13 +2168,21 @@ def push_position_json():
                 ["git", "commit", "-m", "chore: update position data"],
                 cwd=repo_dir, timeout=10, check=False,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
             )
             if result.returncode == 0:
-                subprocess.run(
+                push_result = subprocess.run(
                     ["git", "push"],
                     cwd=repo_dir, timeout=30, check=False,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True,
                 )
+                if push_result.returncode != 0:
+                    print(f"⚠️ 推送 position.json 失敗: {(push_result.stdout or '').strip()}")
+            else:
+                commit_out = (result.stdout or "").strip()
+                if "nothing to commit" not in commit_out:
+                    print(f"⚠️ 提交 position.json 失敗: {commit_out}")
         except Exception as e:
             print(f"⚠️ 推送 position.json 失敗: {e}")
 
@@ -2216,7 +2254,7 @@ def send_follow_button(is_update=False):
     if not TELEGRAM_TOKEN or not private_chat_id:
         return
 
-    btn_text = "✅ 跟單中（點擊關閉）" if FOLLOW_MODE_ENABLED else "📈 開啟跟單（自動補倉/減倉同步）"
+    btn_text = "✅ 跟單中（點擊關閉幣安下單）" if FOLLOW_MODE_ENABLED else "📈 開啟跟單（幣安自動下單）"
 
     try:
         if is_update and _FOLLOW_BUTTON_MSG_ID:
@@ -2238,7 +2276,7 @@ def send_follow_button(is_update=False):
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={
                     "chat_id": private_chat_id,
-                    "text": "👥 跟單模式：開啟後，每次補倉/減倉都會收到同步提醒",
+                    "text": "👥 跟單模式：開啟後，Bot 每次開倉/補倉/減倉/平倉都會同步在你的幣安帳戶下對應市價單",
                     "reply_markup": {
                         "inline_keyboard": [[
                             {"text": btn_text, "callback_data": "toggle_follow"}
@@ -2296,8 +2334,31 @@ def _process_follow_callback(cq_data, cq_id, cq_msg_id, chat_id):
         return
 
     is_enabled = toggle_follow_mode()
-    status_text = "✅ 跟單模式已開啟！將同步推送補倉/減倉提醒" if is_enabled else "⏹️ 跟單模式已關閉"
-    btn_text    = "✅ 跟單中（點擊關閉）" if is_enabled else "📈 開啟跟單（自動補倉/減倉同步）"
+    has_keys = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
+    if is_enabled and not has_keys:
+        # API Key 未設定，回滾並告知
+        toggle_follow_mode()  # 再切回 False
+        is_enabled = False
+        if cq_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                data={"callback_query_id": cq_id, "text": "❌ 尚未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法啟動跟單", "show_alert": True},
+                timeout=5,
+            )
+        return
+    status_text = "✅ 跟單模式已開啟！後續 Bot 操作將在幣安帳戶同步下單" if is_enabled else "⏹️ 跟單模式已關閉，幣安下單停止"
+    btn_text    = "✅ 跟單中（點擊關閉幣安下單）" if is_enabled else "📈 開啟跟單（幣安自動下單）"
+
+    # 開啟跟單且目前已有倉位 → 立刻在幣安同步開倉
+    if is_enabled and active_trade.get("open") and active_trade.get("direction"):
+        cur_price = WS_PRICE or active_trade.get("entry", 0)
+        if cur_price and cur_price > 0:
+            cur_size = _safe_float(active_trade.get("size"), 0.2)
+            ok_sync, sync_msg = sync_binance_open_position(active_trade["direction"], cur_size, cur_price)
+            if ok_sync:
+                status_text += "\n📌 已在幣安同步開立現有倉位"
+            else:
+                status_text += f"\n⚠️ 幣安同步開倉失敗: {sync_msg}"
 
     try:
         if cq_id:
