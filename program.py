@@ -75,6 +75,25 @@ def _append_pending_command(chat_id, text, update_id):
     _save_telegram_state(payload)
 
 
+def _append_pending_callback(chat_id, callback_data, callback_id, message_id, update_id):
+    payload = _load_telegram_state()
+    queue = payload.get("pending_commands")
+    if not isinstance(queue, list):
+        queue = []
+
+    queue.append(
+        {
+            "chat_id": chat_id,
+            "text": f"__callback__:{callback_data}:{callback_id}:{message_id}",
+            "update_id": int(update_id),
+            "ts": int(time.time()),
+        }
+    )
+    payload["pending_commands"] = queue[-50:]
+    payload["last_update_id"] = int(update_id)
+    _save_telegram_state(payload)
+
+
 def _set_restart_requested(update_id):
     payload = _load_telegram_state()
     payload["restart_requested"] = True
@@ -128,6 +147,24 @@ def poll_telegram_commands():
         chat_id = msg.get("chat", {}).get("id")
 
         if update_id is None:
+            continue
+
+        # 支援 inline button callback_query（轉發給 eth.py）
+        cq = u.get("callback_query")
+        if cq:
+            cq_data = cq.get("data", "")
+            cq_id = cq.get("id", "")
+            cq_msg = cq.get("message", {})
+            cq_msg_id = cq_msg.get("message_id")
+            cq_chat_id = cq_msg.get("chat", {}).get("id")
+
+            _append_pending_callback(
+                cq_chat_id,
+                cq_data,
+                cq_id,
+                cq_msg_id,
+                update_id,
+            )
             continue
 
         if not text:
