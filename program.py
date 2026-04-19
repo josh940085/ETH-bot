@@ -130,6 +130,30 @@ def poll_telegram_commands():
         if update_id is None:
             continue
 
+        # Handle callback_query (inline button presses, e.g. 一鍵跟單)
+        cq = u.get("callback_query")
+        if cq:
+            cq_id = cq.get("id")
+            cq_data = cq.get("data", "")
+            cq_from_id = cq.get("from", {}).get("id")
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                    data={"callback_query_id": cq_id},
+                    timeout=5,
+                )
+            except Exception:
+                pass
+            if cq_data == "copytrade_on":
+                _append_pending_command(cq_from_id, "📋 一鍵跟單", update_id)
+            elif cq_data == "copytrade_off":
+                _append_pending_command(cq_from_id, "/stopcopytrade", update_id)
+            else:
+                payload = _load_telegram_state()
+                payload["last_update_id"] = int(update_id)
+                _save_telegram_state(payload)
+            continue
+
         if not text:
             payload = _load_telegram_state()
             payload["last_update_id"] = int(update_id)

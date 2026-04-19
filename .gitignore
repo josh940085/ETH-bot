@@ -6,3 +6,4 @@ __pycache__/
 *.pkl
 *.jsonl
 .telegram_state.json
+copytrade_followers.json

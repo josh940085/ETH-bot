@@ -46,6 +46,7 @@ HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 TRANSLATION_CACHE = {}
 BOT_SOFT_RESTART_REQUESTED = False
 TELEGRAM_STATE_PATH = Path(__file__).resolve().parent / ".telegram_state.json"
+COPY_TRADE_STATE_PATH = Path(__file__).resolve().parent / "copytrade_followers.json"
 
 # ===== Environment variables / secrets =====
 def _load_local_env():
@@ -1174,6 +1175,16 @@ def manage_position_scaling(current_price, atr=None):
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
             )
+            notify_copy_traders(
+                f"📋 跟單訊號 | 補倉\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"現價: {current_price:.2f} | 加倉: +{int(delta*100)}%\n"
+                f"新均價: {new_entry:.2f}\n"
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%\n"
+                f"TP: {tp_text} | SL: {sl_text}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"請補倉至 {int(new_size*100)}%"
+            )
             refresh_position_panel_from_active_trade()
             return
 
@@ -1193,6 +1204,15 @@ def manage_position_scaling(current_price, atr=None):
                 f"進場均價: {entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
+            )
+            notify_copy_traders(
+                f"📋 跟單訊號 | 減倉\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"現價: {current_price:.2f} | 減倉: -{int(delta*100)}%\n"
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%\n"
+                f"TP: {tp_text} | SL: {sl_text}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"請減倉至 {int(new_size*100)}%"
             )
             refresh_position_panel_from_active_trade()
 
@@ -1251,6 +1271,14 @@ def maybe_decay_take_profit(current_price):
             f"持倉: {hours:.1f}h | 現價: {current_price:.2f}\n"
             f"TP: {old_tp:.2f} → {tp:.2f}",
             priority=True,
+        )
+        notify_copy_traders(
+            f"📋 跟單訊號 | 止盈下修\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"持倉: {hours:.1f}h | 現價: {current_price:.2f}\n"
+            f"TP: {old_tp:.2f} → {tp:.2f}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"請將止盈調整至 {tp:.2f}"
         )
         refresh_position_panel_from_active_trade()
 
@@ -1382,6 +1410,74 @@ active_trade = {
     "open_ts": 0.0,
     "tp_decay_count": 0,
 }
+
+# ===== 跟單（Copy Trade）管理 =====
+
+def load_copy_traders():
+    """載入跟單者列表。"""
+    try:
+        if not COPY_TRADE_STATE_PATH.exists():
+            return []
+        data = json.loads(COPY_TRADE_STATE_PATH.read_text(encoding="utf-8"))
+        followers = data.get("followers", []) if isinstance(data, dict) else []
+        return [str(f) for f in followers]
+    except Exception:
+        return []
+
+
+def save_copy_traders(followers):
+    """儲存跟單者列表。"""
+    try:
+        COPY_TRADE_STATE_PATH.write_text(
+            json.dumps({"followers": [str(f) for f in followers]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"⚠️ 跟單列表儲存失敗: {e}")
+
+
+def add_copy_trader(chat_id):
+    """將 chat_id 加入跟單列表，回傳 True 表示新增成功。"""
+    followers = load_copy_traders()
+    cid = str(chat_id)
+    if cid not in followers:
+        followers.append(cid)
+        save_copy_traders(followers)
+        return True
+    return False
+
+
+def remove_copy_trader(chat_id):
+    """從跟單列表移除 chat_id，回傳 True 表示移除成功。"""
+    followers = load_copy_traders()
+    cid = str(chat_id)
+    new_followers = [f for f in followers if f != cid]
+    if len(new_followers) < len(followers):
+        save_copy_traders(new_followers)
+        return True
+    return False
+
+
+def notify_copy_traders(message):
+    """發送跟單通知給所有跟單者（排除主帳號避免重複）。"""
+    if not TELEGRAM_TOKEN:
+        return
+    followers = load_copy_traders()
+    if not followers:
+        return
+    main_cid = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else ""
+    for cid in followers:
+        if main_cid and cid == main_cid:
+            continue
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                data={"chat_id": cid, "text": message},
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"⚠️ 跟單通知發送失敗 (chat_id={cid}): {e}")
+
 
 # =============================
 # KLINE CACHE（避免打爆API）
@@ -1779,7 +1875,10 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
         if is_private:
             # 私聊：使用 Web App 按鈕（底部按鈕）
             keyboard = {
-                "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
+                "keyboard": [
+                    [{"text": "📊 開啟倉位面板", "web_app": {"url": url}}],
+                    [{"text": "📋 一鍵跟單"}],
+                ],
                 "resize_keyboard": True,
                 "persistent": True,
             }
@@ -1788,7 +1887,8 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
             # 群組/頻道：使用 inline 按鈕（URL）
             keyboard = {
                 "inline_keyboard": [[
-                    {"text": "📊 開啟倉位面板", "url": url}
+                    {"text": "📊 開啟倉位面板", "url": url},
+                    {"text": "📋 一鍵跟單", "callback_data": "copytrade_on"},
                 ]]
             }
             text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
@@ -2037,6 +2137,38 @@ Volume Spike: {context.get('volume_spike')}
         except Exception as e:
             return f"📰 新聞讀取失敗: {e}"
 
+    if text.strip() == "📋 一鍵跟單" or text.startswith("/copytrade"):
+        cid = context.get("chat_id") if context else None
+        if not cid:
+            return "⚠️ 無法取得您的聊天ID，請稍後再試"
+        if not active_trade.get("open"):
+            return "⚠️ 目前沒有開倉，請等待開倉訊號後再跟單"
+        added = add_copy_trader(cid)
+        if added:
+            direction_zh = "做多 🟢" if active_trade.get("direction") == "long" else "做空 🔴"
+            entry_v = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+            tp_v = _safe_float(active_trade.get("tp"), 0.0)
+            sl_v = _safe_float(active_trade.get("sl"), 0.0)
+            size_v = _safe_float(active_trade.get("size"), 0.0)
+            return (
+                f"✅ 已開啟跟單模式\n"
+                f"📋 當前倉位:\n"
+                f"方向: {direction_zh}\n"
+                f"進場均價: {entry_v:.2f}\n"
+                f"止盈: {tp_v:.2f} | 止損: {sl_v:.2f}\n"
+                f"倉位: {int(size_v * 100)}%\n"
+                f"後續倉位變動將自動推送\n"
+                f"輸入 /stopcopytrade 可停止跟單"
+            )
+        return "ℹ️ 您已在跟單列表中，無需重複操作"
+
+    if text.startswith("/stopcopytrade"):
+        cid = context.get("chat_id") if context else None
+        if not cid:
+            return "⚠️ 無法取得您的聊天ID"
+        removed = remove_copy_trader(cid)
+        return "✅ 已停止跟單" if removed else "ℹ️ 您目前未在跟單列表中"
+
     return None
 
 load_model()
@@ -2144,8 +2276,34 @@ def run_bot():
                     last_update_id = u.get("update_id")
                     if last_update_id is not None:
                         save_last_update_id(last_update_id)
-                    text = u.get("message", {}).get("text", "")
-                    chat_id = u.get("message", {}).get("chat", {}).get("id")
+                    # Handle callback_query (inline button presses)
+                    cq = u.get("callback_query")
+                    if cq:
+                        cq_id = cq.get("id")
+                        cq_data = cq.get("data", "")
+                        cq_from_id = cq.get("from", {}).get("id")
+                        if not cq_from_id:
+                            continue
+                        cq_from_id = str(cq_from_id)
+                        try:
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                                data={"callback_query_id": cq_id},
+                                timeout=5,
+                            )
+                        except Exception:
+                            pass
+                        if cq_data == "copytrade_on":
+                            text = "📋 一鍵跟單"
+                            chat_id = cq_from_id
+                        elif cq_data == "copytrade_off":
+                            text = "/stopcopytrade"
+                            chat_id = cq_from_id
+                        else:
+                            continue
+                    else:
+                        text = u.get("message", {}).get("text", "")
+                        chat_id = u.get("message", {}).get("chat", {}).get("id")
 
                 try:
                     if not text:
@@ -2161,6 +2319,7 @@ def run_bot():
                         "triangle": triangle if 'triangle' in locals() else None,
                         "macro": macro_bias if 'macro_bias' in locals() else None,
                         "volume_spike": volume_spike if 'volume_spike' in locals() else None,
+                        "chat_id": chat_id,
                     }
 
                     reply = handle_ai_command(text, context)
@@ -2285,6 +2444,7 @@ def run_bot():
                     if sl_hit:
                         performance["loss"] += 1
                         performance["total"] += 1
+                        _close_direction = active_trade["direction"]
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2297,15 +2457,24 @@ def run_bot():
                         losing_streak += 1
                         print("❌ SL 命中")
                         send_telegram(
-                            f"❌ SL 命中（{active_trade['direction']}）\n"
+                            f"❌ SL 命中（{_close_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易",
                             priority=True
+                        )
+                        notify_copy_traders(
+                            f"📋 跟單訊號 | 止損平倉\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"方向: {_close_direction}\n"
+                            f"平倉價: {current:.2f}\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"請執行止損平倉"
                         )
 
                     elif tp_hit:
                         performance["win"] += 1
                         performance["total"] += 1
+                        _close_direction = active_trade["direction"]
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2318,10 +2487,18 @@ def run_bot():
                         losing_streak = 0
                         print("✅ TP 命中")
                         send_telegram(
-                            f"✅ TP 命中（{active_trade['direction']}）\n"
+                            f"✅ TP 命中（{_close_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易",
                             priority=True
+                        )
+                        notify_copy_traders(
+                            f"📋 跟單訊號 | 止盈平倉\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"方向: {_close_direction}\n"
+                            f"平倉價: {current:.2f}\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"請執行止盈平倉"
                         )
 
                 elif active_trade["direction"] == "short":
@@ -2332,6 +2509,7 @@ def run_bot():
                     if sl_hit:
                         performance["loss"] += 1
                         performance["total"] += 1
+                        _close_direction = active_trade["direction"]
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2344,15 +2522,24 @@ def run_bot():
                         losing_streak += 1
                         print("❌ SL 命中")
                         send_telegram(
-                            f"❌ SL 命中（{active_trade['direction']}）\n"
+                            f"❌ SL 命中（{_close_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易",
                             priority=True
+                        )
+                        notify_copy_traders(
+                            f"📋 跟單訊號 | 止損平倉\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"方向: {_close_direction}\n"
+                            f"平倉價: {current:.2f}\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"請執行止損平倉"
                         )
 
                     elif tp_hit:
                         performance["win"] += 1
                         performance["total"] += 1
+                        _close_direction = active_trade["direction"]
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2365,10 +2552,18 @@ def run_bot():
                         losing_streak = 0
                         print("✅ TP 命中")
                         send_telegram(
-                            f"✅ TP 命中（{active_trade['direction']}）\n"
+                            f"✅ TP 命中（{_close_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易",
                             priority=True
+                        )
+                        notify_copy_traders(
+                            f"📋 跟單訊號 | 止盈平倉\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"方向: {_close_direction}\n"
+                            f"平倉價: {current:.2f}\n"
+                            f"━━━━━━━━━━━━━━\n"
+                            f"請執行止盈平倉"
                         )
 
             # 命中止盈止損前提下，持倉中允許補倉/減倉
@@ -3045,6 +3240,18 @@ def run_bot():
                     entry_display=entry_display_str,
                     tp_display=tp_display_str,
                     sl_display=sl_display_str,
+                )
+                dir_zh = "做多 🟢" if direction == "long" else "做空 🔴"
+                notify_copy_traders(
+                    f"📋 跟單訊號 | 開倉\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"方向: {dir_zh}\n"
+                    f"進場價: {entry_display_str}\n"
+                    f"止盈: {tp_display_str}\n"
+                    f"止損: {sl_display_str}\n"
+                    f"倉位: {int(active_trade['size'] * 100)}%\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"請依以上參數進場"
                 )
 
             # ===== 記錄（未來價格）=====
