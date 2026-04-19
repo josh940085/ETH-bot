@@ -2,6 +2,7 @@
 import requests
 import datetime
 import time
+import math
 import pandas as pd
 import numpy as np
 import threading
@@ -213,6 +214,13 @@ def _round_down_step(value, step):
     return max(0.0, (int(value / step)) * step)
 
 
+def _round_up_step(value, step):
+    if step <= 0:
+        return value
+    # 避免浮點誤差導致多跳一格
+    return max(0.0, math.ceil((value - 1e-12) / step) * step)
+
+
 def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=False):
     ratio = max(0.0, min(float(size_ratio), 1.0))
     px = max(0.0, _safe_float(current_price, 0.0))
@@ -223,7 +231,10 @@ def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional
     if enforce_min_notional and notional > 0:
         notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
     raw_qty = notional / px
-    qty = _round_down_step(raw_qty, BINANCE_QTY_STEP)
+    if enforce_min_notional:
+        qty = _round_up_step(raw_qty, BINANCE_QTY_STEP)
+    else:
+        qty = _round_down_step(raw_qty, BINANCE_QTY_STEP)
     if qty < BINANCE_MIN_QTY:
         return 0.0
     return qty
@@ -2109,8 +2120,9 @@ def refresh_position_panel_from_active_trade():
 
 
 _last_position_push_ts = 0
-_POSITION_PUSH_MIN_INTERVAL = 15  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
+_POSITION_PUSH_MIN_INTERVAL = 5  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
 _position_push_lock = Lock()
+_position_push_git_lock = Lock()
 
 
 def write_position_json():
@@ -2158,31 +2170,55 @@ def push_position_json():
     rel_path = "docs/position.json"
 
     def _push():
-        try:
-            subprocess.run(
-                ["git", "add", rel_path],
-                cwd=repo_dir, timeout=10, check=False,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            )
-            result = subprocess.run(
-                ["git", "commit", "-m", "chore: update position data"],
-                cwd=repo_dir, timeout=10, check=False,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        def _run_git(args, timeout=30):
+            return subprocess.run(
+                ["git"] + args,
+                cwd=repo_dir,
+                timeout=timeout,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
             )
-            if result.returncode == 0:
-                push_result = subprocess.run(
-                    ["git", "push"],
-                    cwd=repo_dir, timeout=30, check=False,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True,
-                )
-                if push_result.returncode != 0:
-                    print(f"⚠️ 推送 position.json 失敗: {(push_result.stdout or '').strip()}")
-            else:
+
+        try:
+            with _position_push_git_lock:
+                _run_git(["add", rel_path], timeout=10)
+
+                result = _run_git(["commit", "-m", "chore: update position data"], timeout=10)
                 commit_out = (result.stdout or "").strip()
-                if "nothing to commit" not in commit_out:
+
+                if result.returncode != 0 and "nothing to commit" not in commit_out:
                     print(f"⚠️ 提交 position.json 失敗: {commit_out}")
+                    return
+
+                push_result = _run_git(["push"], timeout=30)
+                if push_result.returncode == 0:
+                    return
+
+                push_out = (push_result.stdout or "").strip()
+                non_ff = (
+                    "non-fast-forward" in push_out
+                    or "fetch first" in push_out
+                    or "tip of your current branch is behind" in push_out
+                )
+
+                if not non_ff:
+                    print(f"⚠️ 推送 position.json 失敗: {push_out}")
+                    return
+
+                # 遠端比本地新：先 rebase 同步後再重推
+                branch_res = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
+                branch = (branch_res.stdout or "").strip() or "HEAD"
+
+                pull_result = _run_git(["pull", "--rebase", "--autostash", "origin", branch], timeout=45)
+                if pull_result.returncode != 0:
+                    print(f"⚠️ 自動同步遠端失敗: {(pull_result.stdout or '').strip()}")
+                    return
+
+                retry_push = _run_git(["push"], timeout=30)
+                if retry_push.returncode != 0:
+                    print(f"⚠️ 推送 position.json 失敗(重試後): {(retry_push.stdout or '').strip()}")
         except Exception as e:
             print(f"⚠️ 推送 position.json 失敗: {e}")
 

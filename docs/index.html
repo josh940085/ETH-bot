@@ -218,8 +218,8 @@
   }
 
   // ── 取得即時倉位資料（position.json）──
-  // 以 URL 物件解析，避免 /ETH-bot 與 /ETH-bot/ 差異導致抓到錯誤路徑 /position.json
-  const POSITION_JSON_URL = new URL("position.json", location.href).toString();
+  // GitHub Pages 上的 position.json 總是在 /ETH-bot/docs/position.json
+  const POSITION_JSON_URL = "https://raw.githubusercontent.com/josh940085/ETH-bot/copilot/fix-mini-app-web-app-issue/docs/position.json";
 
   async function fetchPositionData() {
     try {
