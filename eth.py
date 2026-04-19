@@ -119,10 +119,27 @@ try:
     BINANCE_LEVERAGE = int(float(_get_env_with_alias("BINANCE_LEVERAGE", ["COPY_TRADE_LEVERAGE"], "10")))
 except Exception:
     BINANCE_LEVERAGE = 10
+# === USDT 名目模式（傳統） ===
 try:
     BINANCE_ORDER_NOTIONAL_USDT = max(10.0, float(_get_env_with_alias("BINANCE_ORDER_NOTIONAL_USDT", ["COPY_TRADE_USDT"], "150")))
 except Exception:
     BINANCE_ORDER_NOTIONAL_USDT = 150.0
+
+# === ETH 數量模式（新） ===
+# 若設定 COPY_TRADE_ETH_QTY，100% 倉位就是該數量的 ETH
+try:
+    eth_qty_str = os.getenv("COPY_TRADE_ETH_QTY", "").strip()
+    BINANCE_ORDER_ETH_QTY = float(eth_qty_str) if eth_qty_str else 0.0
+except Exception:
+    BINANCE_ORDER_ETH_QTY = 0.0
+
+# ETH 模式下的最小開倉數量（例子：0.009）
+try:
+    min_eth_str = os.getenv("COPY_TRADE_MIN_ETH_QTY", "").strip()
+    BINANCE_MIN_ETH_QTY = float(min_eth_str) if min_eth_str else 0.001
+except Exception:
+    BINANCE_MIN_ETH_QTY = 0.001
+
 try:
     BINANCE_MIN_NOTIONAL_USDT = max(5.0, float(os.getenv("BINANCE_MIN_NOTIONAL_USDT", "20")))
 except Exception:
@@ -222,20 +239,33 @@ def _round_up_step(value, step):
 
 
 def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=False):
+    """根據倉位比例計算下單數量。支持 USDT 名目 或 ETH 顆數 模式。"""
     ratio = max(0.0, min(float(size_ratio), 1.0))
     px = max(0.0, _safe_float(current_price, 0.0))
     if ratio <= 0 or px <= 0:
         return 0.0
 
-    notional = BINANCE_ORDER_NOTIONAL_USDT * ratio
-    if enforce_min_notional and notional > 0:
-        notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
-    raw_qty = notional / px
+    # 判斷模式：若設定 ETH 顆數，使用 ETH 模式；否則用 USDT 名目
+    if BINANCE_ORDER_ETH_QTY > 0:
+        # ETH 顆數模式：100% = BINANCE_ORDER_ETH_QTY
+        raw_qty = BINANCE_ORDER_ETH_QTY * ratio
+        # ETH 模式下的最小患
+        min_qty = BINANCE_MIN_ETH_QTY
+    else:
+        # USDT 名目模式（傳統）
+        notional = BINANCE_ORDER_NOTIONAL_USDT * ratio
+        if enforce_min_notional and notional > 0:
+            notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
+        raw_qty = notional / px
+        # USDT 模式下的最小患
+        min_qty = BINANCE_MIN_QTY
+
     if enforce_min_notional:
         qty = _round_up_step(raw_qty, BINANCE_QTY_STEP)
     else:
         qty = _round_down_step(raw_qty, BINANCE_QTY_STEP)
-    if qty < BINANCE_MIN_QTY:
+    
+    if qty < min_qty:
         return 0.0
     return qty
 
@@ -259,7 +289,8 @@ def _binance_set_leverage_once():
         return False
 
 
-def _binance_place_market_order(side, qty, reduce_only=False):
+def _binance_place_limit_order(side, qty, price, reduce_only=False):
+    """在 Binance 下限價單（LIMIT）"""
     if qty <= 0:
         return False, "qty<=0"
     if not _is_binance_copy_ready():
@@ -270,8 +301,10 @@ def _binance_place_market_order(side, qty, reduce_only=False):
         params = {
             "symbol": BINANCE_SYMBOL,
             "side": side,
-            "type": "MARKET",
+            "type": "LIMIT",
             "quantity": f"{qty:.6f}",
+            "price": f"{price:.2f}",
+            "timeInForce": "GTC",
         }
         if reduce_only:
             params["reduceOnly"] = "true"
@@ -289,11 +322,24 @@ def sync_binance_open_position(direction, size_ratio, current_price):
     qty = _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=True)
     if qty <= 0:
         return False, "quantity_too_small"
+    
+    # 檢查實際名目是否達到最小值（避免 -4164）
+    notional = qty * current_price
+    if notional < BINANCE_MIN_NOTIONAL_USDT:
+        return False, f"notional_too_small_{notional:.2f}<{BINANCE_MIN_NOTIONAL_USDT}"
 
     side = "BUY" if direction == "long" else "SELL"
-    ok, data = _binance_place_market_order(side, qty, reduce_only=False)
+    ok, data = _binance_place_limit_order(side, qty, current_price, reduce_only=False)
     if ok:
         active_trade["binance_qty"] = float(qty)
+        # 從 Binance 返回的成交數據中提取實際成交價
+        try:
+            avg_price = float(data.get("avgPrice", current_price))
+            if avg_price > 0:
+                active_trade["entry"] = avg_price
+                active_trade["avg_entry"] = avg_price
+        except (ValueError, TypeError, AttributeError):
+            pass  # 若無法提取，保持原值
         return True, data
     return False, data
 
@@ -306,6 +352,11 @@ def sync_binance_adjust_position(direction, action, delta_ratio, current_price):
     qty = _binance_qty_from_size_ratio(delta_ratio, current_price, enforce_min_notional=enforce_min_notional)
     if qty <= 0:
         return False, "quantity_too_small"
+
+    # 檢查實際名目是否達到最小值（避免 -4164）
+    notional = qty * current_price
+    if enforce_min_notional and notional < BINANCE_MIN_NOTIONAL_USDT:
+        return False, f"notional_too_small_{notional:.2f}<{BINANCE_MIN_NOTIONAL_USDT}"
 
     tracked_qty = max(0.0, _safe_float(active_trade.get("binance_qty"), 0.0))
     if action == "reduce" and tracked_qty > 0:
@@ -321,7 +372,7 @@ def sync_binance_adjust_position(direction, action, delta_ratio, current_price):
         side = "SELL" if direction == "long" else "BUY"
         reduce_only = True
 
-    ok, data = _binance_place_market_order(side, qty, reduce_only=reduce_only)
+    ok, data = _binance_place_limit_order(side, qty, current_price, reduce_only=reduce_only)
     if ok:
         if action == "add":
             active_trade["binance_qty"] = tracked_qty + qty
@@ -347,7 +398,7 @@ def sync_binance_close_position(current_price, reason="TP/SL"):
         return False, "close_qty_too_small"
 
     side = "SELL" if direction == "long" else "BUY"
-    ok, data = _binance_place_market_order(side, qty, reduce_only=True)
+    ok, data = _binance_place_limit_order(side, qty, current_price, reduce_only=True)
     if ok:
         active_trade["binance_qty"] = 0.0
         return True, data
@@ -2129,7 +2180,8 @@ def write_position_json():
     """將目前 active_trade 狀態寫入 docs/position.json，供 mini app / web app 即時讀取。"""
     try:
         is_open = bool(active_trade.get("open", False))
-        entry = _safe_float(active_trade.get("avg_entry") or active_trade.get("entry"), 0.0)
+        # 始終用原始 entry，不用 avg_entry（避免補倉改變進場價）
+        entry = _safe_float(active_trade.get("entry"), 0.0)
         tp = _safe_float(active_trade.get("tp"), 0.0)
         sl = _safe_float(active_trade.get("sl"), 0.0)
         size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
@@ -3623,6 +3675,19 @@ def run_bot():
 
                 print("📤 發送 Telegram")
                 send_telegram(msg, priority=True, pin=True)
+                # 若設定私聊，同時發送開倉通知到私聊
+                if TELEGRAM_PRIVATE_CHAT_ID:
+                    try:
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json={
+                                "chat_id": TELEGRAM_PRIVATE_CHAT_ID,
+                                "text": f"🔔 開倉通知 (私聊)\n\n{msg}",
+                            },
+                            timeout=5,
+                        )
+                    except Exception as e:
+                        print(f"⚠️ 私聊開倉通知發送失敗: {e}")
                 last_signal_cache = msg
                 last_trade_time = now_ts
                 last_trade_signal = final
@@ -3645,6 +3710,9 @@ def run_bot():
                 if not ok_open:
                     send_telegram(f"⚠️ Binance 開倉失敗，已取消本次交易: {open_msg}", priority=True)
                     continue
+                
+                # 若開倉成功，active_trade["entry"] 已被更新為實際成交價
+                # 需要同步更新顯示文本，確保通知和 mini app 用相同的進場價
 
                 active_trade["size"] = open_size_ratio
                 active_trade["max_size"] = 1.0
@@ -3655,13 +3723,16 @@ def run_bot():
                 active_trade["open_ts"] = time.time()
                 active_trade["tp_decay_count"] = 0
                 active_trade["open"] = True
+                # 用實際成交價（已更新的 entry）重新生成顯示字符串
+                actual_entry = active_trade["entry"]
+                actual_entry_display = f"{actual_entry:.2f}"
                 send_position_keyboard(
                     direction,
-                    float(entry),
+                    actual_entry,
                     tp,
                     sl,
                     active_trade["size"],
-                    entry_display=entry_display_str,
+                    entry_display=actual_entry_display,
                     tp_display=tp_display_str,
                     sl_display=sl_display_str,
                 )
