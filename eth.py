@@ -1177,8 +1177,12 @@ def manage_position_scaling(current_price, atr=None):
             )
             refresh_position_panel_from_active_trade()
             return
-
     # 減倉：有利方向浮盈時鎖定部分利潤（保留底倉）
+                send_follow_action_alert("add", direction, current_price, delta, new_size, new_entry, tp_text, sl_text)
+                refresh_position_panel_from_active_trade()
+                return
+
+            # 減倉：有利方向浮盈時鎖定部分利潤（保留底倉）
     if reduce_trigger and size > min_size + 1e-9:
         delta = min(reduce_step, size - min_size)
         if delta > 0:
@@ -1196,6 +1200,7 @@ def manage_position_scaling(current_price, atr=None):
                 priority=True,
             )
             refresh_position_panel_from_active_trade()
+                send_follow_action_alert("reduce", direction, current_price, delta, new_size, entry, tp_text, sl_text)
 
 
 def maybe_decay_take_profit(current_price):
@@ -1387,6 +1392,10 @@ active_trade = {
 # =============================
 # KLINE CACHE（避免打爆API）
 # =============================
+
+# ===== 跟單模式 =====
+FOLLOW_MODE_ENABLED = False
+_FOLLOW_BUTTON_MSG_ID = None  # 跟單按鈕訊息 ID（用於更新按鈕文字）
 KLINE_CACHE = {}
 KLINE_TTL = {
     "4h": 60*60,
@@ -1962,6 +1971,120 @@ def clear_telegram_pin():
 # ===== AI分析（OpenClaw / OpenAI） =====
 OPENAI_API_KEY = _get_required_env("OPENAI_API_KEY", "", mask=True)
 
+
+# ===== 跟單模式輔助函數 =====
+def toggle_follow_mode():
+    """切換跟單模式開/關，回傳切換後狀態。"""
+    global FOLLOW_MODE_ENABLED
+    FOLLOW_MODE_ENABLED = not FOLLOW_MODE_ENABLED
+    return FOLLOW_MODE_ENABLED
+
+
+def send_follow_button(is_update=False):
+    """發送或更新跟單切換按鈕（inline keyboard）。"""
+    global _FOLLOW_BUTTON_MSG_ID
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    btn_text = "✅ 跟單中（點擊關閉）" if FOLLOW_MODE_ENABLED else "📈 開啟跟單（自動補倉/減倉同步）"
+
+    try:
+        if is_update and _FOLLOW_BUTTON_MSG_ID:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageReplyMarkup",
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "message_id": _FOLLOW_BUTTON_MSG_ID,
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            {"text": btn_text, "callback_data": "toggle_follow"}
+                        ]]
+                    },
+                },
+                timeout=5,
+            )
+        else:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "text": "👥 跟單模式：開啟後，每次補倉/減倉都會收到同步提醒",
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            {"text": btn_text, "callback_data": "toggle_follow"}
+                        ]]
+                    },
+                },
+                timeout=5,
+            )
+            result = resp.json()
+            if result.get("ok"):
+                _FOLLOW_BUTTON_MSG_ID = result["result"]["message_id"]
+    except Exception as e:
+        print(f"⚠️ 跟單按鈕發送失敗: {e}")
+
+
+def send_follow_action_alert(action, direction, current_price, delta, new_size, entry, tp_text, sl_text):
+    """跟單模式下，補倉/減倉時推送跟單提醒訊息。"""
+    if not FOLLOW_MODE_ENABLED:
+        return
+
+    action_emoji = "➕" if action == "add" else "➖"
+    action_zh   = "補倉" if action == "add" else "減倉"
+    dir_zh      = "做多" if direction == "long" else "做空"
+
+    send_telegram(
+        f"👥 跟單提醒 | {action_emoji} {action_zh}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"方向: {dir_zh} | 現價: {current_price:.2f}\n"
+        f"操作: {action_zh} {int(delta * 100)}%\n"
+        f"新倉位: {int(new_size * 100)}% | 均價: {entry:.2f}\n"
+        f"TP: {tp_text} | SL: {sl_text}\n"
+        f"━━━━━━━━━━━━━━",
+        priority=True,
+    )
+
+
+def _process_follow_callback(cq_data, cq_id, cq_msg_id, chat_id):
+    """處理 inline button 的 callback_query（跟單切換）。"""
+    if cq_data != "toggle_follow":
+        return
+
+    is_enabled = toggle_follow_mode()
+    status_text = "✅ 跟單模式已開啟！將同步推送補倉/減倉提醒" if is_enabled else "⏹️ 跟單模式已關閉"
+    btn_text    = "✅ 跟單中（點擊關閉）" if is_enabled else "📈 開啟跟單（自動補倉/減倉同步）"
+
+    try:
+        if cq_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                data={"callback_query_id": cq_id, "text": status_text, "show_alert": True},
+                timeout=5,
+            )
+
+        msg_id = None
+        try:
+            msg_id = int(cq_msg_id) if cq_msg_id else _FOLLOW_BUTTON_MSG_ID
+        except (TypeError, ValueError):
+            msg_id = _FOLLOW_BUTTON_MSG_ID
+
+        if msg_id and chat_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageReplyMarkup",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            {"text": btn_text, "callback_data": "toggle_follow"}
+                        ]]
+                    },
+                },
+                timeout=5,
+            )
+    except Exception as e:
+        print(f"⚠️ 跟單回調處理失敗: {e}")
+
 def ask_ai_analysis(prompt):
     if not OPENAI_API_KEY:
         return "AI分析失敗: 未設定 OPENAI_API_KEY"
@@ -2113,6 +2236,15 @@ Volume Spike: {context.get('volume_spike')}
         except Exception as e:
             return f"📰 新聞讀取失敗: {e}"
 
+    if text.startswith("/follow"):
+        is_enabled = toggle_follow_mode()
+        if is_enabled:
+            send_follow_button(is_update=False)
+            return "✅ 跟單模式已開啟！每次補倉/減倉都會推送同步提醒。"
+        else:
+            send_follow_button(is_update=True)
+            return "⏹️ 跟單模式已關閉。"
+
     return None
 
 load_model()
@@ -2220,8 +2352,38 @@ def run_bot():
                     last_update_id = u.get("update_id")
                     if last_update_id is not None:
                         save_last_update_id(last_update_id)
+
+                    # ===== 處理 inline 按鈕 callback_query（非 supervisor）=====
+                    cq = u.get("callback_query")
+                    if cq:
+                        try:
+                            _process_follow_callback(
+                                cq.get("data", ""),
+                                cq.get("id", ""),
+                                cq.get("message", {}).get("message_id"),
+                                cq.get("message", {}).get("chat", {}).get("id"),
+                            )
+                        except Exception:
+                            pass
+                        continue
+
                     text = u.get("message", {}).get("text", "")
                     chat_id = u.get("message", {}).get("chat", {}).get("id")
+
+                try:
+                    if not text:
+                        continue
+
+                    # ===== supervisor 模式下轉發的 callback 命令 =====
+                    if text.startswith("__callback__:"):
+                        parts = text.split(":", 3)
+                        if len(parts) == 4:
+                            _, cq_data, cq_id, cq_msg_id = parts
+                            try:
+                                _process_follow_callback(cq_data, cq_id, cq_msg_id, chat_id)
+                            except Exception:
+                                pass
+                        continue
 
                 try:
                     if not text:
