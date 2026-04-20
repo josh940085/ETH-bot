@@ -367,6 +367,82 @@ def _binance_place_limit_order(side, qty, price, reduce_only=False, position_sid
         return False, str(e)
 
 
+def _binance_place_stop_market_close(direction, stop_price):
+    """掛 Binance 原生止損單（STOP_MARKET + closePosition）。"""
+    px = _safe_float(stop_price, 0.0)
+    if px <= 0:
+        return False, "stop_price_invalid", None
+    if not _is_binance_copy_ready():
+        return False, "binance_copy_not_ready", None
+
+    try:
+        _binance_set_leverage_once()
+        side = "SELL" if direction == "long" else "BUY"
+        position_side = "LONG" if direction == "long" else "SHORT"
+        params = {
+            "symbol": BINANCE_SYMBOL,
+            "side": side,
+            "type": "STOP_MARKET",
+            "stopPrice": f"{px:.2f}",
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "priceProtect": "TRUE",
+        }
+        params = _binance_finalize_order_params(params, position_side=position_side, reduce_only=False)
+        data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
+        return True, data, data.get("orderId")
+    except Exception as e:
+        return False, str(e), None
+
+
+def _binance_cancel_order(order_id):
+    if not order_id:
+        return True, "no_order_id"
+    try:
+        data = _binance_request(
+            "DELETE",
+            "/fapi/v1/order",
+            {"symbol": BINANCE_SYMBOL, "orderId": int(order_id)},
+            signed=True,
+        )
+        return True, data
+    except Exception as e:
+        msg = str(e)
+        # 已成交/已取消時，視為可接受
+        if "-2011" in msg or "Unknown order" in msg:
+            return True, msg
+        return False, msg
+
+
+def _clear_native_stop_tracking():
+    active_trade["binance_sl_order_id"] = None
+    active_trade["binance_sl_price"] = 0.0
+
+
+def _cancel_native_stop_loss_order():
+    order_id = active_trade.get("binance_sl_order_id")
+    if not order_id:
+        _clear_native_stop_tracking()
+        return True, "no_native_stop"
+
+    ok, data = _binance_cancel_order(order_id)
+    _clear_native_stop_tracking()
+    return ok, data
+
+
+def sync_binance_set_native_stop_loss(direction, stop_price):
+    """同步原生止損單：先撤舊單，再掛新 STOP_MARKET。"""
+    if not _is_binance_copy_ready():
+        return True, "skip_not_enabled"
+
+    _cancel_native_stop_loss_order()
+    ok, data, order_id = _binance_place_stop_market_close(direction, stop_price)
+    if ok:
+        active_trade["binance_sl_order_id"] = order_id
+        active_trade["binance_sl_price"] = _safe_float(stop_price, 0.0)
+    return ok, data
+
+
 def sync_binance_open_position(direction, size_ratio, current_price):
     if not _is_binance_copy_ready():
         return True, "skip_not_enabled"
@@ -453,12 +529,16 @@ def sync_binance_close_position(current_price, reason="TP/SL"):
     if qty <= 0:
         return False, "close_qty_too_small"
 
+    # 止盈/手動平倉前先撤掉原生止損單，避免殘單。
+    _cancel_native_stop_loss_order()
+
     side = "SELL" if direction == "long" else "BUY"
     position_side = "LONG" if direction == "long" else "SHORT"
     # 平倉用市價單（limit+reduceOnly 會觸發 -4061）
     ok, data = _binance_place_market_order(side, qty, reduce_only=True, position_side=position_side)
     if ok:
         active_trade["binance_qty"] = 0.0
+        _clear_native_stop_tracking()
         return True, data
 
     send_telegram(f"⚠️ Binance 平倉失敗（{reason}）：{data}", priority=True)
@@ -1775,6 +1855,8 @@ active_trade = {
     "open_ts": 0.0,
     "tp_decay_count": 0,
     "binance_qty": 0.0,
+    "binance_sl_order_id": None,
+    "binance_sl_price": 0.0,
 }
 
 # =============================
@@ -3063,10 +3145,15 @@ def run_bot():
 
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
-                        ok_close, close_msg = sync_binance_close_position(current, reason="SL")
-                        if not ok_close:
-                            print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
-                            continue
+                        # 已掛原生止損時，避免再重複送市價平倉。
+                        if active_trade.get("binance_sl_order_id"):
+                            _clear_native_stop_tracking()
+                            active_trade["binance_qty"] = 0.0
+                        else:
+                            ok_close, close_msg = sync_binance_close_position(current, reason="SL")
+                            if not ok_close:
+                                print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
+                                continue
                         performance["loss"] += 1
                         performance["total"] += 1
                         active_trade["open"] = False
@@ -3118,10 +3205,15 @@ def run_bot():
 
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
-                        ok_close, close_msg = sync_binance_close_position(current, reason="SL")
-                        if not ok_close:
-                            print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
-                            continue
+                        # 已掛原生止損時，避免再重複送市價平倉。
+                        if active_trade.get("binance_sl_order_id"):
+                            _clear_native_stop_tracking()
+                            active_trade["binance_qty"] = 0.0
+                        else:
+                            ok_close, close_msg = sync_binance_close_position(current, reason="SL")
+                            if not ok_close:
+                                print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
+                                continue
                         performance["loss"] += 1
                         performance["total"] += 1
                         active_trade["open"] = False
@@ -3854,6 +3946,12 @@ def run_bot():
                 active_trade["open_ts"] = time.time()
                 active_trade["tp_decay_count"] = 0
                 active_trade["open"] = True
+
+                # 止損改為 Binance 原生 STOP_MARKET；止盈維持 Bot 監控。
+                ok_native_sl, native_sl_msg = sync_binance_set_native_stop_loss(direction, sl)
+                if not ok_native_sl:
+                    send_telegram(f"⚠️ 原生止損單掛單失敗，暫回退 Bot 監控止損: {native_sl_msg}", priority=True)
+
                 # 用實際成交價（已更新的 entry）重新生成顯示字符串
                 actual_entry = active_trade["entry"]
                 actual_entry_display = f"{actual_entry:.2f}"
