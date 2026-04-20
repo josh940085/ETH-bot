@@ -100,6 +100,7 @@ _load_local_env()
 TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "")
 TELEGRAM_PRIVATE_CHAT_ID = _get_env_with_alias("TELEGRAM_PRIVATE_CHAT_ID", ["TELEGRAM_USER_CHAT_ID"], "")
+TELEGRAM_PRIVATE_CHAT_LOCK = str(os.getenv("TELEGRAM_PRIVATE_CHAT_LOCK", "0")).strip() == "1"
 if not TELEGRAM_PRIVATE_CHAT_ID:
     print("⚠️ 缺少環境變數: TELEGRAM_PRIVATE_CHAT_ID")
 # ===== Telegram =====
@@ -152,6 +153,8 @@ try:
     BINANCE_MIN_QTY = max(0.0001, float(os.getenv("BINANCE_MIN_QTY", "0.001")))
 except Exception:
     BINANCE_MIN_QTY = 0.001
+
+_BINANCE_POSITION_MODE_CACHE = {"dual": None, "ts": 0.0}
 
 
 def _is_binance_copy_ready():
@@ -286,7 +289,38 @@ def _binance_set_leverage_once():
         return False
 
 
-def _binance_place_market_order(side, qty, reduce_only=False):
+def _binance_is_dual_side_mode(force=False):
+    """查詢帳戶是否為 Hedge Mode（dualSidePosition=true）。"""
+    now = time.time()
+    cached = _BINANCE_POSITION_MODE_CACHE.get("dual")
+    if (not force) and cached is not None and now - _BINANCE_POSITION_MODE_CACHE.get("ts", 0.0) < 300:
+        return bool(cached)
+
+    try:
+        data = _binance_request("GET", "/fapi/v1/positionSide/dual", {}, signed=True)
+        raw = data.get("dualSidePosition")
+        dual = bool(raw) if isinstance(raw, bool) else str(raw).strip().lower() == "true"
+        _BINANCE_POSITION_MODE_CACHE["dual"] = dual
+        _BINANCE_POSITION_MODE_CACHE["ts"] = now
+        return dual
+    except Exception as e:
+        print(f"⚠️ 讀取 Binance 倉位模式失敗: {e}")
+        if cached is not None:
+            return bool(cached)
+        return False
+
+
+def _binance_finalize_order_params(params, position_side=None, reduce_only=False):
+    """根據 Binance 倉位模式補齊參數，避免 -4061。"""
+    if _binance_is_dual_side_mode():
+        if position_side in ("LONG", "SHORT"):
+            params["positionSide"] = position_side
+    elif reduce_only:
+        params["reduceOnly"] = "true"
+    return params
+
+
+def _binance_place_market_order(side, qty, reduce_only=False, position_side=None):
     """在 Binance 下市價單（MARKET）。平倉/減倉使用此函式以避免 -4061。"""
     if qty <= 0:
         return False, "qty<=0"
@@ -301,8 +335,7 @@ def _binance_place_market_order(side, qty, reduce_only=False):
             "type": "MARKET",
             "quantity": f"{qty:.6f}",
         }
-        if reduce_only:
-            params["reduceOnly"] = "true"
+        params = _binance_finalize_order_params(params, position_side=position_side, reduce_only=reduce_only)
 
         data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
         return True, data
@@ -310,7 +343,7 @@ def _binance_place_market_order(side, qty, reduce_only=False):
         return False, str(e)
 
 
-def _binance_place_limit_order(side, qty, price, reduce_only=False):
+def _binance_place_limit_order(side, qty, price, reduce_only=False, position_side=None):
     """在 Binance 下限價單（LIMIT）。開倉/補倉使用此函式。"""
     if qty <= 0:
         return False, "qty<=0"
@@ -327,7 +360,7 @@ def _binance_place_limit_order(side, qty, price, reduce_only=False):
             "price": f"{price:.2f}",
             "timeInForce": "GTC",
         }
-        # 限價單不設 reduceOnly，避免 -4061 錯誤
+        params = _binance_finalize_order_params(params, position_side=position_side, reduce_only=reduce_only)
         data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
         return True, data
     except Exception as e:
@@ -348,7 +381,8 @@ def sync_binance_open_position(direction, size_ratio, current_price):
         return False, f"notional_too_small_{notional:.2f}<{BINANCE_MIN_NOTIONAL_USDT}"
 
     side = "BUY" if direction == "long" else "SELL"
-    ok, data = _binance_place_limit_order(side, qty, current_price, reduce_only=False)
+    position_side = "LONG" if direction == "long" else "SHORT"
+    ok, data = _binance_place_limit_order(side, qty, current_price, reduce_only=False, position_side=position_side)
     if ok:
         active_trade["binance_qty"] = float(qty)
         # 從 Binance 返回的成交數據中提取實際成交價
@@ -386,16 +420,18 @@ def sync_binance_adjust_position(direction, action, delta_ratio, current_price):
 
     if action == "add":
         side = "BUY" if direction == "long" else "SELL"
+        position_side = "LONG" if direction == "long" else "SHORT"
         # 補倉用限價單
-        ok, data = _binance_place_limit_order(side, qty, current_price)
+        ok, data = _binance_place_limit_order(side, qty, current_price, position_side=position_side)
         if ok:
             active_trade["binance_qty"] = tracked_qty + qty
             return True, data
         return False, data
     else:
         side = "SELL" if direction == "long" else "BUY"
+        position_side = "LONG" if direction == "long" else "SHORT"
         # 減倉用市價單（limit+reduceOnly 會觸發 -4061）
-        ok, data = _binance_place_market_order(side, qty, reduce_only=True)
+        ok, data = _binance_place_market_order(side, qty, reduce_only=True, position_side=position_side)
         if ok:
             active_trade["binance_qty"] = max(0.0, tracked_qty - qty)
             return True, data
@@ -418,8 +454,9 @@ def sync_binance_close_position(current_price, reason="TP/SL"):
         return False, "close_qty_too_small"
 
     side = "SELL" if direction == "long" else "BUY"
+    position_side = "LONG" if direction == "long" else "SHORT"
     # 平倉用市價單（limit+reduceOnly 會觸發 -4061）
-    ok, data = _binance_place_market_order(side, qty, reduce_only=True)
+    ok, data = _binance_place_market_order(side, qty, reduce_only=True, position_side=position_side)
     if ok:
         active_trade["binance_qty"] = 0.0
         return True, data
@@ -2155,36 +2192,31 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
         main_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
         private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
 
-        # 判斷主 chat 是否為私聊（正數 chat_id = 私聊；負數 = 群組/頻道）
-        try:
-            main_is_private = int(main_chat_id) > 0
-        except Exception:
-            main_is_private = False
-
         # 群組/頻道：使用 inline 按鈕（URL）
         group_keyboard = {
             "inline_keyboard": [[
-                {"text": "📊 開啟倉位面板", "url": url}
+                {"text": "📊 倉位面板", "url": url}
             ]]
         }
         group_text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
 
-        # 私聊：使用 Web App 鍵盤按鈕
+        # 私聊：使用底部 Web App 鍵盤（單一入口）
         private_keyboard = {
-            "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
+            "keyboard": [[{"text": "📊 倉位面板", "web_app": {"url": url}}]],
             "resize_keyboard": True,
             "persistent": True,
         }
-        private_text = "📊 倉位面板已更新，點擊底部按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊底部按鈕查看即時面板"
+        private_text = "📊 倉位面板已更新，請使用底部「倉位面板」查看最新數據" if is_update else "📊 倉位已建立，請使用底部「倉位面板」查看即時面板"
 
-        # 主 chat：正數（私聊）用 Web App 鍵盤，負數（群組）用 inline URL 按鈕
+        # 主 chat：群組用 inline；若主 chat 本身是私聊則用底部鍵盤
         if main_chat_id:
+            use_private_keyboard = _is_private_chat(main_chat_id)
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                 json={
                     "chat_id": main_chat_id,
-                    "text": private_text if main_is_private else group_text,
-                    "reply_markup": private_keyboard if main_is_private else group_keyboard,
+                    "text": private_text if use_private_keyboard else group_text,
+                    "reply_markup": private_keyboard if use_private_keyboard else group_keyboard,
                 },
                 timeout=5,
             )
@@ -2349,21 +2381,31 @@ def push_position_json():
 
 def remove_position_keyboard():
     """平倉後移除底部 Web App 鍵盤。"""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN:
         return
 
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": "📋 倉位已平倉，面板已關閉",
-                "reply_markup": {"remove_keyboard": True},
-            },
-            timeout=5,
-        )
-    except Exception as e:
-        print(f"⚠️ 移除鍵盤失敗: {e}")
+    main_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
+    private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+
+    target_ids = []
+    if main_chat_id and _is_private_chat(main_chat_id):
+        target_ids.append(main_chat_id)
+    if private_chat_id and _is_private_chat(private_chat_id) and private_chat_id not in target_ids:
+        target_ids.append(private_chat_id)
+
+    for cid in target_ids:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": cid,
+                    "text": "📋 倉位已平倉，面板已關閉",
+                    "reply_markup": {"remove_keyboard": True},
+                },
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"⚠️ 移除鍵盤失敗: {e}")
 
     write_position_json()
     push_position_json()
@@ -2731,6 +2773,15 @@ Volume Spike: {context.get('volume_spike')}
             f"可下單: {'是' if ready else '否（請確認 BINANCE_REAL_COPY_ENABLED=1 與 API 金鑰）'}"
         )
 
+    normalized = str(text or "").strip()
+    if normalized in ("倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板"):
+        if active_trade.get("open"):
+            refresh_position_panel_from_active_trade()
+            return "📊 已更新倉位面板，請點底部「倉位面板」查看。"
+        write_position_json()
+        push_position_json()
+        return "📋 目前無持倉，已同步最新狀態到面板。"
+
     return None
 
 load_model()
@@ -2870,6 +2921,16 @@ def run_bot():
                             except Exception:
                                 pass
                         continue
+
+                    # 私聊鎖定：關閉一般對話，只保留面板與控制指令
+                    private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+                    text_norm = str(text or "").strip()
+                    if TELEGRAM_PRIVATE_CHAT_LOCK and private_chat_id and str(chat_id) == private_chat_id:
+                        allowed_exact = {"倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板"}
+                        allowed_prefix = ("/follow", "/binance", "/restart")
+                        if text_norm not in allowed_exact and (not any(text_norm.startswith(p) for p in allowed_prefix)):
+                            continue
+
                     # AI / 新聞指令
                     context = {
                         "price": price if 'price' in locals() else None,
