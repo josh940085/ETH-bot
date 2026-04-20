@@ -218,25 +218,45 @@
   }
 
   // ── 取得即時倉位資料（position.json）──
-  // GitHub Pages 上的 position.json 總是在 /ETH-bot/docs/position.json
-  const POSITION_JSON_URL = "https://raw.githubusercontent.com/josh940085/ETH-bot/copilot/fix-mini-app-web-app-issue/docs/position.json";
+  // Telegram 內建瀏覽器有時會對特定網域或快取策略較嚴格，
+  // 先嘗試同網域（GitHub Pages），再退回 raw.githubusercontent。
+  const POSITION_JSON_URLS = [
+    "./position.json",
+    "/ETH-bot/position.json",
+    "https://raw.githubusercontent.com/josh940085/ETH-bot/copilot/fix-mini-app-web-app-issue/docs/position.json",
+    "https://raw.githubusercontent.com/josh940085/ETH-bot/main/docs/position.json",
+  ];
+  let LAST_POSITION_SOURCE = "";
 
   async function fetchPositionData() {
-    try {
-      const res = await fetch(POSITION_JSON_URL + "?t=" + Date.now());
-      if (!res.ok) return;
-      const data = await res.json();
-      if (typeof data !== "object" || data === null) return;
+    for (const base of POSITION_JSON_URLS) {
+      const url = base + (base.includes("?") ? "&" : "?") + "t=" + Date.now();
+      try {
+        const res = await fetch(url, {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-cache" },
+        });
+        if (!res.ok) continue;
 
-      POSITION_OPEN = !!data.open;
-      if (data.open) {
-        if (data.direction) DIR = data.direction;
-        if (data.entry)     ENTRY = parseFloat(data.entry);
-        if (data.tp)        TP    = parseFloat(data.tp);
-        if (data.sl)        SL    = parseFloat(data.sl);
-        if (typeof data.size === "number") SIZE = Math.round(data.size * 100);
+        const data = await res.json();
+        if (typeof data !== "object" || data === null) continue;
+
+        POSITION_OPEN = !!data.open;
+        if (data.open) {
+          if (typeof data.direction === "string" && data.direction) DIR = data.direction;
+          if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
+          if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
+          if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
+          if (Number.isFinite(Number(data.size))) SIZE = Math.round(Number(data.size) * 100);
+        }
+        LAST_POSITION_SOURCE = base;
+        return;
+      } catch (_) {
+        // try next source
       }
-    } catch (_) {}
+    }
+
+    // 全部失敗：保留原本 URL 參數作為最後備援
   }
 
   // ── 取得即時價格 ──
@@ -419,6 +439,7 @@
 
   // ── 啟動 ──
   refresh();
+  console.log("Position source candidates:", POSITION_JSON_URLS);
   setInterval(refresh, 3000);
 </script>
 </body>

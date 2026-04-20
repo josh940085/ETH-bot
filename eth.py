@@ -177,11 +177,8 @@ def _is_private_chat(chat_id):
 
 def _resolve_follow_private_chat_id():
     preferred = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
-    if preferred:
+    if preferred and _is_private_chat(preferred):
         return preferred
-    fallback = str(TELEGRAM_CHAT_ID or "").strip()
-    if fallback and _is_private_chat(fallback):
-        return fallback
     return ""
 
 
@@ -289,8 +286,32 @@ def _binance_set_leverage_once():
         return False
 
 
+def _binance_place_market_order(side, qty, reduce_only=False):
+    """在 Binance 下市價單（MARKET）。平倉/減倉使用此函式以避免 -4061。"""
+    if qty <= 0:
+        return False, "qty<=0"
+    if not _is_binance_copy_ready():
+        return False, "binance_copy_not_ready"
+
+    try:
+        _binance_set_leverage_once()
+        params = {
+            "symbol": BINANCE_SYMBOL,
+            "side": side,
+            "type": "MARKET",
+            "quantity": f"{qty:.6f}",
+        }
+        if reduce_only:
+            params["reduceOnly"] = "true"
+
+        data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
+        return True, data
+    except Exception as e:
+        return False, str(e)
+
+
 def _binance_place_limit_order(side, qty, price, reduce_only=False):
-    """在 Binance 下限價單（LIMIT）"""
+    """在 Binance 下限價單（LIMIT）。開倉/補倉使用此函式。"""
     if qty <= 0:
         return False, "qty<=0"
     if not _is_binance_copy_ready():
@@ -306,9 +327,7 @@ def _binance_place_limit_order(side, qty, price, reduce_only=False):
             "price": f"{price:.2f}",
             "timeInForce": "GTC",
         }
-        if reduce_only:
-            params["reduceOnly"] = "true"
-
+        # 限價單不設 reduceOnly，避免 -4061 錯誤
         data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
         return True, data
     except Exception as e:
@@ -367,19 +386,20 @@ def sync_binance_adjust_position(direction, action, delta_ratio, current_price):
 
     if action == "add":
         side = "BUY" if direction == "long" else "SELL"
-        reduce_only = False
+        # 補倉用限價單
+        ok, data = _binance_place_limit_order(side, qty, current_price)
+        if ok:
+            active_trade["binance_qty"] = tracked_qty + qty
+            return True, data
+        return False, data
     else:
         side = "SELL" if direction == "long" else "BUY"
-        reduce_only = True
-
-    ok, data = _binance_place_limit_order(side, qty, current_price, reduce_only=reduce_only)
-    if ok:
-        if action == "add":
-            active_trade["binance_qty"] = tracked_qty + qty
-        else:
+        # 減倉用市價單（limit+reduceOnly 會觸發 -4061）
+        ok, data = _binance_place_market_order(side, qty, reduce_only=True)
+        if ok:
             active_trade["binance_qty"] = max(0.0, tracked_qty - qty)
-        return True, data
-    return False, data
+            return True, data
+        return False, data
 
 
 def sync_binance_close_position(current_price, reason="TP/SL"):
@@ -398,7 +418,8 @@ def sync_binance_close_position(current_price, reason="TP/SL"):
         return False, "close_qty_too_small"
 
     side = "SELL" if direction == "long" else "BUY"
-    ok, data = _binance_place_limit_order(side, qty, current_price, reduce_only=True)
+    # 平倉用市價單（limit+reduceOnly 會觸發 -4061）
+    ok, data = _binance_place_market_order(side, qty, reduce_only=True)
     if ok:
         active_trade["binance_qty"] = 0.0
         return True, data
@@ -1493,6 +1514,12 @@ def manage_position_scaling(current_price, atr=None):
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
             )
+            _send_private_telegram_text(
+                f"➕ 補倉（{direction}）\n"
+                f"現價: {current_price:.2f} | 加倉: +{int(delta*100)}%\n"
+                f"進場均價: {new_entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%"
+            )
             send_follow_action_alert("add", direction, current_price, delta, new_size, new_entry, tp_text, sl_text)
             refresh_position_panel_from_active_trade()
             return
@@ -1517,6 +1544,12 @@ def manage_position_scaling(current_price, atr=None):
                 f"進場均價: {entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
+            )
+            _send_private_telegram_text(
+                f"➖ 減倉（{direction}）\n"
+                f"現價: {current_price:.2f} | 減倉: -{int(delta*100)}%\n"
+                f"進場均價: {entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%"
             )
             send_follow_action_alert("reduce", direction, current_price, delta, new_size, entry, tp_text, sl_text)
             refresh_position_panel_from_active_trade()
@@ -1989,6 +2022,28 @@ def log_data(features, label):
 
         log_buffer = []
 
+
+def _send_private_telegram_text(msg):
+    """若有設定私聊 chat id，則同步發送文字訊息到私聊。"""
+    private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+    group_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
+    if not TELEGRAM_TOKEN or not private_chat_id:
+        return
+    if private_chat_id == group_chat_id:
+        return
+
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            data={
+                "chat_id": private_chat_id,
+                "text": str(msg),
+            },
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"⚠️ 私聊訊息發送失敗: {e}")
+
 def send_telegram(msg, priority=False, pin=False):
     global LAST_TELEGRAM_TS, TELEGRAM_PINNED_MESSAGE_ID
 
@@ -2074,7 +2129,7 @@ WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/"
 def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, tp_display=None, sl_display=None, is_update=False):
     """進場後在 Telegram 發出倉位面板按鈕（私聊用 Web App，群組/頻道用 URL 按鈕）。
     entry_display, tp_display, sl_display: 若提供則使用此字串確保訊息與網址一致。"""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN:
         return
 
     try:
@@ -2097,39 +2152,54 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
             f"&lev=10"
         )
         
-        # 判斷是否為私聊（chat_id 為正數）或群組/頻道（負數）
+        main_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
+        private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+
+        # 判斷主 chat 是否為私聊（正數 chat_id = 私聊；負數 = 群組/頻道）
         try:
-            chat_id_int = int(TELEGRAM_CHAT_ID)
-            is_private = chat_id_int > 0
-        except (ValueError, TypeError):
-            is_private = True  # 預設為私聊
-        
-        if is_private:
-            # 私聊：使用 Web App 按鈕（底部按鈕）
-            keyboard = {
-                "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
-                "resize_keyboard": True,
-                "persistent": True,
-            }
-            text = "📊 倉位面板已更新，點擊底部按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊底部按鈕查看即時面板"
-        else:
-            # 群組/頻道：使用 inline 按鈕（URL）
-            keyboard = {
-                "inline_keyboard": [[
-                    {"text": "📊 開啟倉位面板", "url": url}
-                ]]
-            }
-            text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
-        
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "reply_markup": keyboard,
-            },
-            timeout=5,
-        )
+            main_is_private = int(main_chat_id) > 0
+        except Exception:
+            main_is_private = False
+
+        # 群組/頻道：使用 inline 按鈕（URL）
+        group_keyboard = {
+            "inline_keyboard": [[
+                {"text": "📊 開啟倉位面板", "url": url}
+            ]]
+        }
+        group_text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
+
+        # 私聊：使用 Web App 鍵盤按鈕
+        private_keyboard = {
+            "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
+            "resize_keyboard": True,
+            "persistent": True,
+        }
+        private_text = "📊 倉位面板已更新，點擊底部按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊底部按鈕查看即時面板"
+
+        # 主 chat：正數（私聊）用 Web App 鍵盤，負數（群組）用 inline URL 按鈕
+        if main_chat_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": main_chat_id,
+                    "text": private_text if main_is_private else group_text,
+                    "reply_markup": private_keyboard if main_is_private else group_keyboard,
+                },
+                timeout=5,
+            )
+
+        # 私聊額外通知：TELEGRAM_PRIVATE_CHAT_ID 與主 chat 不同時才發送
+        if private_chat_id and _is_private_chat(private_chat_id) and private_chat_id != main_chat_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": private_chat_id,
+                    "text": private_text,
+                    "reply_markup": private_keyboard,
+                },
+                timeout=5,
+            )
     except Exception as e:
         print(f"⚠️ 倉位面板按鈕發送失敗: {e}")
 
