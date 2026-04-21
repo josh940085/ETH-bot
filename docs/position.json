@@ -1,1 +1,1 @@
-{"open": false, "direction": "long", "entry": 2310.976, "tp": 2384.636, "sl": 2292.54, "size": 0.0, "last_close_reason": "SL", "last_close_price": 2304.69, "last_close_ts": 1776783808, "last_close_candle_high": 2296.55, "last_close_candle_low": 2290.76, "pair": "ETHUSDT", "lev": 10, "ts": 1776783809}
+{"open": true, "direction": "short", "entry": 2304.69, "tp": 2256.62, "sl": 2326.54, "size": 0.15, "last_close_reason": "", "last_close_price": 0.0, "last_close_ts": 0, "last_close_candle_high": 0.0, "last_close_candle_low": 0.0, "pair": "ETHUSDT", "lev": 10, "ts": 1776783820}
