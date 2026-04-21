@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>倉位面板</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
@@ -182,6 +185,26 @@
       margin-top: 8px;
     }
 
+    .close-hit {
+      display: inline-block;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+      margin-bottom: 10px;
+      border: 1px solid transparent;
+    }
+    .close-hit.tp {
+      background: #1a3a28;
+      color: #2ecc71;
+      border-color: #2ecc71;
+    }
+    .close-hit.sl {
+      background: #3a1a1a;
+      color: #e74c3c;
+      border-color: #e74c3c;
+    }
+
     .loading {
       text-align: center;
       padding: 40px;
@@ -194,6 +217,8 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
+  const APP_VERSION = "20260421-1";
+
   // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
   let DIR    = p.get("dir")   || "long";
@@ -204,9 +229,14 @@
   const PAIR   = p.get("pair")  || "ETHUSDT";
   const LEV    = parseInt(p.get("lev")     || "10", 10);
   let POSITION_OPEN = true;
+  let LAST_CLOSE_REASON = "";
+  let LAST_CLOSE_PRICE = 0;
+  let LAST_CLOSE_TS = 0;
+  let LAST_CLOSE_CANDLE_HIGH = 0;
+  let LAST_CLOSE_CANDLE_LOW = 0;
 
   // 調試：確認參數被正確讀取
-  console.log("URL Params:", { DIR, ENTRY, TP, SL, SIZE, PAIR, LEV });
+  console.log("URL Params:", { DIR, ENTRY, TP, SL, SIZE, PAIR, LEV, APP_VERSION });
   console.log("URL:", location.href);
 
   let livePrice = 0;
@@ -221,14 +251,18 @@
   // Telegram 內建瀏覽器有時會對特定網域或快取策略較嚴格，
   // 先嘗試同網域（GitHub Pages），再退回 raw.githubusercontent。
   const POSITION_JSON_URLS = [
-    "./position.json",
-    "/ETH-bot/position.json",
     "https://raw.githubusercontent.com/josh940085/ETH-bot/copilot/fix-mini-app-web-app-issue/docs/position.json",
     "https://raw.githubusercontent.com/josh940085/ETH-bot/main/docs/position.json",
+    "./position.json",
+    "/ETH-bot/position.json",
   ];
   let LAST_POSITION_SOURCE = "";
+  let LAST_POSITION_TS = 0;
 
   async function fetchPositionData() {
+    const candidates = [];
+    const nowSec = Math.floor(Date.now() / 1000);
+
     for (const base of POSITION_JSON_URLS) {
       const url = base + (base.includes("?") ? "&" : "?") + "t=" + Date.now();
       try {
@@ -241,22 +275,57 @@
         const data = await res.json();
         if (typeof data !== "object" || data === null) continue;
 
-        POSITION_OPEN = !!data.open;
-        if (data.open) {
-          if (typeof data.direction === "string" && data.direction) DIR = data.direction;
-          if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
-          if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
-          if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
-          if (Number.isFinite(Number(data.size))) SIZE = Math.round(Number(data.size) * 100);
-        }
-        LAST_POSITION_SOURCE = base;
-        return;
+        const tsNum = Number(data.ts);
+        const ts = Number.isFinite(tsNum) ? tsNum : 0;
+        candidates.push({ base, data, ts });
       } catch (_) {
         // try next source
       }
     }
 
-    // 全部失敗：保留原本 URL 參數作為最後備援
+    if (!candidates.length) {
+      // 全部失敗：保留原本 URL 參數作為最後備援
+      return;
+    }
+
+    // 選擇時間戳最新的那份，避免先命中舊快取就鎖死資料。
+    candidates.sort((a, b) => b.ts - a.ts);
+    const picked = candidates[0];
+    const data = picked.data;
+    const dataAge = picked.ts > 0 ? nowSec - picked.ts : Infinity;
+
+    // 若取到的資料沒有比目前新，直接跳過（CDN 快取舊版本，避免重複覆蓋）
+    if (picked.ts > 0 && picked.ts <= LAST_POSITION_TS) return;
+
+    if (picked.ts > 0) {
+      LAST_POSITION_TS = picked.ts;
+    }
+
+    // 安全閾值：15 分鐘內的 position.json 才能「關閉」面板
+    // 防止 CDN 回傳數小時前的舊快取（open:false）把正常開倉面板蓋掉
+    const STALE_CLOSE_SEC = 900;
+
+    if (data.open) {
+      // 持倉中：無論資料新舊都更新（不會誤關面板）
+      POSITION_OPEN = true;
+      if (typeof data.direction === "string" && data.direction) DIR = data.direction;
+      if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
+      if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
+      if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
+      if (Number.isFinite(Number(data.size))) SIZE = Math.round(Number(data.size) * 100);
+    } else if (dataAge < STALE_CLOSE_SEC) {
+      // 已平倉且資料是新鮮的（15 分鐘內）→ 確認關閉
+      POSITION_OPEN = false;
+      LAST_CLOSE_REASON = String(data.last_close_reason || "").toUpperCase();
+      LAST_CLOSE_PRICE = Number.isFinite(Number(data.last_close_price)) ? parseFloat(data.last_close_price) : 0;
+      LAST_CLOSE_TS = Number.isFinite(Number(data.last_close_ts)) ? Number(data.last_close_ts) : 0;
+      LAST_CLOSE_CANDLE_HIGH = Number.isFinite(Number(data.last_close_candle_high)) ? parseFloat(data.last_close_candle_high) : 0;
+      LAST_CLOSE_CANDLE_LOW = Number.isFinite(Number(data.last_close_candle_low)) ? parseFloat(data.last_close_candle_low) : 0;
+    }
+    // else: 資料過期且 open=false → 保留目前 POSITION_OPEN 狀態不動
+
+    const ageMin = dataAge > 60 ? ` (${Math.floor(dataAge / 60)}m前)` : "";
+    LAST_POSITION_SOURCE = picked.base + ageMin;
   }
 
   // ── 取得即時價格 ──
@@ -314,10 +383,28 @@
     return `${hh}:${mm}:${ss}`;
   }
 
+  function ts_str(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    const d = new Date(n * 1000);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
   // ── 渲染 UI ──
   function render() {
     // 已平倉：顯示簡單的已平倉面板
     if (!POSITION_OPEN) {
+      const hitClass = LAST_CLOSE_REASON === "TP" ? "tp" : (LAST_CLOSE_REASON === "SL" ? "sl" : "");
+      const hitText = LAST_CLOSE_REASON === "TP"
+        ? "✅ 止盈命中"
+        : (LAST_CLOSE_REASON === "SL" ? "❌ 止損命中" : "📋 已平倉");
+      const closePriceText = LAST_CLOSE_PRICE > 0 ? fmt(LAST_CLOSE_PRICE) : "-";
+      const closeCandleText = (LAST_CLOSE_CANDLE_HIGH > 0 && LAST_CLOSE_CANDLE_LOW > 0)
+        ? `${fmt(LAST_CLOSE_CANDLE_HIGH)} / ${fmt(LAST_CLOSE_CANDLE_LOW)}`
+        : "-";
       document.getElementById("app").outerHTML = `
 <div id="app">
   <div class="header">
@@ -331,11 +418,14 @@
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
   </div>
   <div class="card" style="text-align:center;padding:32px 16px;">
+    <div class="close-hit ${hitClass}">${hitText}</div>
     <div style="font-size:32px;margin-bottom:12px;">📋</div>
     <div style="font-size:16px;font-weight:700;margin-bottom:6px;">目前無持倉</div>
-    <div style="font-size:13px;color:#888;">等待下一次交易訊號</div>
+    <div style="font-size:13px;color:#888;">平倉價：${closePriceText}</div>
+    <div style="font-size:12px;color:#777;margin-top:4px;">1m 高/低：${closeCandleText}</div>
+    <div style="font-size:12px;color:#777;margin-top:4px;">命中時間：${ts_str(LAST_CLOSE_TS)}</div>
   </div>
-  <div class="update-time">最後更新：${now_str()}</div>
+  <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
       return;
     }
@@ -433,14 +523,23 @@
     <span>盈利增加 → 紅色</span>｜<span>觸發止損 → 綠色</span>
   </div>
 
-  <div class="update-time">最後更新：${now_str()}</div>
+  <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
   }
 
   // ── 啟動 ──
   refresh();
+  console.log("Mini App version:", APP_VERSION);
   console.log("Position source candidates:", POSITION_JSON_URLS);
   setInterval(refresh, 3000);
+
+  // 頁面重新可見時（從背景切回）立刻刷新
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      LAST_POSITION_TS = 0;  // 重置以強制重取最新資料
+      refresh();
+    }
+  });
 </script>
 </body>
 </html>
