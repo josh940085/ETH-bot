@@ -10,12 +10,15 @@ import websocket
 import json
 import pickle
 import os
-import sys
 import re
 import html
 import subprocess
 import hmac
 import hashlib
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 from collections import deque
 from pathlib import Path
 from urllib.parse import urlencode
@@ -24,7 +27,6 @@ import xml.etree.ElementTree as ET
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.model_selection import train_test_split
 from threading import Lock
 
 # ===== Macro / News Engine =====
@@ -2065,7 +2067,8 @@ def ws_price_stream():
     while True:
         try:
             ws.run_forever()
-        except:
+        except Exception as e:
+            print(f"⚠️ WebSocket 斷線，2 秒後重連: {e}")
             time.sleep(2)
 
 threading.Thread(target=ws_price_stream, daemon=True).start()
@@ -2171,14 +2174,16 @@ def load_model():
 
     if os.path.exists(MODEL_PATH) and os.path.getsize(MODEL_PATH) > 0:
         try:
-            model = pickle.load(open(MODEL_PATH, "rb"))
+            with open(MODEL_PATH, "rb") as f:
+                model = pickle.load(f)
         except Exception as e:
             print(f"⚠️ 加載模型失敗: {e}")
             model = None
 
     if os.path.exists(ONLINE_MODEL_PATH):
         try:
-            online_model = pickle.load(open(ONLINE_MODEL_PATH, "rb"))
+            with open(ONLINE_MODEL_PATH, "rb") as f:
+                online_model = pickle.load(f)
             online_initialized = True
         except:
             print("⚠️ 舊模型不相容，重置 online_model")
@@ -2410,8 +2415,9 @@ WEBAPP_VERSION = str(os.getenv("WEBAPP_VERSION", "20260421-1")).strip() or "2026
 
 
 def _build_private_bottom_keyboard():
-    """建立私聊底部鍵盤（倉位面板 + 跟單設定），避免被 remove_keyboard 收掉。"""
-    if active_trade.get("open") and active_trade.get("direction") in ("long", "short"):
+    """建立私聊底部鍵盤（倉位面板 + 跟單設定 + 手動平倉），避免被 remove_keyboard 收掉。"""
+    has_open_position = active_trade.get("open") and active_trade.get("direction") in ("long", "short")
+    if has_open_position:
         direction = active_trade.get("direction")
         entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
         tp = _safe_float(active_trade.get("tp"), 0.0)
@@ -2440,11 +2446,17 @@ def _build_private_bottom_keyboard():
             f"&t={int(time.time())}"
         )
 
+    keyboard_rows = [[
+        {"text": "📊 倉位面板", "web_app": {"url": url}},
+        {"text": "👥 跟單設定"},
+    ]]
+    if has_open_position:
+        keyboard_rows.append([
+            {"text": "🧾 手動平倉"},
+        ])
+
     return {
-        "keyboard": [[
-            {"text": "📊 倉位面板", "web_app": {"url": url}},
-            {"text": "👥 跟單設定"},
-        ]],
+        "keyboard": keyboard_rows,
         "resize_keyboard": True,
         "persistent": True,
     }
@@ -2488,11 +2500,13 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
         }
         group_text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
 
-        # 私聊：底部鍵盤（倉位面板 web_app + 跟單設定文字按鈕）
+        # 私聊：底部鍵盤（倉位面板 web_app + 跟單設定 + 手動平倉）
         private_keyboard = {
             "keyboard": [[
                 {"text": "📊 倉位面板", "web_app": {"url": url}},
                 {"text": "👥 跟單設定"},
+            ], [
+                {"text": "🧾 手動平倉"},
             ]],
             "resize_keyboard": True,
             "persistent": True,
@@ -2946,69 +2960,84 @@ def ask_ai_analysis(prompt):
         return f"AI分析失敗: {e}"
 
 
-def load_last_update_id():
+def _parse_telegram_state_payload(raw):
     try:
-        if not TELEGRAM_STATE_PATH.exists():
-            return None
-        payload = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
-        value = payload.get("last_update_id")
+        payload = json.loads(raw) if str(raw).strip() else {}
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_telegram_state_locked():
+    if not TELEGRAM_STATE_PATH.exists():
+        return {}
+    try:
+        with TELEGRAM_STATE_PATH.open("r", encoding="utf-8") as fh:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+            raw = fh.read()
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return _parse_telegram_state_payload(raw)
+    except Exception:
+        return {}
+
+
+def _update_telegram_state_locked(mutator):
+    try:
+        TELEGRAM_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with TELEGRAM_STATE_PATH.open("a+", encoding="utf-8") as fh:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+            fh.seek(0)
+            payload = _parse_telegram_state_payload(fh.read())
+            result = mutator(payload)
+
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(payload, ensure_ascii=False))
+            fh.flush()
+            os.fsync(fh.fileno())
+
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            return result
+    except Exception:
+        return None
+
+
+def load_last_update_id():
+    payload = _read_telegram_state_locked()
+    value = payload.get("last_update_id")
+    try:
         return int(value) if value is not None else None
     except Exception:
         return None
 
 
 def save_last_update_id(update_id):
-    try:
-        payload = {}
-        if TELEGRAM_STATE_PATH.exists():
-            try:
-                data = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    payload = data
-            except Exception:
-                payload = {}
-
-        payload["last_update_id"] = int(update_id)
-        TELEGRAM_STATE_PATH.write_text(json.dumps(payload), encoding="utf-8")
-    except Exception:
-        pass
+    _update_telegram_state_locked(lambda payload: payload.__setitem__("last_update_id", int(update_id)))
 
 
 def request_supervisor_restart():
-    try:
-        payload = {}
-        if TELEGRAM_STATE_PATH.exists():
-            try:
-                data = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    payload = data
-            except Exception:
-                payload = {}
-
+    def _mutate(payload):
         payload["restart_requested"] = True
         payload["restart_requested_at"] = int(time.time())
-        TELEGRAM_STATE_PATH.write_text(json.dumps(payload), encoding="utf-8")
         return True
-    except Exception:
-        return False
+
+    return bool(_update_telegram_state_locked(_mutate))
 
 
 def pop_pending_commands():
-    try:
-        if not TELEGRAM_STATE_PATH.exists():
-            return []
-
-        payload = json.loads(TELEGRAM_STATE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(payload, dict):
-            return []
-
+    def _mutate(payload):
         pending = payload.get("pending_commands")
         commands = pending if isinstance(pending, list) else []
         payload["pending_commands"] = []
-        TELEGRAM_STATE_PATH.write_text(json.dumps(payload), encoding="utf-8")
         return commands
-    except Exception:
-        return []
+
+    result = _update_telegram_state_locked(_mutate)
+    return result if isinstance(result, list) else []
 
 
 # ===== Telegram 指令（AI分析） =====
@@ -3140,18 +3169,34 @@ load_model()
 # =============================
 def get_kline(interval, limit=100):
     now = time.time()
+    cached_df = None
 
     if interval in KLINE_CACHE:
         data, ts = KLINE_CACHE[interval]
+        cached_df = data
         if now - ts < KLINE_TTL.get(interval, 10):
             return data
 
     url = "https://fapi.binance.com/fapi/v1/klines"
-    data = requests.get(url, params={
-        "symbol": "ETHUSDT",
-        "interval": interval,
-        "limit": limit
-    }).json()
+    try:
+        resp = HTTP_SESSION.get(
+            url,
+            params={
+                "symbol": "ETHUSDT",
+                "interval": interval,
+                "limit": limit,
+            },
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list) or not data:
+            raise ValueError(f"invalid_kline_payload_{interval}")
+    except Exception as e:
+        if cached_df is not None:
+            print(f"⚠️ 讀取 {interval} K 線失敗，改用快取: {e}")
+            return cached_df
+        raise
 
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
@@ -3218,13 +3263,16 @@ def run_bot():
                     params["offset"] = last_update_id + 1
 
                 try:
-                    res = requests.get(
+                    res = HTTP_SESSION.get(
                         f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
                         params=params,
                         timeout=6
                     )
-                    updates = res.json().get("result", [])
-                except:
+                    res.raise_for_status()
+                    payload = res.json()
+                    updates = payload.get("result", []) if isinstance(payload, dict) else []
+                except Exception as e:
+                    print(f"⚠️ 讀取 Telegram 更新失敗: {e}")
                     updates = []
 
             for u in updates:
@@ -3311,9 +3359,10 @@ def run_bot():
 
                     # ===== supervisor 模式下轉發的 callback 命令 =====
                     if text.startswith("__callback__:"):
-                        parts = text.split(":", 3)
-                        if len(parts) == 4:
-                            _, cq_data, cq_id, cq_msg_id = parts
+                        raw_callback = text[len("__callback__:"):]
+                        parts = raw_callback.rsplit(":", 2)
+                        if len(parts) == 3:
+                            cq_data, cq_id, cq_msg_id = parts
                             try:
                                 _process_follow_callback(cq_data, cq_id, cq_msg_id, chat_id)
                             except Exception:
@@ -3324,7 +3373,7 @@ def run_bot():
                     private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
                     text_norm = str(text or "").strip()
                     if TELEGRAM_PRIVATE_CHAT_LOCK and private_chat_id and str(chat_id) == private_chat_id:
-                        allowed_exact = {"倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板", "👥 跟單設定"}
+                        allowed_exact = {"倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板", "👥 跟單設定", "🧾 手動平倉"}
                         allowed_prefix = ("/follow", "/binance", "/restart", "/close")
                         if text_norm not in allowed_exact and (not any(text_norm.startswith(p) for p in allowed_prefix)):
                             continue
@@ -3333,6 +3382,9 @@ def run_bot():
                     if text_norm == "👥 跟單設定":
                         text = "/follow"
                         text_norm = "/follow"
+                    elif text_norm == "🧾 手動平倉":
+                        text = "/close"
+                        text_norm = "/close"
 
                     # 文字指令手動平倉（/close）
                     if text_norm.startswith("/close"):
@@ -3351,7 +3403,10 @@ def run_bot():
                                 remove_position_keyboard()
                                 reply = f"🧾 手動平倉完成\n平倉價: {close_px:.2f}"
 
-                        payload = _with_forced_remove_reply_keyboard({"chat_id": chat_id, "text": reply}, chat_id)
+                        payload = {"chat_id": chat_id, "text": reply}
+                        if _is_private_chat(chat_id):
+                            payload["reply_markup"] = _build_private_bottom_keyboard()
+                        payload = _with_forced_remove_reply_keyboard(payload, chat_id)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                             json=payload,
@@ -3375,8 +3430,8 @@ def run_bot():
 
                     if reply:
                         payload = {"chat_id": chat_id, "text": reply}
-                        # 由底部「跟單設定」觸發 /follow 時，保留 mini app 鍵盤不被 remove_keyboard 清掉
-                        if _is_private_chat(chat_id) and text_norm.startswith("/follow"):
+                        # 由底部按鈕觸發 /follow 或 /close 時，保留 mini app 鍵盤不被 remove_keyboard 清掉
+                        if _is_private_chat(chat_id) and (text_norm.startswith("/follow") or text_norm.startswith("/close")):
                             payload["reply_markup"] = _build_private_bottom_keyboard()
                         payload = _with_forced_remove_reply_keyboard(payload, chat_id)
                         requests.post(

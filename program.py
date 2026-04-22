@@ -5,6 +5,10 @@ import subprocess
 import sys
 import time
 import json
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
 import requests
 from pathlib import Path
 
@@ -15,6 +19,8 @@ RESTART_DELAY_SEC = 2
 SUPERVISOR_RESTART_EXIT_CODE = 75
 TELEGRAM_TOKEN = ""
 POLL_INTERVAL_SEC = 1
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.headers.update({"User-Agent": "ETH-bot-supervisor/1.0"})
 
 
 def load_local_env():
@@ -37,70 +43,105 @@ def load_local_env():
 
 
 def _load_telegram_state() -> dict:
-    if not TELEGRAM_STATE_FILE.exists():
-        return {}
+    return _read_telegram_state_locked()
 
+
+def _parse_telegram_state(raw: str) -> dict:
     try:
-        payload = json.loads(TELEGRAM_STATE_FILE.read_text(encoding="utf-8"))
+        payload = json.loads(raw) if str(raw).strip() else {}
         return payload if isinstance(payload, dict) else {}
     except Exception:
         return {}
 
 
-def _save_telegram_state(payload: dict):
+def _read_telegram_state_locked() -> dict:
+    if not TELEGRAM_STATE_FILE.exists():
+        return {}
+
     try:
-        TELEGRAM_STATE_FILE.write_text(
-            json.dumps(payload, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        with TELEGRAM_STATE_FILE.open("r", encoding="utf-8") as fh:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
+            raw = fh.read()
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        return _parse_telegram_state(raw)
+    except Exception:
+        return {}
+
+
+def _update_telegram_state(mutator):
+    try:
+        TELEGRAM_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with TELEGRAM_STATE_FILE.open("a+", encoding="utf-8") as fh:
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+
+            fh.seek(0)
+            payload = _parse_telegram_state(fh.read())
+            result = mutator(payload)
+
+            fh.seek(0)
+            fh.truncate()
+            fh.write(json.dumps(payload, ensure_ascii=False))
+            fh.flush()
+            os.fsync(fh.fileno())
+
+            if fcntl is not None:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            return result
     except Exception as e:
         print(f"⚠️ 寫入 telegram state 失敗: {e}")
+        return None
 
 
 def _append_pending_command(chat_id, text, update_id):
-    payload = _load_telegram_state()
-    queue = payload.get("pending_commands")
-    if not isinstance(queue, list):
-        queue = []
+    def _mutate(payload):
+        queue = payload.get("pending_commands")
+        if not isinstance(queue, list):
+            queue = []
 
-    queue.append(
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "update_id": int(update_id),
-            "ts": int(time.time()),
-        }
-    )
-    payload["pending_commands"] = queue[-50:]
-    payload["last_update_id"] = int(update_id)
-    _save_telegram_state(payload)
+        queue.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "update_id": int(update_id),
+                "ts": int(time.time()),
+            }
+        )
+        payload["pending_commands"] = queue[-50:]
+        payload["last_update_id"] = int(update_id)
+
+    _update_telegram_state(_mutate)
 
 
 def _append_pending_callback(chat_id, callback_data, callback_id, message_id, update_id):
-    payload = _load_telegram_state()
-    queue = payload.get("pending_commands")
-    if not isinstance(queue, list):
-        queue = []
+    def _mutate(payload):
+        queue = payload.get("pending_commands")
+        if not isinstance(queue, list):
+            queue = []
 
-    queue.append(
-        {
-            "chat_id": chat_id,
-            "text": f"__callback__:{callback_data}:{callback_id}:{message_id}",
-            "update_id": int(update_id),
-            "ts": int(time.time()),
-        }
-    )
-    payload["pending_commands"] = queue[-50:]
-    payload["last_update_id"] = int(update_id)
-    _save_telegram_state(payload)
+        queue.append(
+            {
+                "chat_id": chat_id,
+                "text": f"__callback__:{callback_data}:{callback_id}:{message_id}",
+                "update_id": int(update_id),
+                "ts": int(time.time()),
+            }
+        )
+        payload["pending_commands"] = queue[-50:]
+        payload["last_update_id"] = int(update_id)
+
+    _update_telegram_state(_mutate)
 
 
 def _set_restart_requested(update_id):
-    payload = _load_telegram_state()
-    payload["restart_requested"] = True
-    payload["restart_requested_at"] = int(time.time())
-    payload["last_update_id"] = int(update_id)
-    _save_telegram_state(payload)
+    def _mutate(payload):
+        payload["restart_requested"] = True
+        payload["restart_requested_at"] = int(time.time())
+        payload["last_update_id"] = int(update_id)
+
+    _update_telegram_state(_mutate)
 
 
 def _telegram_send_message(chat_id, text):
@@ -108,7 +149,7 @@ def _telegram_send_message(chat_id, text):
         return
 
     try:
-        requests.post(
+        HTTP_SESSION.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             data={"chat_id": chat_id, "text": text},
             timeout=5,
@@ -132,13 +173,16 @@ def poll_telegram_commands():
             pass
 
     try:
-        res = requests.get(
+        res = HTTP_SESSION.get(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
             params=params,
             timeout=5,
         )
-        updates = res.json().get("result", [])
-    except Exception:
+        res.raise_for_status()
+        payload = res.json()
+        updates = payload.get("result", []) if isinstance(payload, dict) else []
+    except Exception as e:
+        print(f"⚠️ 讀取 Telegram 更新失敗: {e}")
         updates = []
 
     for u in updates:
@@ -169,9 +213,7 @@ def poll_telegram_commands():
             continue
 
         if not text:
-            payload = _load_telegram_state()
-            payload["last_update_id"] = int(update_id)
-            _save_telegram_state(payload)
+            _update_telegram_state(lambda payload: payload.__setitem__("last_update_id", int(update_id)))
             continue
 
         if text.startswith("/restart"):
@@ -183,14 +225,14 @@ def poll_telegram_commands():
 
 
 def consume_restart_request() -> bool:
-    payload = _load_telegram_state()
-    if not payload.get("restart_requested"):
-        return False
+    def _mutate(payload):
+        if not payload.get("restart_requested"):
+            return False
+        payload["restart_requested"] = False
+        payload["restart_requested_at"] = int(time.time())
+        return True
 
-    payload["restart_requested"] = False
-    payload["restart_requested_at"] = int(time.time())
-    _save_telegram_state(payload)
-    return True
+    return bool(_update_telegram_state(_mutate))
 
 
 def sync_repo() -> bool:
