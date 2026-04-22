@@ -1374,7 +1374,7 @@ active_trade = {
     "sl": None,
     "open": False,
     "size": 0.0,
-    "max_size": 1.0,
+    "max_size": 1 / 3,
     "min_size": 0.15,
     "add_count": 0,
     "reduce_count": 0,
@@ -3027,8 +3027,8 @@ def run_bot():
                 base_size = _safe_float(position_size, 0.0)
                 if base_size <= 0:
                     base_size = 0.2
-                active_trade["size"] = float(min(1.0, max(base_size, 0.1)))
-                active_trade["max_size"] = 1.0
+                active_trade["size"] = float(min(1 / 3, max(base_size, 0.1)))
+                active_trade["max_size"] = 1 / 3
                 active_trade["min_size"] = max(0.1, active_trade["size"] * 0.3)
                 active_trade["add_count"] = 0
                 active_trade["reduce_count"] = 0
