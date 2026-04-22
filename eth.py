@@ -1139,7 +1139,7 @@ def manage_position_scaling(current_price, atr=None):
     direction = active_trade.get("direction")
     entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), current_price)
     size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
-    max_size = max(1.0, _safe_float(active_trade.get("max_size"), 1.0))
+    max_size = _safe_float(active_trade.get("max_size"), 1 / 3)
     min_size = _safe_float(active_trade.get("min_size"), 0.15)
     add_count = int(active_trade.get("add_count", 0))
 
