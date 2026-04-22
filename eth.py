@@ -2,6 +2,7 @@
 import requests
 import datetime
 import time
+import math
 import pandas as pd
 import numpy as np
 import threading
@@ -13,8 +14,11 @@ import sys
 import re
 import html
 import subprocess
+import hmac
+import hashlib
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlencode
 import xml.etree.ElementTree as ET
 
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
@@ -46,6 +50,7 @@ HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
 TRANSLATION_CACHE = {}
 BOT_SOFT_RESTART_REQUESTED = False
 TELEGRAM_STATE_PATH = Path(__file__).resolve().parent / ".telegram_state.json"
+POSITION_JSON_PATH = Path(__file__).resolve().parent / "docs" / "position.json"
 
 # ===== Environment variables / secrets =====
 def _load_local_env():
@@ -64,7 +69,8 @@ def _load_local_env():
             key = key.strip()
             value = value.strip().strip('"').strip("'")
 
-            if key and key not in os.environ:
+            if key:
+                # 以 .env 為準，避免既有空值/舊值蓋掉最新設定
                 os.environ[key] = value
     except Exception as e:
         print(f"⚠️ .env 載入失敗: {e}")
@@ -80,16 +86,545 @@ def _get_required_env(name, default=None, mask=False):
     return value
 
 
+def _get_env_with_alias(primary, aliases=None, default=""):
+    keys = [primary] + list(aliases or [])
+    for k in keys:
+        v = os.getenv(k)
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
+    return default
+
+
 _load_local_env()
 
 TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "")
+TELEGRAM_PRIVATE_CHAT_ID = _get_env_with_alias("TELEGRAM_PRIVATE_CHAT_ID", ["TELEGRAM_USER_CHAT_ID"], "")
+TELEGRAM_PRIVATE_CHAT_LOCK = str(os.getenv("TELEGRAM_PRIVATE_CHAT_LOCK", "0")).strip() == "1"
+if not TELEGRAM_PRIVATE_CHAT_ID:
+    print("⚠️ 缺少環境變數: TELEGRAM_PRIVATE_CHAT_ID")
 # ===== Telegram =====
 LAST_TELEGRAM_TS = 0
-TELEGRAM_PINNED_MESSAGE_ID = None
 
 # ===== Discord（同步通知） =====
 DISCORD_WEBHOOK = _get_required_env("DISCORD_WEBHOOK", "", mask=True)
+
+# ===== Binance 實單跟單（API） =====
+BINANCE_API_KEY = _get_required_env("BINANCE_API_KEY", "", mask=True)
+BINANCE_API_SECRET = _get_required_env("BINANCE_API_SECRET", "", mask=True)
+BINANCE_BASE_URL = str(os.getenv("BINANCE_BASE_URL", "https://fapi.binance.com")).rstrip("/")
+BINANCE_REAL_COPY_ENABLED = str(os.getenv("BINANCE_REAL_COPY_ENABLED", "0")).strip() == "1"
+BINANCE_SYMBOL = str(os.getenv("BINANCE_SYMBOL", "ETHUSDT")).strip() or "ETHUSDT"
+try:
+    BINANCE_LEVERAGE = int(float(_get_env_with_alias("BINANCE_LEVERAGE", ["COPY_TRADE_LEVERAGE"], "10")))
+except Exception:
+    BINANCE_LEVERAGE = 10
+# === USDT 名目模式（傳統） ===
+try:
+    BINANCE_ORDER_NOTIONAL_USDT = max(10.0, float(_get_env_with_alias("BINANCE_ORDER_NOTIONAL_USDT", ["COPY_TRADE_USDT"], "150")))
+except Exception:
+    BINANCE_ORDER_NOTIONAL_USDT = 150.0
+
+# === ETH 數量模式（新） ===
+# 若設定 COPY_TRADE_ETH_QTY，100% 倉位就是該數量的 ETH
+try:
+    eth_qty_str = os.getenv("COPY_TRADE_ETH_QTY", "").strip()
+    BINANCE_ORDER_ETH_QTY = float(eth_qty_str) if eth_qty_str else 0.0
+except Exception:
+    BINANCE_ORDER_ETH_QTY = 0.0
+
+# ETH 模式下的最小開倉數量（例子：0.009）
+try:
+    min_eth_str = os.getenv("COPY_TRADE_MIN_ETH_QTY", "").strip()
+    BINANCE_MIN_ETH_QTY = float(min_eth_str) if min_eth_str else 0.001
+except Exception:
+    BINANCE_MIN_ETH_QTY = 0.001
+
+try:
+    BINANCE_MIN_NOTIONAL_USDT = max(5.0, float(os.getenv("BINANCE_MIN_NOTIONAL_USDT", "20")))
+except Exception:
+    BINANCE_MIN_NOTIONAL_USDT = 20.0
+try:
+    BINANCE_QTY_STEP = max(0.0001, float(os.getenv("BINANCE_QTY_STEP", "0.001")))
+except Exception:
+    BINANCE_QTY_STEP = 0.001
+try:
+    BINANCE_MIN_QTY = max(0.0001, float(os.getenv("BINANCE_MIN_QTY", "0.001")))
+except Exception:
+    BINANCE_MIN_QTY = 0.001
+
+_BINANCE_POSITION_MODE_CACHE = {"dual": None, "ts": 0.0}
+
+
+def _is_binance_copy_ready():
+    # 由跟單按鈕（FOLLOW_MODE_ENABLED）控制，API Key 需存在
+    # BINANCE_REAL_COPY_ENABLED=0 可強制停用（安全開關）
+    if BINANCE_REAL_COPY_ENABLED is False and os.getenv("BINANCE_REAL_COPY_ENABLED", "").strip() == "0":
+        return False
+    try:
+        follow_on = FOLLOW_MODE_ENABLED
+    except NameError:
+        follow_on = False
+    if not follow_on:
+        return False
+    return bool(BINANCE_API_KEY and BINANCE_API_SECRET)
+
+
+def _is_private_chat(chat_id):
+    try:
+        return int(chat_id) > 0
+    except Exception:
+        return False
+
+
+def _with_forced_remove_reply_keyboard(payload, chat_id):
+    """私聊訊息強制移除 reply keyboard（不覆蓋既有 inline keyboard）。"""
+    try:
+        normalized_chat_id = str(chat_id or "").strip()
+        if normalized_chat_id and _is_private_chat(normalized_chat_id):
+            if "reply_markup" not in payload:
+                payload["reply_markup"] = {"remove_keyboard": True}
+    except Exception:
+        pass
+    return payload
+
+
+def _resolve_follow_private_chat_id():
+    preferred = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+    if preferred and _is_private_chat(preferred):
+        return preferred
+    return ""
+
+
+def _binance_sign_params(params):
+    q = urlencode(params, doseq=True)
+    signature = hmac.new(
+        BINANCE_API_SECRET.encode("utf-8"),
+        q.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{q}&signature={signature}"
+
+
+def _binance_request(method, path, params=None, signed=False, timeout=6):
+    params = dict(params or {})
+    headers = {}
+    if BINANCE_API_KEY:
+        headers["X-MBX-APIKEY"] = BINANCE_API_KEY
+
+    if signed:
+        params["timestamp"] = int(time.time() * 1000)
+        params.setdefault("recvWindow", 5000)
+        payload = _binance_sign_params(params)
+    else:
+        payload = urlencode(params, doseq=True)
+
+    url = f"{BINANCE_BASE_URL}{path}"
+    if payload:
+        url = f"{url}?{payload}"
+
+    if method == "POST":
+        resp = HTTP_SESSION.post(url, headers=headers, timeout=timeout)
+    elif method == "DELETE":
+        resp = HTTP_SESSION.delete(url, headers=headers, timeout=timeout)
+    else:
+        resp = HTTP_SESSION.get(url, headers=headers, timeout=timeout)
+
+    data = resp.json()
+    if resp.status_code >= 400:
+        raise Exception(f"binance_http_{resp.status_code}: {data}")
+    return data
+
+
+def _round_down_step(value, step):
+    if step <= 0:
+        return value
+    return max(0.0, (int(value / step)) * step)
+
+
+def _round_up_step(value, step):
+    if step <= 0:
+        return value
+    # 避免浮點誤差導致多跳一格
+    return max(0.0, math.ceil((value - 1e-12) / step) * step)
+
+
+def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=False):
+    """根據倉位比例計算下單數量。支持 USDT 名目 或 ETH 顆數 模式。"""
+    ratio = max(0.0, min(float(size_ratio), 1.0))
+    px = max(0.0, _safe_float(current_price, 0.0))
+    if ratio <= 0 or px <= 0:
+        return 0.0
+
+    # 判斷模式：若設定 ETH 顆數，使用 ETH 模式；否則用 USDT 名目
+    if BINANCE_ORDER_ETH_QTY > 0:
+        # ETH 顆數模式：100% = BINANCE_ORDER_ETH_QTY
+        raw_qty = BINANCE_ORDER_ETH_QTY * ratio
+        # ETH 模式下的最小患
+        min_qty = BINANCE_MIN_ETH_QTY
+    else:
+        # USDT 名目模式（傳統）
+        notional = BINANCE_ORDER_NOTIONAL_USDT * ratio
+        if enforce_min_notional and notional > 0:
+            notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
+        raw_qty = notional / px
+        # USDT 模式下的最小患
+        min_qty = BINANCE_MIN_QTY
+
+    if enforce_min_notional:
+        qty = _round_up_step(raw_qty, BINANCE_QTY_STEP)
+    else:
+        qty = _round_down_step(raw_qty, BINANCE_QTY_STEP)
+    
+    if qty < min_qty:
+        return 0.0
+    return qty
+
+
+def _binance_set_leverage_once():
+    if getattr(_binance_set_leverage_once, "done", False):
+        return True
+    if not _is_binance_copy_ready():
+        return False
+    try:
+        _binance_request(
+            "POST",
+            "/fapi/v1/leverage",
+            {"symbol": BINANCE_SYMBOL, "leverage": BINANCE_LEVERAGE},
+            signed=True,
+        )
+        _binance_set_leverage_once.done = True
+        return True
+    except Exception as e:
+        print(f"⚠️ 設定 Binance 槓桿失敗: {e}")
+        return False
+
+
+def _binance_is_dual_side_mode(force=False):
+    """查詢帳戶是否為 Hedge Mode（dualSidePosition=true）。"""
+    now = time.time()
+    cached = _BINANCE_POSITION_MODE_CACHE.get("dual")
+    if (not force) and cached is not None and now - _BINANCE_POSITION_MODE_CACHE.get("ts", 0.0) < 300:
+        return bool(cached)
+
+    try:
+        data = _binance_request("GET", "/fapi/v1/positionSide/dual", {}, signed=True)
+        raw = data.get("dualSidePosition")
+        dual = bool(raw) if isinstance(raw, bool) else str(raw).strip().lower() == "true"
+        _BINANCE_POSITION_MODE_CACHE["dual"] = dual
+        _BINANCE_POSITION_MODE_CACHE["ts"] = now
+        return dual
+    except Exception as e:
+        print(f"⚠️ 讀取 Binance 倉位模式失敗: {e}")
+        if cached is not None:
+            return bool(cached)
+        return False
+
+
+def _binance_finalize_order_params(params, position_side=None, reduce_only=False):
+    """根據 Binance 倉位模式補齊參數，避免 -4061。"""
+    if _binance_is_dual_side_mode():
+        if position_side in ("LONG", "SHORT"):
+            params["positionSide"] = position_side
+    elif reduce_only:
+        params["reduceOnly"] = "true"
+    return params
+
+
+def _binance_place_market_order(side, qty, reduce_only=False, position_side=None):
+    """在 Binance 下市價單（MARKET）。平倉/減倉使用此函式以避免 -4061。"""
+    if qty <= 0:
+        return False, "qty<=0"
+    if not _is_binance_copy_ready():
+        return False, "binance_copy_not_ready"
+
+    try:
+        _binance_set_leverage_once()
+        params = {
+            "symbol": BINANCE_SYMBOL,
+            "side": side,
+            "type": "MARKET",
+            "quantity": f"{qty:.6f}",
+        }
+        params = _binance_finalize_order_params(params, position_side=position_side, reduce_only=reduce_only)
+
+        data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
+        return True, data
+    except Exception as e:
+        return False, str(e)
+
+
+def _binance_place_limit_order(side, qty, price, reduce_only=False, position_side=None):
+    """在 Binance 下限價單（LIMIT）。開倉/補倉使用此函式。"""
+    if qty <= 0:
+        return False, "qty<=0"
+    if not _is_binance_copy_ready():
+        return False, "binance_copy_not_ready"
+
+    try:
+        _binance_set_leverage_once()
+        params = {
+            "symbol": BINANCE_SYMBOL,
+            "side": side,
+            "type": "LIMIT",
+            "quantity": f"{qty:.6f}",
+            "price": f"{price:.2f}",
+            "timeInForce": "GTC",
+        }
+        params = _binance_finalize_order_params(params, position_side=position_side, reduce_only=reduce_only)
+        data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
+        return True, data
+    except Exception as e:
+        return False, str(e)
+
+
+def _binance_get_order(order_id):
+    """查詢單一訂單狀態。"""
+    try:
+        if not order_id:
+            return False, "missing_order_id"
+        data = _binance_request(
+            "GET",
+            "/fapi/v1/order",
+            {"symbol": BINANCE_SYMBOL, "orderId": int(order_id)},
+            signed=True,
+        )
+        return True, data
+    except Exception as e:
+        return False, str(e)
+
+
+def _binance_wait_limit_fill_then_maybe_cancel(order_id, timeout_sec=20):
+    """等待限價單成交；逾時未成交則取消。"""
+    started = time.time()
+    last_order = None
+
+    while time.time() - started < max(1.0, float(timeout_sec)):
+        ok, order_data = _binance_get_order(order_id)
+        if ok:
+            last_order = order_data
+            status = str(order_data.get("status") or "").upper()
+            if status in ("FILLED", "CANCELED", "EXPIRED", "REJECTED"):
+                return ok, order_data, False
+        time.sleep(0.8)
+
+    # 超時，嘗試取消未成交訂單
+    ok_cancel, cancel_data = _binance_cancel_order(order_id)
+    if ok_cancel:
+        ok, order_data = _binance_get_order(order_id)
+        if ok:
+            return True, order_data, True
+    return False, cancel_data, True
+
+
+def _binance_place_stop_market_close(direction, stop_price):
+    """掛 Binance 原生止損單（STOP_MARKET + closePosition）。"""
+    px = _safe_float(stop_price, 0.0)
+    if px <= 0:
+        return False, "stop_price_invalid", None
+    if not _is_binance_copy_ready():
+        return False, "binance_copy_not_ready", None
+
+    try:
+        _binance_set_leverage_once()
+        side = "SELL" if direction == "long" else "BUY"
+        position_side = "LONG" if direction == "long" else "SHORT"
+        params = {
+            "symbol": BINANCE_SYMBOL,
+            "side": side,
+            "type": "STOP_MARKET",
+            "stopPrice": f"{px:.2f}",
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "priceProtect": "TRUE",
+        }
+        params = _binance_finalize_order_params(params, position_side=position_side, reduce_only=False)
+        data = _binance_request("POST", "/fapi/v1/order", params, signed=True)
+        return True, data, data.get("orderId")
+    except Exception as e:
+        return False, str(e), None
+
+
+def _binance_cancel_order(order_id):
+    if not order_id:
+        return True, "no_order_id"
+    try:
+        data = _binance_request(
+            "DELETE",
+            "/fapi/v1/order",
+            {"symbol": BINANCE_SYMBOL, "orderId": int(order_id)},
+            signed=True,
+        )
+        return True, data
+    except Exception as e:
+        msg = str(e)
+        # 已成交/已取消時，視為可接受
+        if "-2011" in msg or "Unknown order" in msg:
+            return True, msg
+        return False, msg
+
+
+def _clear_native_stop_tracking():
+    active_trade["binance_sl_order_id"] = None
+    active_trade["binance_sl_price"] = 0.0
+
+
+def _cancel_native_stop_loss_order():
+    order_id = active_trade.get("binance_sl_order_id")
+    if not order_id:
+        _clear_native_stop_tracking()
+        return True, "no_native_stop"
+
+    ok, data = _binance_cancel_order(order_id)
+    _clear_native_stop_tracking()
+    return ok, data
+
+
+def sync_binance_set_native_stop_loss(direction, stop_price):
+    """同步原生止損單：先撤舊單，再掛新 STOP_MARKET。"""
+    if not _is_binance_copy_ready():
+        return True, "skip_not_enabled"
+
+    _cancel_native_stop_loss_order()
+    ok, data, order_id = _binance_place_stop_market_close(direction, stop_price)
+    if ok:
+        active_trade["binance_sl_order_id"] = order_id
+        active_trade["binance_sl_price"] = _safe_float(stop_price, 0.0)
+    return ok, data
+
+
+def _fetch_binance_position_entry(direction):
+    """查詢 Binance 實際持倉均價（entryPrice），未持倉或失敗時回傳 0.0。"""
+    try:
+        data = _binance_request("GET", "/fapi/v2/positionRisk", {"symbol": BINANCE_SYMBOL}, signed=True)
+        target_side = "LONG" if direction == "long" else "SHORT"
+        for pos in (data if isinstance(data, list) else []):
+            if pos.get("symbol") != BINANCE_SYMBOL:
+                continue
+            # Hedge Mode：比對 positionSide；One-way Mode：忽略
+            if _binance_is_dual_side_mode():
+                if pos.get("positionSide") != target_side:
+                    continue
+            ep = _safe_float(pos.get("entryPrice"), 0.0)
+            amt = _safe_float(pos.get("positionAmt"), 0.0)
+            if abs(amt) > 1e-9 and ep > 0:
+                return ep
+        return 0.0
+    except Exception as e:
+        print(f"⚠️ 查詢 Binance 進場均價失敗: {e}")
+        return 0.0
+
+
+def sync_binance_open_position(direction, size_ratio, current_price):
+    if not _is_binance_copy_ready():
+        return True, "skip_not_enabled"
+
+    qty = _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=True)
+    if qty <= 0:
+        return False, "quantity_too_small"
+    
+    # 檢查實際名目是否達到最小值（避免 -4164）
+    notional = qty * current_price
+    if notional < BINANCE_MIN_NOTIONAL_USDT:
+        return False, f"notional_too_small_{notional:.2f}<{BINANCE_MIN_NOTIONAL_USDT}"
+
+    side = "BUY" if direction == "long" else "SELL"
+    position_side = "LONG" if direction == "long" else "SHORT"
+    # 開倉用市價單：確保即時成交，避免限價單超時取消
+    ok, data = _binance_place_market_order(side, qty, reduce_only=False, position_side=position_side)
+    if ok:
+        executed_qty = _safe_float((data or {}).get("executedQty"), 0.0) if isinstance(data, dict) else 0.0
+        active_trade["binance_qty"] = float(executed_qty if executed_qty > 0 else qty)
+        # 從訂單回傳的 avgPrice 取得實際成交價
+        try:
+            avg_price = float((data or {}).get("avgPrice") or 0)
+        except (ValueError, TypeError):
+            avg_price = 0.0
+        # avgPrice=0 時（少見）查詢 positionRisk 取得進場均價
+        if avg_price <= 0:
+            avg_price = _fetch_binance_position_entry(direction)
+        if avg_price > 0:
+            active_trade["entry"] = avg_price
+            active_trade["avg_entry"] = avg_price
+        return True, data
+    return False, data
+
+
+def sync_binance_adjust_position(direction, action, delta_ratio, current_price):
+    if not _is_binance_copy_ready():
+        return True, "skip_not_enabled"
+
+    enforce_min_notional = action == "add"
+    qty = _binance_qty_from_size_ratio(delta_ratio, current_price, enforce_min_notional=enforce_min_notional)
+    if qty <= 0:
+        return False, "quantity_too_small"
+
+    # 檢查實際名目是否達到最小值（避免 -4164）
+    notional = qty * current_price
+    if enforce_min_notional and notional < BINANCE_MIN_NOTIONAL_USDT:
+        return False, f"notional_too_small_{notional:.2f}<{BINANCE_MIN_NOTIONAL_USDT}"
+
+    tracked_qty = max(0.0, _safe_float(active_trade.get("binance_qty"), 0.0))
+    if action == "reduce" and tracked_qty > 0:
+        qty = min(qty, tracked_qty)
+        qty = _round_down_step(qty, BINANCE_QTY_STEP)
+        if qty < BINANCE_MIN_QTY:
+            return False, "reduce_qty_too_small"
+
+    if action == "add":
+        side = "BUY" if direction == "long" else "SELL"
+        position_side = "LONG" if direction == "long" else "SHORT"
+        # 補倉用限價單
+        ok, data = _binance_place_limit_order(side, qty, current_price, position_side=position_side)
+        if ok:
+            active_trade["binance_qty"] = tracked_qty + qty
+            # 補倉後從 Binance 同步實際均價（取代虛擬計算）
+            actual_ep = _fetch_binance_position_entry(direction)
+            if actual_ep > 0:
+                active_trade["entry"] = actual_ep
+                active_trade["avg_entry"] = actual_ep
+            return True, data
+        return False, data
+    else:
+        side = "SELL" if direction == "long" else "BUY"
+        position_side = "LONG" if direction == "long" else "SHORT"
+        # 減倉用市價單（limit+reduceOnly 會觸發 -4061）
+        ok, data = _binance_place_market_order(side, qty, reduce_only=True, position_side=position_side)
+        if ok:
+            active_trade["binance_qty"] = max(0.0, tracked_qty - qty)
+            return True, data
+        return False, data
+
+
+def sync_binance_close_position(current_price, reason="TP/SL"):
+    if not _is_binance_copy_ready():
+        return True, "skip_not_enabled"
+
+    direction = active_trade.get("direction")
+    if direction not in ("long", "short"):
+        return False, "direction_invalid"
+
+    qty = max(0.0, _safe_float(active_trade.get("binance_qty"), 0.0))
+    if qty < BINANCE_MIN_QTY:
+        # 若沒有追蹤到實際數量，退回用當前 size 推估
+        qty = _binance_qty_from_size_ratio(_safe_float(active_trade.get("size"), 0.0), current_price)
+    if qty <= 0:
+        return False, "close_qty_too_small"
+
+    # 止盈/手動平倉前先撤掉原生止損單，避免殘單。
+    _cancel_native_stop_loss_order()
+
+    side = "SELL" if direction == "long" else "BUY"
+    position_side = "LONG" if direction == "long" else "SHORT"
+    # 平倉用市價單（limit+reduceOnly 會觸發 -4061）
+    ok, data = _binance_place_market_order(side, qty, reduce_only=True, position_side=position_side)
+    if ok:
+        active_trade["binance_qty"] = 0.0
+        _clear_native_stop_tracking()
+        return True, data
+
+    send_telegram(f"⚠️ Binance 平倉失敗（{reason}）：{data}", priority=True)
+    return False, data
 
 
 def _normalize_finance_terms_zh(text):
@@ -1157,6 +1692,10 @@ def manage_position_scaling(current_price, atr=None):
     if add_trigger and add_count < max_add_count and size < max_size - 1e-9:
         delta = min(add_step, max_size - size)
         if delta > 0:
+            ok_sync, sync_msg = sync_binance_adjust_position(direction, "add", delta, current_price)
+            if not ok_sync:
+                send_telegram(f"⚠️ Binance 補倉失敗，已取消本次補倉: {sync_msg}", priority=True)
+                return
             new_size = size + delta
             # 均價更新（虛擬倉位）
             new_entry = ((entry * size) + (current_price * delta)) / max(new_size, 1e-9)
@@ -1174,6 +1713,13 @@ def manage_position_scaling(current_price, atr=None):
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
             )
+            _send_private_telegram_text(
+                f"➕ 補倉（{direction}）\n"
+                f"現價: {current_price:.2f} | 加倉: +{int(delta*100)}%\n"
+                f"進場均價: {new_entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%"
+            )
+            send_follow_action_alert("add", direction, current_price, delta, new_size, new_entry, tp_text, sl_text)
             refresh_position_panel_from_active_trade()
             return
 
@@ -1181,6 +1727,10 @@ def manage_position_scaling(current_price, atr=None):
     if reduce_trigger and size > min_size + 1e-9:
         delta = min(reduce_step, size - min_size)
         if delta > 0:
+            ok_sync, sync_msg = sync_binance_adjust_position(direction, "reduce", delta, current_price)
+            if not ok_sync:
+                send_telegram(f"⚠️ Binance 減倉失敗，已取消本次減倉: {sync_msg}", priority=True)
+                return
             new_size = size - delta
             tp_text = f"{_safe_float(active_trade.get('tp'), 0.0):.2f}" if active_trade.get("tp") is not None else "N/A"
             sl_text = f"{_safe_float(active_trade.get('sl'), 0.0):.2f}" if active_trade.get("sl") is not None else "N/A"
@@ -1194,6 +1744,13 @@ def manage_position_scaling(current_price, atr=None):
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%",
                 priority=True,
             )
+            _send_private_telegram_text(
+                f"➖ 減倉（{direction}）\n"
+                f"現價: {current_price:.2f} | 減倉: -{int(delta*100)}%\n"
+                f"進場均價: {entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%"
+            )
+            send_follow_action_alert("reduce", direction, current_price, delta, new_size, entry, tp_text, sl_text)
             refresh_position_panel_from_active_trade()
 
 
@@ -1253,8 +1810,6 @@ def maybe_decay_take_profit(current_price):
             priority=True,
         )
         refresh_position_panel_from_active_trade()
-
-
 def get_signal_direction(signal):
     s = str(signal or "")
     if "做多" in s:
@@ -1381,11 +1936,32 @@ active_trade = {
     "last_adjust_ts": 0.0,
     "open_ts": 0.0,
     "tp_decay_count": 0,
+    "binance_qty": 0.0,
+    "binance_sl_order_id": None,
+    "binance_sl_price": 0.0,
+    "last_close_reason": "",
+    "last_close_price": 0.0,
+    "last_close_ts": 0,
+    "last_close_candle_high": 0.0,
+    "last_close_candle_low": 0.0,
 }
+
+
+def _record_close_hit(reason, current_price, candle_high, candle_low):
+    """記錄最近一次平倉原因與命中價格資訊，供 mini app 顯示。"""
+    active_trade["last_close_reason"] = str(reason or "").upper()
+    active_trade["last_close_price"] = _safe_float(current_price, 0.0)
+    active_trade["last_close_candle_high"] = _safe_float(candle_high, 0.0)
+    active_trade["last_close_candle_low"] = _safe_float(candle_low, 0.0)
+    active_trade["last_close_ts"] = int(time.time())
 
 # =============================
 # KLINE CACHE（避免打爆API）
 # =============================
+
+# ===== 跟單模式 =====
+FOLLOW_MODE_ENABLED = False
+_FOLLOW_BUTTON_MSG_ID = None  # 跟單按鈕訊息 ID（用於更新按鈕文字）
 KLINE_CACHE = {}
 KLINE_TTL = {
     "4h": 60*60,
@@ -1661,8 +2237,35 @@ def log_data(features, label):
 
         log_buffer = []
 
-def send_telegram(msg, priority=False, pin=False):
-    global LAST_TELEGRAM_TS, TELEGRAM_PINNED_MESSAGE_ID
+
+def _send_private_telegram_text(msg):
+    
+    """若有設定私聊 chat id，則同步發送文字訊息到私聊。"""
+    private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+    group_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
+    if not TELEGRAM_TOKEN or not private_chat_id:
+        return
+    if private_chat_id == group_chat_id:
+        return
+
+    try:
+        payload = _with_forced_remove_reply_keyboard(
+            {
+                "chat_id": private_chat_id,
+                "text": str(msg),
+            },
+            private_chat_id,
+        )
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json=payload,
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"⚠️ 私聊訊息發送失敗: {e}")
+
+def send_telegram(msg, priority=False):
+    global LAST_TELEGRAM_TS
 
     now = time.time()
 
@@ -1682,13 +2285,15 @@ def send_telegram(msg, priority=False, pin=False):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": safe_msg
     }
+    payload = _with_forced_remove_reply_keyboard(payload, TELEGRAM_CHAT_ID)
 
     try:
-        res = requests.post(url, data=payload, timeout=5)
+        res = requests.post(url, json=payload, timeout=5)
         if res.status_code == 400:
             # fallback without any特殊字元問題
             payload["text"] = str(msg).replace("<", "").replace(">", "")
-            res = requests.post(url, data=payload, timeout=5)
+            payload = _with_forced_remove_reply_keyboard(payload, TELEGRAM_CHAT_ID)
+            res = requests.post(url, json=payload, timeout=5)
         sent_message_id = None
 
         if res.status_code != 200:
@@ -1705,7 +2310,8 @@ def send_telegram(msg, priority=False, pin=False):
         if res.status_code != 200:
             try:
                 time.sleep(1)
-                res2 = requests.post(url, data=payload, timeout=5)
+                payload = _with_forced_remove_reply_keyboard(payload, TELEGRAM_CHAT_ID)
+                res2 = requests.post(url, json=payload, timeout=5)
                 print("🔁 retry:", res2.status_code)
             except Exception as e:
                 print("❌ retry失敗:", e)
@@ -1717,36 +2323,61 @@ def send_telegram(msg, priority=False, pin=False):
         except Exception as e:
             print("Discord error:", e)
 
-        if pin and sent_message_id is not None:
-            try:
-                pin_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/pinChatMessage"
-                pin_res = requests.post(
-                    pin_url,
-                    data={
-                        "chat_id": TELEGRAM_CHAT_ID,
-                        "message_id": sent_message_id,
-                        "disable_notification": True,
-                    },
-                    timeout=5,
-                )
-                if pin_res.status_code == 200:
-                    TELEGRAM_PINNED_MESSAGE_ID = sent_message_id
-            except Exception as e:
-                print("⚠️ Telegram 置頂失敗:", e)
-
         LAST_TELEGRAM_TS = now
 
     except Exception as e:
         print("❌ Telegram error:", e, "| msg:", msg[:50])
 
 
-WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/"
+WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/index.html"
+WEBAPP_VERSION = str(os.getenv("WEBAPP_VERSION", "20260421-1")).strip() or "20260421-1"
+
+
+def _build_private_bottom_keyboard():
+    """建立私聊底部鍵盤（倉位面板 + 跟單設定），避免被 remove_keyboard 收掉。"""
+    if active_trade.get("open") and active_trade.get("direction") in ("long", "short"):
+        direction = active_trade.get("direction")
+        entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+        tp = _safe_float(active_trade.get("tp"), 0.0)
+        sl = _safe_float(active_trade.get("sl"), 0.0)
+        size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+        size_pct = int(size * 100)
+        dir_param = "long" if direction == "long" else "short"
+        url = (
+            f"{WEBAPP_BASE_URL}"
+            f"?v={WEBAPP_VERSION}"
+            f"&dir={dir_param}"
+            f"&entry={entry:.2f}"
+            f"&tp={tp:.2f}"
+            f"&sl={sl:.2f}"
+            f"&size={size_pct}"
+            f"&pair=ETHUSDT"
+            f"&lev=10"
+        )
+    else:
+        url = (
+            f"{WEBAPP_BASE_URL}"
+            f"?v={WEBAPP_VERSION}"
+            f"&restart=1"
+            f"&pair=ETHUSDT"
+            f"&lev=10"
+            f"&t={int(time.time())}"
+        )
+
+    return {
+        "keyboard": [[
+            {"text": "📊 倉位面板", "web_app": {"url": url}},
+            {"text": "👥 跟單設定"},
+        ]],
+        "resize_keyboard": True,
+        "persistent": True,
+    }
 
 
 def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, tp_display=None, sl_display=None, is_update=False):
     """進場後在 Telegram 發出倉位面板按鈕（私聊用 Web App，群組/頻道用 URL 按鈕）。
     entry_display, tp_display, sl_display: 若提供則使用此字串確保訊息與網址一致。"""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_TOKEN:
         return
 
     try:
@@ -1760,7 +2391,8 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
         
         url = (
             f"{WEBAPP_BASE_URL}"
-            f"?dir={dir_param}"
+            f"?v={WEBAPP_VERSION}"
+            f"&dir={dir_param}"
             f"&entry={entry_str}"
             f"&tp={tp_str}"
             f"&sl={sl_str}"
@@ -1769,39 +2401,62 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
             f"&lev=10"
         )
         
-        # 判斷是否為私聊（chat_id 為正數）或群組/頻道（負數）
-        try:
-            chat_id_int = int(TELEGRAM_CHAT_ID)
-            is_private = chat_id_int > 0
-        except (ValueError, TypeError):
-            is_private = True  # 預設為私聊
-        
-        if is_private:
-            # 私聊：使用 Web App 按鈕（底部按鈕）
-            keyboard = {
-                "keyboard": [[{"text": "📊 開啟倉位面板", "web_app": {"url": url}}]],
-                "resize_keyboard": True,
-                "persistent": True,
-            }
-            text = "📊 倉位面板已更新，點擊底部按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊底部按鈕查看即時面板"
-        else:
-            # 群組/頻道：使用 inline 按鈕（URL）
-            keyboard = {
-                "inline_keyboard": [[
-                    {"text": "📊 開啟倉位面板", "url": url}
-                ]]
-            }
-            text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
-        
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "reply_markup": keyboard,
-            },
-            timeout=5,
-        )
+        main_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
+        private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+
+        # 群組/頻道：inline URL 按鈕
+        group_keyboard = {
+            "inline_keyboard": [[
+                {"text": "📊 倉位面板", "url": url}
+            ]]
+        }
+        group_text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
+
+        # 私聊：底部鍵盤（倉位面板 web_app + 跟單設定文字按鈕）
+        private_keyboard = {
+            "keyboard": [[
+                {"text": "📊 倉位面板", "web_app": {"url": url}},
+                {"text": "👥 跟單設定"},
+            ]],
+            "resize_keyboard": True,
+            "persistent": True,
+        }
+        private_text = "📊 倉位面板已更新" if is_update else "📊 倉位已建立，面板顯示在下方"
+
+        # 主 chat
+        if main_chat_id:
+            if _is_private_chat(main_chat_id):
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": main_chat_id,
+                        "text": private_text,
+                        "reply_markup": private_keyboard,
+                    },
+                    timeout=5,
+                )
+            else:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": main_chat_id,
+                        "text": group_text,
+                        "reply_markup": group_keyboard,
+                    },
+                    timeout=5,
+                )
+
+        # 私聊額外通知：TELEGRAM_PRIVATE_CHAT_ID 與主 chat 不同時才發送
+        if private_chat_id and _is_private_chat(private_chat_id) and private_chat_id != main_chat_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": private_chat_id,
+                    "text": private_text,
+                    "reply_markup": private_keyboard,
+                },
+                timeout=5,
+            )
     except Exception as e:
         print(f"⚠️ 倉位面板按鈕發送失敗: {e}")
 
@@ -1838,53 +2493,332 @@ def refresh_position_panel_from_active_trade():
         sl_display=sl_str,
         is_update=True,
     )
+    write_position_json()
+    push_position_json()
+
+
+_last_position_push_ts = 0
+_POSITION_PUSH_MIN_INTERVAL = 5  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
+_position_push_lock = Lock()
+_position_push_git_lock = Lock()
+
+
+def write_position_json():
+    """將目前 active_trade 狀態寫入 docs/position.json，供 mini app / web app 即時讀取。"""
+    try:
+        is_open = bool(active_trade.get("open", False))
+        # 使用 avg_entry（平均進場價），與 refresh_position_panel_from_active_trade 保持一致
+        entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+        tp = _safe_float(active_trade.get("tp"), 0.0)
+        sl = _safe_float(active_trade.get("sl"), 0.0)
+        size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+        data = {
+            "open": is_open,
+            "direction": active_trade.get("direction") or "",
+            "entry": round(entry, 4),
+            "tp": round(tp, 4),
+            "sl": round(sl, 4),
+            "size": round(size, 4),
+            "last_close_reason": str(active_trade.get("last_close_reason") or ""),
+            "last_close_price": round(_safe_float(active_trade.get("last_close_price"), 0.0), 4),
+            "last_close_ts": int(_safe_float(active_trade.get("last_close_ts"), 0.0)),
+            "last_close_candle_high": round(_safe_float(active_trade.get("last_close_candle_high"), 0.0), 4),
+            "last_close_candle_low": round(_safe_float(active_trade.get("last_close_candle_low"), 0.0), 4),
+            "pair": "ETHUSDT",
+            "lev": 10,
+            "ts": int(time.time()),
+        }
+        POSITION_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+        POSITION_JSON_PATH.write_text(
+            json.dumps(data, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"⚠️ 寫入 position.json 失敗: {e}")
+
+
+def push_position_json():
+    """在背景執行緒中 git commit + push docs/position.json（有節流保護）。"""
+    global _last_position_push_ts
+    try:
+        min_interval = max(3.0, float(os.getenv("POSITION_PUSH_INTERVAL", str(_POSITION_PUSH_MIN_INTERVAL))))
+    except Exception:
+        min_interval = float(_POSITION_PUSH_MIN_INTERVAL)
+    now = time.time()
+    with _position_push_lock:
+        if now - _last_position_push_ts < min_interval:
+            return
+        _last_position_push_ts = now
+
+    repo_dir = str(POSITION_JSON_PATH.parent.parent)
+    rel_path = "docs/position.json"
+
+    def _push():
+        def _run_git(args, timeout=30):
+            return subprocess.run(
+                ["git"] + args,
+                cwd=repo_dir,
+                timeout=timeout,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+        try:
+            with _position_push_git_lock:
+                _run_git(["add", rel_path], timeout=10)
+
+                result = _run_git(["commit", "-m", "chore: update position data"], timeout=10)
+                commit_out = (result.stdout or "").strip()
+
+                if result.returncode != 0 and "nothing to commit" not in commit_out:
+                    print(f"⚠️ 提交 position.json 失敗: {commit_out}")
+                    return
+
+                push_result = _run_git(["push"], timeout=30)
+                if push_result.returncode == 0:
+                    return
+
+                push_out = (push_result.stdout or "").strip()
+                non_ff = (
+                    "non-fast-forward" in push_out
+                    or "fetch first" in push_out
+                    or "tip of your current branch is behind" in push_out
+                )
+
+                if not non_ff:
+                    print(f"⚠️ 推送 position.json 失敗: {push_out}")
+                    return
+
+                # 遠端比本地新：先 rebase 同步後再重推
+                branch_res = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], timeout=10)
+                branch = (branch_res.stdout or "").strip() or "HEAD"
+
+                pull_result = _run_git(["pull", "--rebase", "--autostash", "origin", branch], timeout=45)
+                if pull_result.returncode != 0:
+                    print(f"⚠️ 自動同步遠端失敗: {(pull_result.stdout or '').strip()}")
+                    return
+
+                retry_push = _run_git(["push"], timeout=30)
+                if retry_push.returncode != 0:
+                    print(f"⚠️ 推送 position.json 失敗(重試後): {(retry_push.stdout or '').strip()}")
+        except Exception as e:
+            print(f"⚠️ 推送 position.json 失敗: {e}")
+
+    threading.Thread(target=_push, daemon=True).start()
 
 
 def remove_position_keyboard():
-    """平倉後移除底部 Web App 鍵盤。"""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+    """平倉後更新底部 web_app 鍵盤為待機狀態（無倉位面板），讓使用者可重啟。"""
+    if not TELEGRAM_TOKEN:
         return
 
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": "📋 倉位已平倉，面板已關閉",
-                "reply_markup": {"remove_keyboard": True},
-            },
-            timeout=5,
-        )
-    except Exception as e:
-        print(f"⚠️ 移除鍵盤失敗: {e}")
+    main_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
+    private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+
+    target_ids = []
+    if main_chat_id and _is_private_chat(main_chat_id):
+        target_ids.append(main_chat_id)
+    if private_chat_id and _is_private_chat(private_chat_id) and private_chat_id not in target_ids:
+        target_ids.append(private_chat_id)
+
+    restart_url = (
+        f"{WEBAPP_BASE_URL}"
+        f"?v={WEBAPP_VERSION}"
+        f"&restart=1"
+        f"&pair=ETHUSDT"
+        f"&lev=10"
+        f"&t={int(time.time())}"
+    )
+    restart_keyboard = {
+        "keyboard": [[
+            {"text": "📊 倉位面板", "web_app": {"url": restart_url}},
+            {"text": "👥 跟單設定"},
+        ]],
+        "resize_keyboard": True,
+        "persistent": True,
+    }
+
+    for cid in target_ids:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": cid,
+                    "text": "📋 倉位已平倉，面板已重置",
+                    "reply_markup": restart_keyboard,
+                },
+                timeout=5,
+            )
+        except Exception as e:
+            print(f"⚠️ 重置底部面板失敗: {e}")
+
+    write_position_json()
+    push_position_json()
 
 
-def clear_telegram_pin():
-    """解除目前開倉通知置頂（若有）。"""
-    global TELEGRAM_PINNED_MESSAGE_ID
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    if TELEGRAM_PINNED_MESSAGE_ID is None:
-        return
-
-    try:
-        unpin_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/unpinChatMessage"
-        requests.post(
-            unpin_url,
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "message_id": TELEGRAM_PINNED_MESSAGE_ID,
-            },
-            timeout=5,
-        )
-    except Exception as e:
-        print("⚠️ Telegram 解除置頂失敗:", e)
-    finally:
-        TELEGRAM_PINNED_MESSAGE_ID = None
 
 
 # ===== AI分析（OpenClaw / OpenAI） =====
 OPENAI_API_KEY = _get_required_env("OPENAI_API_KEY", "", mask=True)
+
+
+# ===== 跟單模式輔助函數 =====
+def toggle_follow_mode():
+    """切換跟單模式開/關，回傳切換後狀態。"""
+    global FOLLOW_MODE_ENABLED
+    FOLLOW_MODE_ENABLED = not FOLLOW_MODE_ENABLED
+    return FOLLOW_MODE_ENABLED
+
+
+def send_follow_button(is_update=False):
+    """發送或更新跟單切換按鈕（inline keyboard）。"""
+    global _FOLLOW_BUTTON_MSG_ID
+    private_chat_id = _resolve_follow_private_chat_id()
+    if not TELEGRAM_TOKEN or not private_chat_id:
+        return
+
+    btn_text = "✅ 跟單中（點擊關閉幣安下單）" if FOLLOW_MODE_ENABLED else "📈 開啟跟單（幣安自動下單）"
+
+    try:
+        if is_update and _FOLLOW_BUTTON_MSG_ID:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageReplyMarkup",
+                json={
+                    "chat_id": private_chat_id,
+                    "message_id": _FOLLOW_BUTTON_MSG_ID,
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            {"text": btn_text, "callback_data": "toggle_follow"}
+                        ]]
+                    },
+                },
+                timeout=5,
+            )
+        else:
+            resp = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json={
+                    "chat_id": private_chat_id,
+                    "text": "👥 跟單模式：開啟後，Bot 每次開倉/補倉/減倉/平倉都會同步在你的幣安帳戶下對應市價單",
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            {"text": btn_text, "callback_data": "toggle_follow"}
+                        ]]
+                    },
+                },
+                timeout=5,
+            )
+            result = resp.json()
+            if result.get("ok"):
+                _FOLLOW_BUTTON_MSG_ID = result["result"]["message_id"]
+    except Exception as e:
+        print(f"⚠️ 跟單按鈕發送失敗: {e}")
+
+
+def send_follow_action_alert(action, direction, current_price, delta, new_size, entry, tp_text, sl_text):
+    """跟單模式下，補倉/減倉時推送跟單提醒訊息。"""
+    if not FOLLOW_MODE_ENABLED:
+        return
+    private_chat_id = _resolve_follow_private_chat_id()
+    if not TELEGRAM_TOKEN or not private_chat_id:
+        return
+
+    action_emoji = "➕" if action == "add" else "➖"
+    action_zh   = "補倉" if action == "add" else "減倉"
+    dir_zh      = "做多" if direction == "long" else "做空"
+
+    try:
+        payload = _with_forced_remove_reply_keyboard(
+            {
+                "chat_id": private_chat_id,
+                "text": (
+                    f"👥 跟單提醒 | {action_emoji} {action_zh}\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"方向: {dir_zh} | 現價: {current_price:.2f}\n"
+                    f"操作: {action_zh} {int(delta * 100)}%\n"
+                    f"新倉位: {int(new_size * 100)}% | 均價: {entry:.2f}\n"
+                    f"TP: {tp_text} | SL: {sl_text}\n"
+                    f"━━━━━━━━━━━━━━"
+                ),
+            },
+            private_chat_id,
+        )
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json=payload,
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"⚠️ 跟單私聊提醒發送失敗: {e}")
+
+
+def _process_follow_callback(cq_data, cq_id, cq_msg_id, chat_id):
+    """處理 inline button 的 callback_query（跟單切換）。"""
+    private_chat_id = _resolve_follow_private_chat_id()
+    if cq_data != "toggle_follow":
+        return
+    if not private_chat_id or str(chat_id) != str(private_chat_id):
+        return
+
+    is_enabled = toggle_follow_mode()
+    has_keys = bool(BINANCE_API_KEY and BINANCE_API_SECRET)
+    if is_enabled and not has_keys:
+        # API Key 未設定，回滾並告知
+        toggle_follow_mode()  # 再切回 False
+        is_enabled = False
+        if cq_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                data={"callback_query_id": cq_id, "text": "❌ 尚未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法啟動跟單", "show_alert": True},
+                timeout=5,
+            )
+        return
+    status_text = "✅ 跟單模式已開啟！後續 Bot 操作將在幣安帳戶同步下單" if is_enabled else "⏹️ 跟單模式已關閉，幣安下單停止"
+    btn_text    = "✅ 跟單中（點擊關閉幣安下單）" if is_enabled else "📈 開啟跟單（幣安自動下單）"
+
+    # 開啟跟單且目前已有倉位 → 立刻在幣安同步開倉
+    if is_enabled and active_trade.get("open") and active_trade.get("direction"):
+        cur_price = WS_PRICE or active_trade.get("entry", 0)
+        if cur_price and cur_price > 0:
+            cur_size = _safe_float(active_trade.get("size"), 0.2)
+            ok_sync, sync_msg = sync_binance_open_position(active_trade["direction"], cur_size, cur_price)
+            if ok_sync:
+                status_text += "\n📌 已在幣安同步開立現有倉位"
+            else:
+                status_text += f"\n⚠️ 幣安同步開倉失敗: {sync_msg}"
+
+    try:
+        if cq_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+                data={"callback_query_id": cq_id, "text": status_text, "show_alert": True},
+                timeout=5,
+            )
+
+        msg_id = None
+        try:
+            msg_id = int(cq_msg_id) if cq_msg_id else _FOLLOW_BUTTON_MSG_ID
+        except (TypeError, ValueError):
+            msg_id = _FOLLOW_BUTTON_MSG_ID
+
+        if msg_id and private_chat_id:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/editMessageReplyMarkup",
+                json={
+                    "chat_id": private_chat_id,
+                    "message_id": msg_id,
+                    "reply_markup": {
+                        "inline_keyboard": [[
+                            {"text": btn_text, "callback_data": "toggle_follow"}
+                        ]]
+                    },
+                },
+                timeout=5,
+            )
+    except Exception as e:
+        print(f"⚠️ 跟單回調處理失敗: {e}")
 
 def ask_ai_analysis(prompt):
     if not OPENAI_API_KEY:
@@ -1979,7 +2913,7 @@ def pop_pending_commands():
 
 
 # ===== Telegram 指令（AI分析） =====
-def handle_ai_command(text, context=None):
+def handle_ai_command(text, context=None, chat_id=None):
     global BOT_SOFT_RESTART_REQUESTED
 
     if text.startswith("/restart"):
@@ -2036,6 +2970,60 @@ Volume Spike: {context.get('volume_spike')}
             return "📰 目前沒有抓到新的即時訊息"
         except Exception as e:
             return f"📰 新聞讀取失敗: {e}"
+
+    if text.startswith("/follow"):
+        private_chat_id = _resolve_follow_private_chat_id()
+        if not private_chat_id:
+            return "⚠️ 尚未設定 TELEGRAM_PRIVATE_CHAT_ID，無法啟用私聊跟單。"
+        if not _is_private_chat(chat_id) or str(chat_id) != str(private_chat_id):
+            return "🔒 跟單功能僅限私聊使用，請到私聊對話輸入 /follow。"
+
+        is_enabled = toggle_follow_mode()
+        if is_enabled:
+            if not (BINANCE_API_KEY and BINANCE_API_SECRET):
+                toggle_follow_mode()  # 回滾
+                return "❌ 尚未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法啟動跟單。"
+            # 若目前已有倉位，立刻同步到幣安
+            sync_note = ""
+            if active_trade.get("open") and active_trade.get("direction"):
+                cur_price = WS_PRICE or active_trade.get("entry", 0)
+                if cur_price and cur_price > 0:
+                    cur_size = _safe_float(active_trade.get("size"), 0.2)
+                    ok_sync, sync_msg = sync_binance_open_position(active_trade["direction"], cur_size, cur_price)
+                    if ok_sync:
+                        sync_note = "\n📌 已在幣安同步開立現有倉位"
+                    else:
+                        sync_note = f"\n⚠️ 幣安同步開倉失敗: {sync_msg}"
+            send_follow_button(is_update=False)
+            return f"✅ 跟單模式已開啟！每次補倉/減倉都會推送同步提醒。{sync_note}"
+        else:
+            send_follow_button(is_update=True)
+            return "⏹️ 跟單模式已關閉。"
+
+    if text.startswith("/binance"):
+        ready = _is_binance_copy_ready()
+        mode = "已啟用" if BINANCE_REAL_COPY_ENABLED else "未啟用"
+        key_ok = "有" if BINANCE_API_KEY else "無"
+        secret_ok = "有" if BINANCE_API_SECRET else "無"
+        return (
+            "🔗 Binance 實單跟單狀態\n"
+            f"模式: {mode}\n"
+            f"API Key: {key_ok}\n"
+            f"API Secret: {secret_ok}\n"
+            f"Symbol: {BINANCE_SYMBOL}\n"
+            f"Leverage: {BINANCE_LEVERAGE}x\n"
+            f"每筆基準名目: {BINANCE_ORDER_NOTIONAL_USDT:.2f} USDT\n"
+            f"可下單: {'是' if ready else '否（請確認 BINANCE_REAL_COPY_ENABLED=1 與 API 金鑰）'}"
+        )
+
+    normalized = str(text or "").strip()
+    if normalized in ("倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板"):
+        if active_trade.get("open"):
+            refresh_position_panel_from_active_trade()
+            return "📊 已更新倉位面板，請點底部「倉位面板」查看。"
+        write_position_json()
+        push_position_json()
+        return "📋 目前無持倉，已同步最新狀態到面板。"
 
     return None
 
@@ -2144,12 +3132,52 @@ def run_bot():
                     last_update_id = u.get("update_id")
                     if last_update_id is not None:
                         save_last_update_id(last_update_id)
+
+                    # ===== 處理 inline 按鈕 callback_query（非 supervisor）=====
+                    cq = u.get("callback_query")
+                    if cq:
+                        try:
+                            _process_follow_callback(
+                                cq.get("data", ""),
+                                cq.get("id", ""),
+                                cq.get("message", {}).get("message_id"),
+                                cq.get("message", {}).get("chat", {}).get("id"),
+                            )
+                        except Exception:
+                            pass
+                        continue
+
                     text = u.get("message", {}).get("text", "")
                     chat_id = u.get("message", {}).get("chat", {}).get("id")
 
                 try:
                     if not text:
                         continue
+
+                    # ===== supervisor 模式下轉發的 callback 命令 =====
+                    if text.startswith("__callback__:"):
+                        parts = text.split(":", 3)
+                        if len(parts) == 4:
+                            _, cq_data, cq_id, cq_msg_id = parts
+                            try:
+                                _process_follow_callback(cq_data, cq_id, cq_msg_id, chat_id)
+                            except Exception:
+                                pass
+                        continue
+
+                    # 私聊鎖定：關閉一般對話，只保留面板與控制指令
+                    private_chat_id = str(TELEGRAM_PRIVATE_CHAT_ID or "").strip()
+                    text_norm = str(text or "").strip()
+                    if TELEGRAM_PRIVATE_CHAT_LOCK and private_chat_id and str(chat_id) == private_chat_id:
+                        allowed_exact = {"倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板", "👥 跟單設定"}
+                        allowed_prefix = ("/follow", "/binance", "/restart")
+                        if text_norm not in allowed_exact and (not any(text_norm.startswith(p) for p in allowed_prefix)):
+                            continue
+
+                    # 底部「跟單設定」按鈕 → 等同 /follow
+                    if text_norm == "👥 跟單設定":
+                        text = "/follow"
+                        text_norm = "/follow"
 
                     # AI / 新聞指令
                     context = {
@@ -2163,12 +3191,17 @@ def run_bot():
                         "volume_spike": volume_spike if 'volume_spike' in locals() else None,
                     }
 
-                    reply = handle_ai_command(text, context)
+                    reply = handle_ai_command(text, context, chat_id=chat_id)
 
                     if reply:
+                        payload = {"chat_id": chat_id, "text": reply}
+                        # 由底部「跟單設定」觸發 /follow 時，保留 mini app 鍵盤不被 remove_keyboard 清掉
+                        if _is_private_chat(chat_id) and text_norm.startswith("/follow"):
+                            payload["reply_markup"] = _build_private_bottom_keyboard()
+                        payload = _with_forced_remove_reply_keyboard(payload, chat_id)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                            data={"chat_id": chat_id, "text": reply},
+                            json=payload,
                             timeout=5
                         )
                 except:
@@ -2283,15 +3316,24 @@ def run_bot():
 
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
+                        # 已掛原生止損時，避免再重複送市價平倉。
+                        if active_trade.get("binance_sl_order_id"):
+                            _clear_native_stop_tracking()
+                            active_trade["binance_qty"] = 0.0
+                        else:
+                            ok_close, close_msg = sync_binance_close_position(current, reason="SL")
+                            if not ok_close:
+                                print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
+                                continue
                         performance["loss"] += 1
                         performance["total"] += 1
+                        _record_close_hit("SL", current, candle_high, candle_low)
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
-                        clear_telegram_pin()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
@@ -2304,15 +3346,19 @@ def run_bot():
                         )
 
                     elif tp_hit:
+                        ok_close, close_msg = sync_binance_close_position(current, reason="TP")
+                        if not ok_close:
+                            print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
+                            continue
                         performance["win"] += 1
                         performance["total"] += 1
+                        _record_close_hit("TP", current, candle_high, candle_low)
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
-                        clear_telegram_pin()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak = 0
@@ -2330,15 +3376,24 @@ def run_bot():
 
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
+                        # 已掛原生止損時，避免再重複送市價平倉。
+                        if active_trade.get("binance_sl_order_id"):
+                            _clear_native_stop_tracking()
+                            active_trade["binance_qty"] = 0.0
+                        else:
+                            ok_close, close_msg = sync_binance_close_position(current, reason="SL")
+                            if not ok_close:
+                                print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
+                                continue
                         performance["loss"] += 1
                         performance["total"] += 1
+                        _record_close_hit("SL", current, candle_high, candle_low)
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
-                        clear_telegram_pin()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
@@ -2351,15 +3406,19 @@ def run_bot():
                         )
 
                     elif tp_hit:
+                        ok_close, close_msg = sync_binance_close_position(current, reason="TP")
+                        if not ok_close:
+                            print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
+                            continue
                         performance["win"] += 1
                         performance["total"] += 1
+                        _record_close_hit("TP", current, candle_high, candle_low)
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
                         active_trade["open_ts"] = 0.0
                         active_trade["tp_decay_count"] = 0
-                        clear_telegram_pin()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak = 0
@@ -2383,6 +3442,42 @@ def run_bot():
                     run_bot.last_news_monitor_ts = 0
 
                 if time.time() - run_bot.last_position_status_ts > 15:
+                    # 開啟跟單時，定期從 Binance 同步：進場均價 + 偵測原生止損是否已觸發
+                    if _is_binance_copy_ready():
+                        direction_now = active_trade.get("direction", "")
+                        actual_ep = _fetch_binance_position_entry(direction_now)
+                        if actual_ep > 0:
+                            old_ep = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+                            if abs(actual_ep - old_ep) > 0.01:
+                                active_trade["entry"] = actual_ep
+                                active_trade["avg_entry"] = actual_ep
+                                write_position_json()
+                            push_position_json()
+                        elif active_trade.get("binance_sl_order_id"):
+                            # Binance 回傳持倉量為 0 → 原生止損單已觸發，Bot 同步清倉
+                            print("⚠️ 偵測到 Binance 持倉已清空（原生止損觸發），Bot 同步平倉狀態")
+                            current_for_sl = _safe_float(active_trade.get("sl"), price)
+                            _clear_native_stop_tracking()
+                            active_trade["binance_qty"] = 0.0
+                            performance["loss"] += 1
+                            performance["total"] += 1
+                            _record_close_hit("SL", current_for_sl, current_for_sl, current_for_sl)
+                            active_trade["open"] = False
+                            active_trade["size"] = 0.0
+                            active_trade["add_count"] = 0
+                            active_trade["reduce_count"] = 0
+                            active_trade["open_ts"] = 0.0
+                            active_trade["tp_decay_count"] = 0
+                            losing_streak += 1
+                            last_signal_cache = None
+                            remove_position_keyboard()  # 內部已呼叫 write/push_position_json
+                            send_telegram(
+                                f"❌ SL 命中（Binance 原生止損觸發，Bot 同步）\n"
+                                f"已關閉倉位，等待下一筆交易",
+                                priority=True
+                            )
+                            run_bot.last_position_status_ts = time.time()
+                            continue
                     monitor_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
                     print(
                         f"📡 持倉監控 | 方向: {active_trade['direction']} | 倉位: {int(_safe_float(active_trade.get('size'), 0)*100)}% | 現價: {price:.2f} | 進場均價: {monitor_entry:.2f} | TP: {active_trade['tp']:.2f} | SL: {active_trade['sl']:.2f}"
@@ -2393,6 +3488,14 @@ def run_bot():
                     latest_news_preview = " | ".join(news_list[:4]) if news_list else "目前無新快訊（RSS 暫無資料）"
                     print(f"📰 新聞監控中 | {latest_news_preview}")
                     run_bot.last_news_monitor_ts = time.time()
+
+                # 持倉心跳：每 5 分鐘定期推送 position.json，確保 mini app 抓到最新 ts
+                if not hasattr(run_bot, "last_position_heartbeat_ts"):
+                    run_bot.last_position_heartbeat_ts = 0
+                if time.time() - run_bot.last_position_heartbeat_ts > 300:
+                    write_position_json()
+                    push_position_json()
+                    run_bot.last_position_heartbeat_ts = time.time()
 
                 time.sleep(0.8)
                 continue
@@ -3009,7 +4112,24 @@ def run_bot():
                     continue
 
                 print("📤 發送 Telegram")
-                send_telegram(msg, priority=True, pin=True)
+                send_telegram(msg, priority=True)
+                # 若設定私聊，同時發送開倉通知到私聊
+                if TELEGRAM_PRIVATE_CHAT_ID:
+                    try:
+                        private_payload = _with_forced_remove_reply_keyboard(
+                            {
+                                "chat_id": TELEGRAM_PRIVATE_CHAT_ID,
+                                "text": f"🔔 開倉通知 (私聊)\n\n{msg}",
+                            },
+                            TELEGRAM_PRIVATE_CHAT_ID,
+                        )
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json=private_payload,
+                            timeout=5,
+                        )
+                    except Exception as e:
+                        print(f"⚠️ 私聊開倉通知發送失敗: {e}")
                 last_signal_cache = msg
                 last_trade_time = now_ts
                 last_trade_signal = final
@@ -3027,7 +4147,16 @@ def run_bot():
                 base_size = _safe_float(position_size, 0.0)
                 if base_size <= 0:
                     base_size = 0.2
-                active_trade["size"] = float(min(1.0, max(base_size, 0.1)))
+                open_size_ratio = float(min(1.0, max(base_size, 0.1)))
+                ok_open, open_msg = sync_binance_open_position(direction, open_size_ratio, price)
+                if not ok_open:
+                    send_telegram(f"⚠️ Binance 開倉失敗，已取消本次交易: {open_msg}", priority=True)
+                    continue
+                
+                # 若開倉成功，active_trade["entry"] 已被更新為實際成交價
+                # 需要同步更新顯示文本，確保通知和 mini app 用相同的進場價
+
+                active_trade["size"] = open_size_ratio
                 active_trade["max_size"] = 1.0
                 active_trade["min_size"] = max(0.1, active_trade["size"] * 0.3)
                 active_trade["add_count"] = 0
@@ -3035,17 +4164,34 @@ def run_bot():
                 active_trade["last_adjust_ts"] = 0.0
                 active_trade["open_ts"] = time.time()
                 active_trade["tp_decay_count"] = 0
+                active_trade["last_close_reason"] = ""
+                active_trade["last_close_price"] = 0.0
+                active_trade["last_close_ts"] = 0
+                active_trade["last_close_candle_high"] = 0.0
+                active_trade["last_close_candle_low"] = 0.0
                 active_trade["open"] = True
+
+                # 止損改為 Binance 原生 STOP_MARKET；止盈維持 Bot 監控。
+                ok_native_sl, native_sl_msg = sync_binance_set_native_stop_loss(direction, sl)
+                if not ok_native_sl:
+                    send_telegram(f"⚠️ 原生止損單掛單失敗，暫回退 Bot 監控止損: {native_sl_msg}", priority=True)
+
+                # 用實際成交價（已更新的 entry）重新生成顯示字符串
+                actual_entry = active_trade["entry"]
+                actual_entry_display = f"{actual_entry:.2f}"
                 send_position_keyboard(
                     direction,
-                    float(entry),
+                    actual_entry,
                     tp,
                     sl,
                     active_trade["size"],
-                    entry_display=entry_display_str,
+                    entry_display=actual_entry_display,
                     tp_display=tp_display_str,
                     sl_display=sl_display_str,
                 )
+                send_follow_button(is_update=False)
+                write_position_json()
+                push_position_json()
 
             # ===== 記錄（未來價格）=====
             future_price = price
