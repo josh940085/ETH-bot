@@ -246,6 +246,7 @@
       margin-top: 10px;
       display: flex;
       justify-content: center;
+      gap: 8px;
     }
     .close-btn {
       border: 1px solid #e74c3c;
@@ -258,6 +259,19 @@
       cursor: pointer;
     }
     .close-btn:active {
+      transform: translateY(1px);
+    }
+    .panel-btn {
+      border: 1px solid #3c6d9f;
+      background: #172634;
+      color: #b2dbff;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    .panel-btn:active {
       transform: translateY(1px);
     }
 
@@ -284,7 +298,8 @@
   let SIZE   = parseFloat(p.get("size")  || "20");
   const PAIR   = p.get("pair")  || "ETHUSDT";
   const LEV    = parseInt(p.get("lev")     || "10", 10);
-  const hasUrlPosition = ENTRY > 0 && TP > 0 && SL > 0;
+  const FORCE_RESTART = p.get("restart") === "1";
+  const hasUrlPosition = !FORCE_RESTART && ENTRY > 0 && TP > 0 && SL > 0;
   let POSITION_OPEN = hasUrlPosition;
   let LAST_CLOSE_REASON = "";
   let LAST_CLOSE_PRICE = 0;
@@ -368,12 +383,11 @@
       LAST_POSITION_TS = picked.ts;
     }
 
-    // 安全閾值：15 分鐘內的 position.json 才能「關閉」面板
-    // 防止 CDN 回傳數小時前的舊快取（open:false）把正常開倉面板蓋掉
+    // 安全閾值：僅接受新鮮資料，避免舊快取把狀態拉回去。
     const STALE_CLOSE_SEC = 900;
+    const STALE_OPEN_SEC = 900;
 
-    if (data.open) {
-      // 持倉中：無論資料新舊都更新（不會誤關面板）
+    if (data.open && dataAge < STALE_OPEN_SEC) {
       POSITION_OPEN = true;
       if (typeof data.direction === "string" && data.direction) DIR = data.direction;
       if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
@@ -392,6 +406,10 @@
       LAST_CLOSE_CANDLE_LOW = Number.isFinite(Number(data.last_close_candle_low)) ? parseFloat(data.last_close_candle_low) : 0;
       POSITION_NOTIONAL_USDT = Number.isFinite(Number(data.position_notional_usdt)) ? Number(data.position_notional_usdt) : 0;
       POSITION_MARGIN_USDT = Number.isFinite(Number(data.position_margin_usdt)) ? Number(data.position_margin_usdt) : 0;
+      if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
+      if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
+      if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
+      if (Number.isFinite(Number(data.size))) SIZE = Number(data.size) * 100;
     }
     if (Array.isArray(data.close_hits)) {
       CLOSE_HITS = data.close_hits
@@ -482,6 +500,16 @@
       }
     } catch (_) {
       if (window.alert) alert("手動平倉請求送出失敗，請稍後再試。");
+    }
+  }
+
+  function closePanel() {
+    if (window.Telegram && window.Telegram.WebApp && Telegram.WebApp.close) {
+      Telegram.WebApp.close();
+      return;
+    }
+    if (window.history && history.length > 1) {
+      history.back();
     }
   }
 
@@ -681,6 +709,7 @@
 
   <div class="action-row">
     <button class="close-btn" onclick="triggerManualClose()">手動平倉</button>
+    <button class="panel-btn" onclick="closePanel()">關閉面板</button>
   </div>
 
   ${renderCloseHits()}

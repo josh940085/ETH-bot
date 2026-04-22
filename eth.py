@@ -2025,10 +2025,19 @@ def _reset_active_trade_after_manual_close(close_price):
     """手動平倉成功後重置持倉狀態。"""
     px = _safe_float(close_price, 0.0)
     _record_close_hit("MANUAL", px, px, px)
+    _clear_native_stop_tracking()
+    active_trade["direction"] = None
+    active_trade["entry"] = None
+    active_trade["avg_entry"] = None
+    active_trade["tp"] = None
+    active_trade["sl"] = None
     active_trade["open"] = False
     active_trade["size"] = 0.0
+    active_trade["max_size"] = 1.0
+    active_trade["min_size"] = 0.15
     active_trade["add_count"] = 0
     active_trade["reduce_count"] = 0
+    active_trade["last_adjust_ts"] = 0.0
     active_trade["open_ts"] = 0.0
     active_trade["tp_decay_count"] = 0
     active_trade["binance_qty"] = 0.0
@@ -2412,12 +2421,43 @@ def send_telegram(msg, priority=False):
 
 WEBAPP_BASE_URL = "https://josh940085.github.io/ETH-bot/index.html"
 WEBAPP_VERSION = str(os.getenv("WEBAPP_VERSION", "20260421-1")).strip() or "20260421-1"
+try:
+    MANUAL_CLOSE_COOLDOWN_SEC = max(0.0, float(os.getenv("MANUAL_CLOSE_COOLDOWN_SEC", "300")))
+except Exception:
+    MANUAL_CLOSE_COOLDOWN_SEC = 300.0
+
+
+def _build_webapp_url(*, restart=False, direction=None, entry=None, tp=None, sl=None, size_pct=None):
+    params = [
+        f"v={WEBAPP_VERSION}",
+        "pair=ETHUSDT",
+        "lev=10",
+        f"t={int(time.time())}",
+    ]
+
+    if restart:
+        params.append("restart=1")
+    else:
+        if direction in ("long", "short"):
+            params.append(f"dir={direction}")
+        if entry is not None:
+            params.append(f"entry={entry}")
+        if tp is not None:
+            params.append(f"tp={tp}")
+        if sl is not None:
+            params.append(f"sl={sl}")
+        if size_pct is not None:
+            params.append(f"size={size_pct}")
+
+    return f"{WEBAPP_BASE_URL}?{'&'.join(params)}"
 
 
 def _build_private_bottom_keyboard():
     """建立私聊底部鍵盤（倉位面板 + 跟單設定 + 手動平倉），避免被 remove_keyboard 收掉。"""
     has_open_position = active_trade.get("open") and active_trade.get("direction") in ("long", "short")
     if has_open_position:
+        # 保留倉位參數作為 fallback（position.json 暫時抓不到時仍可顯示），
+        # 並加上 t 參數避免 Telegram 客戶端快取舊 URL。
         direction = active_trade.get("direction")
         entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
         tp = _safe_float(active_trade.get("tp"), 0.0)
@@ -2425,26 +2465,15 @@ def _build_private_bottom_keyboard():
         size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
         size_pct = int(size * 100)
         dir_param = "long" if direction == "long" else "short"
-        url = (
-            f"{WEBAPP_BASE_URL}"
-            f"?v={WEBAPP_VERSION}"
-            f"&dir={dir_param}"
-            f"&entry={entry:.2f}"
-            f"&tp={tp:.2f}"
-            f"&sl={sl:.2f}"
-            f"&size={size_pct}"
-            f"&pair=ETHUSDT"
-            f"&lev=10"
+        url = _build_webapp_url(
+            direction=dir_param,
+            entry=f"{entry:.2f}",
+            tp=f"{tp:.2f}",
+            sl=f"{sl:.2f}",
+            size_pct=size_pct,
         )
     else:
-        url = (
-            f"{WEBAPP_BASE_URL}"
-            f"?v={WEBAPP_VERSION}"
-            f"&restart=1"
-            f"&pair=ETHUSDT"
-            f"&lev=10"
-            f"&t={int(time.time())}"
-        )
+        url = _build_webapp_url(restart=True)
 
     keyboard_rows = [[
         {"text": "📊 倉位面板", "web_app": {"url": url}},
@@ -2477,16 +2506,12 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
         tp_str = tp_display if tp_display else (f"{tp:.2f}" if tp is not None else "0.0")
         sl_str = sl_display if sl_display else (f"{sl:.2f}" if sl is not None else "0.0")
         
-        url = (
-            f"{WEBAPP_BASE_URL}"
-            f"?v={WEBAPP_VERSION}"
-            f"&dir={dir_param}"
-            f"&entry={entry_str}"
-            f"&tp={tp_str}"
-            f"&sl={sl_str}"
-            f"&size={size_pct}"
-            f"&pair=ETHUSDT"
-            f"&lev=10"
+        url = _build_webapp_url(
+            direction=dir_param,
+            entry=entry_str,
+            tp=tp_str,
+            sl=sl_str,
+            size_pct=size_pct,
         )
         
         main_chat_id = str(TELEGRAM_CHAT_ID or "").strip()
@@ -2500,17 +2525,8 @@ def send_position_keyboard(direction, entry, tp, sl, size, entry_display=None, t
         }
         group_text = "📊 倉位面板已更新，點擊按鈕查看最新數據" if is_update else "📊 倉位已建立，點擊按鈕查看即時面板"
 
-        # 私聊：底部鍵盤（倉位面板 web_app + 跟單設定 + 手動平倉）
-        private_keyboard = {
-            "keyboard": [[
-                {"text": "📊 倉位面板", "web_app": {"url": url}},
-                {"text": "👥 跟單設定"},
-            ], [
-                {"text": "🧾 手動平倉"},
-            ]],
-            "resize_keyboard": True,
-            "persistent": True,
-        }
+        # 私聊：底部鍵盤交由統一函數產生，避免 URL 來源不一致。
+        private_keyboard = _build_private_bottom_keyboard()
         private_text = "📊 倉位面板已更新" if is_update else "📊 倉位已建立，面板顯示在下方"
 
         # 主 chat
@@ -2736,14 +2752,7 @@ def remove_position_keyboard():
     if private_chat_id and _is_private_chat(private_chat_id) and private_chat_id not in target_ids:
         target_ids.append(private_chat_id)
 
-    restart_url = (
-        f"{WEBAPP_BASE_URL}"
-        f"?v={WEBAPP_VERSION}"
-        f"&restart=1"
-        f"&pair=ETHUSDT"
-        f"&lev=10"
-        f"&t={int(time.time())}"
-    )
+    restart_url = _build_webapp_url(restart=True)
     restart_keyboard = {
         "keyboard": [[
             {"text": "📊 倉位面板", "web_app": {"url": restart_url}},
@@ -3232,6 +3241,7 @@ def run_bot():
 
     # ===== 每日報告 =====
     last_report_time = 0
+    manual_close_until_ts = 0.0
 
     last_update_id = load_last_update_id()
 
@@ -3251,6 +3261,7 @@ def run_bot():
                 last_entry_price = None
                 last_direction = None
                 last_signal_cache = None
+                manual_close_until_ts = 0.0
                 load_model()
                 print("♻️ 已完成軟重啟：模型重載、快取清空")
 
@@ -3315,12 +3326,12 @@ def run_bot():
 
                         if action == "manual_close":
                             if not active_trade.get("open"):
+                                notice_payload = {"chat_id": chat_id, "text": "📋 目前無持倉，無需手動平倉。"}
+                                if _is_private_chat(chat_id):
+                                    notice_payload["reply_markup"] = _build_private_bottom_keyboard()
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                    json=_with_forced_remove_reply_keyboard(
-                                        {"chat_id": chat_id, "text": "📋 目前無持倉，無需手動平倉。"},
-                                        chat_id,
-                                    ),
+                                    json=notice_payload,
                                     timeout=5,
                                 )
                                 continue
@@ -3331,23 +3342,35 @@ def run_bot():
 
                             ok_close, close_msg = sync_binance_close_position(close_px, reason="MANUAL")
                             if not ok_close:
+                                fail_payload = {"chat_id": chat_id, "text": f"⚠️ 手動平倉失敗：{close_msg}"}
+                                if _is_private_chat(chat_id):
+                                    fail_payload["reply_markup"] = _build_private_bottom_keyboard()
                                 requests.post(
                                     f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                                    json=_with_forced_remove_reply_keyboard(
-                                        {"chat_id": chat_id, "text": f"⚠️ 手動平倉失敗：{close_msg}"},
-                                        chat_id,
-                                    ),
+                                    json=fail_payload,
                                     timeout=5,
                                 )
                                 continue
 
+                            closed_direction = active_trade.get("direction")
                             _reset_active_trade_after_manual_close(close_px)
+                            now_manual = time.time()
+                            manual_close_until_ts = max(manual_close_until_ts, now_manual + MANUAL_CLOSE_COOLDOWN_SEC)
+                            last_trade_time = now_manual
+                            last_trade_signal = None
+                            last_entry_price = None
                             last_signal_cache = None
                             remove_position_keyboard()
-                            send_telegram(
-                                f"🧾 手動平倉完成（{active_trade.get('direction', '-') }）\n"
-                                f"平倉價: {close_px:.2f}",
-                                priority=True,
+                            done_payload = {
+                                "chat_id": chat_id,
+                                "text": f"🧾 手動平倉完成（{closed_direction or '-'}）\n平倉價: {close_px:.2f}",
+                            }
+                            if _is_private_chat(chat_id):
+                                done_payload["reply_markup"] = _build_private_bottom_keyboard()
+                            requests.post(
+                                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                json=done_payload,
+                                timeout=5,
                             )
                             continue
 
@@ -3398,7 +3421,12 @@ def run_bot():
                             if not ok_close:
                                 reply = f"⚠️ 手動平倉失敗：{close_msg}"
                             else:
+                                now_manual = time.time()
                                 _reset_active_trade_after_manual_close(close_px)
+                                manual_close_until_ts = max(manual_close_until_ts, now_manual + MANUAL_CLOSE_COOLDOWN_SEC)
+                                last_trade_time = now_manual
+                                last_trade_signal = None
+                                last_entry_price = None
                                 last_signal_cache = None
                                 remove_position_keyboard()
                                 reply = f"🧾 手動平倉完成\n平倉價: {close_px:.2f}"
@@ -3406,7 +3434,6 @@ def run_bot():
                         payload = {"chat_id": chat_id, "text": reply}
                         if _is_private_chat(chat_id):
                             payload["reply_markup"] = _build_private_bottom_keyboard()
-                        payload = _with_forced_remove_reply_keyboard(payload, chat_id)
                         requests.post(
                             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
                             json=payload,
@@ -4316,6 +4343,10 @@ def run_bot():
                 if last_signal is not None:
                     if abs(score - last_signal) < MIN_SIGNAL_DIFF:
                         final = "觀望（防洗單-信號重複）"
+
+            if final != "觀望":
+                if now_ts < manual_close_until_ts:
+                    final = "觀望（手動平倉冷卻中）"
 
             if final != "觀望":
                 # ===== 冷卻防洗單 =====
