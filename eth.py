@@ -153,7 +153,11 @@ try:
 except Exception:
     BINANCE_MIN_QTY = 0.001
 
+# 100% 倉位基準改為「帳戶總資產的 1/3」
+BINANCE_USE_ACCOUNT_THIRD = str(os.getenv("COPY_TRADE_USE_ACCOUNT_THIRD", "1")).strip() == "1"
+
 _BINANCE_POSITION_MODE_CACHE = {"dual": None, "ts": 0.0}
+_BINANCE_ACCOUNT_CACHE = {"asset": 0.0, "ts": 0.0}
 
 
 def _is_binance_copy_ready():
@@ -249,18 +253,60 @@ def _round_up_step(value, step):
     return max(0.0, math.ceil((value - 1e-12) / step) * step)
 
 
+def _get_binance_total_asset_usdt(force=False):
+    """讀取 Binance 合約總資產（優先 totalMarginBalance，次選 totalWalletBalance）。"""
+    now = time.time()
+    cached_asset = _safe_float(_BINANCE_ACCOUNT_CACHE.get("asset"), 0.0)
+    cached_ts = _safe_float(_BINANCE_ACCOUNT_CACHE.get("ts"), 0.0)
+    if (not force) and cached_asset > 0 and now - cached_ts < 10:
+        return cached_asset
+
+    try:
+        data = _binance_request("GET", "/fapi/v2/account", {}, signed=True)
+        total_margin = _safe_float(data.get("totalMarginBalance"), 0.0)
+        total_wallet = _safe_float(data.get("totalWalletBalance"), 0.0)
+        asset = total_margin if total_margin > 0 else total_wallet
+        if asset > 0:
+            _BINANCE_ACCOUNT_CACHE["asset"] = asset
+            _BINANCE_ACCOUNT_CACHE["ts"] = now
+        return asset
+    except Exception as e:
+        print(f"⚠️ 讀取 Binance 總資產失敗: {e}")
+        return cached_asset
+
+
 def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=False):
-    """根據倉位比例計算下單數量。支持 USDT 名目 或 ETH 顆數 模式。"""
+    """根據倉位比例計算下單數量。預設 100% = 帳戶總資產 1/3（USDT）。"""
     ratio = max(0.0, min(float(size_ratio), 1.0))
     px = max(0.0, _safe_float(current_price, 0.0))
     if ratio <= 0 or px <= 0:
         return 0.0
 
-    # 判斷模式：若設定 ETH 顆數，使用 ETH 模式；否則用 USDT 名目
-    if BINANCE_ORDER_ETH_QTY > 0:
+    # 新模式：100% = 帳戶總資產的 1/3（USDT）
+    if BINANCE_USE_ACCOUNT_THIRD and _is_binance_copy_ready():
+        total_asset = _get_binance_total_asset_usdt(force=False)
+        if total_asset > 0:
+            notional = (total_asset / 3.0) * ratio
+            if enforce_min_notional and notional > 0:
+                notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
+            raw_qty = notional / px
+            min_qty = BINANCE_MIN_QTY
+        elif BINANCE_ORDER_ETH_QTY > 0:
+            # API 讀資產失敗時，退回舊 ETH 顆數模式
+            raw_qty = BINANCE_ORDER_ETH_QTY * ratio
+            min_qty = BINANCE_MIN_ETH_QTY
+        else:
+            # API 讀資產失敗時，退回舊 USDT 名目模式
+            notional = BINANCE_ORDER_NOTIONAL_USDT * ratio
+            if enforce_min_notional and notional > 0:
+                notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
+            raw_qty = notional / px
+            min_qty = BINANCE_MIN_QTY
+    # 舊模式：若設定 ETH 顆數，使用 ETH 模式；否則用 USDT 名目
+    elif BINANCE_ORDER_ETH_QTY > 0:
         # ETH 顆數模式：100% = BINANCE_ORDER_ETH_QTY
         raw_qty = BINANCE_ORDER_ETH_QTY * ratio
-        # ETH 模式下的最小患
+        # ETH 模式下的最小量
         min_qty = BINANCE_MIN_ETH_QTY
     else:
         # USDT 名目模式（傳統）
@@ -268,7 +314,7 @@ def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional
         if enforce_min_notional and notional > 0:
             notional = max(notional, BINANCE_MIN_NOTIONAL_USDT)
         raw_qty = notional / px
-        # USDT 模式下的最小患
+        # USDT 模式下的最小量
         min_qty = BINANCE_MIN_QTY
 
     if enforce_min_notional:
@@ -1944,6 +1990,7 @@ active_trade = {
     "last_close_ts": 0,
     "last_close_candle_high": 0.0,
     "last_close_candle_low": 0.0,
+    "close_hits": [],
 }
 
 
@@ -1953,7 +2000,36 @@ def _record_close_hit(reason, current_price, candle_high, candle_low):
     active_trade["last_close_price"] = _safe_float(current_price, 0.0)
     active_trade["last_close_candle_high"] = _safe_float(candle_high, 0.0)
     active_trade["last_close_candle_low"] = _safe_float(candle_low, 0.0)
-    active_trade["last_close_ts"] = int(time.time())
+    hit_ts = int(time.time())
+    active_trade["last_close_ts"] = hit_ts
+
+    # 保留最近命中紀錄（供 mini app 顯示過去 TP/SL）
+    hits = active_trade.get("close_hits")
+    if not isinstance(hits, list):
+        hits = []
+    hits.append(
+        {
+            "reason": str(reason or "").upper(),
+            "price": _safe_float(current_price, 0.0),
+            "candle_high": _safe_float(candle_high, 0.0),
+            "candle_low": _safe_float(candle_low, 0.0),
+            "ts": hit_ts,
+        }
+    )
+    active_trade["close_hits"] = hits[-10:]
+
+
+def _reset_active_trade_after_manual_close(close_price):
+    """手動平倉成功後重置持倉狀態。"""
+    px = _safe_float(close_price, 0.0)
+    _record_close_hit("MANUAL", px, px, px)
+    active_trade["open"] = False
+    active_trade["size"] = 0.0
+    active_trade["add_count"] = 0
+    active_trade["reduce_count"] = 0
+    active_trade["open_ts"] = 0.0
+    active_trade["tp_decay_count"] = 0
+    active_trade["binance_qty"] = 0.0
 
 # =============================
 # KLINE CACHE（避免打爆API）
@@ -2512,6 +2588,25 @@ def write_position_json():
         tp = _safe_float(active_trade.get("tp"), 0.0)
         sl = _safe_float(active_trade.get("sl"), 0.0)
         size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+        tracked_qty = max(0.0, _safe_float(active_trade.get("binance_qty"), 0.0))
+        lev = max(1.0, _safe_float(BINANCE_LEVERAGE, 10.0))
+        position_notional = tracked_qty * entry if (tracked_qty > 0 and entry > 0) else 0.0
+        position_margin = (position_notional / lev) if position_notional > 0 else 0.0
+        raw_hits = active_trade.get("close_hits")
+        close_hits = []
+        if isinstance(raw_hits, list):
+            for item in raw_hits[-10:]:
+                if not isinstance(item, dict):
+                    continue
+                close_hits.append(
+                    {
+                        "reason": str(item.get("reason") or "").upper(),
+                        "price": round(_safe_float(item.get("price"), 0.0), 4),
+                        "candle_high": round(_safe_float(item.get("candle_high"), 0.0), 4),
+                        "candle_low": round(_safe_float(item.get("candle_low"), 0.0), 4),
+                        "ts": int(_safe_float(item.get("ts"), 0.0)),
+                    }
+                )
         data = {
             "open": is_open,
             "direction": active_trade.get("direction") or "",
@@ -2524,8 +2619,12 @@ def write_position_json():
             "last_close_ts": int(_safe_float(active_trade.get("last_close_ts"), 0.0)),
             "last_close_candle_high": round(_safe_float(active_trade.get("last_close_candle_high"), 0.0), 4),
             "last_close_candle_low": round(_safe_float(active_trade.get("last_close_candle_low"), 0.0), 4),
+            "close_hits": close_hits,
+            "binance_qty": round(tracked_qty, 6),
+            "position_notional_usdt": round(position_notional, 4),
+            "position_margin_usdt": round(position_margin, 4),
             "pair": "ETHUSDT",
-            "lev": 10,
+            "lev": int(lev),
             "ts": int(time.time()),
         }
         POSITION_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -3005,6 +3104,13 @@ Volume Spike: {context.get('volume_spike')}
         mode = "已啟用" if BINANCE_REAL_COPY_ENABLED else "未啟用"
         key_ok = "有" if BINANCE_API_KEY else "無"
         secret_ok = "有" if BINANCE_API_SECRET else "無"
+        if BINANCE_USE_ACCOUNT_THIRD:
+            asset = _get_binance_total_asset_usdt(force=True)
+            baseline = f"總資產1/3（約 {asset/3:.2f} USDT）" if asset > 0 else "總資產1/3（讀取中）"
+        elif BINANCE_ORDER_ETH_QTY > 0:
+            baseline = f"固定 {BINANCE_ORDER_ETH_QTY:.4f} ETH"
+        else:
+            baseline = f"固定 {BINANCE_ORDER_NOTIONAL_USDT:.2f} USDT"
         return (
             "🔗 Binance 實單跟單狀態\n"
             f"模式: {mode}\n"
@@ -3012,7 +3118,7 @@ Volume Spike: {context.get('volume_spike')}
             f"API Secret: {secret_ok}\n"
             f"Symbol: {BINANCE_SYMBOL}\n"
             f"Leverage: {BINANCE_LEVERAGE}x\n"
-            f"每筆基準名目: {BINANCE_ORDER_NOTIONAL_USDT:.2f} USDT\n"
+            f"100%倉位基準: {baseline}\n"
             f"可下單: {'是' if ready else '否（請確認 BINANCE_REAL_COPY_ENABLED=1 與 API 金鑰）'}"
         )
 
@@ -3147,8 +3253,57 @@ def run_bot():
                             pass
                         continue
 
-                    text = u.get("message", {}).get("text", "")
-                    chat_id = u.get("message", {}).get("chat", {}).get("id")
+                    msg_obj = u.get("message", {})
+                    chat_id = msg_obj.get("chat", {}).get("id")
+
+                    # ===== 處理 mini app web_app_data（手動平倉） =====
+                    web_app_raw = msg_obj.get("web_app_data", {}).get("data", "")
+                    if web_app_raw:
+                        try:
+                            payload = json.loads(str(web_app_raw)) if str(web_app_raw).strip().startswith("{") else {}
+                            action = str(payload.get("action") or "").strip().lower()
+                        except Exception:
+                            action = ""
+
+                        if action == "manual_close":
+                            if not active_trade.get("open"):
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                    json=_with_forced_remove_reply_keyboard(
+                                        {"chat_id": chat_id, "text": "📋 目前無持倉，無需手動平倉。"},
+                                        chat_id,
+                                    ),
+                                    timeout=5,
+                                )
+                                continue
+
+                            close_px = _safe_float(WS_PRICE, 0.0)
+                            if close_px <= 0:
+                                close_px = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+
+                            ok_close, close_msg = sync_binance_close_position(close_px, reason="MANUAL")
+                            if not ok_close:
+                                requests.post(
+                                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                                    json=_with_forced_remove_reply_keyboard(
+                                        {"chat_id": chat_id, "text": f"⚠️ 手動平倉失敗：{close_msg}"},
+                                        chat_id,
+                                    ),
+                                    timeout=5,
+                                )
+                                continue
+
+                            _reset_active_trade_after_manual_close(close_px)
+                            last_signal_cache = None
+                            remove_position_keyboard()
+                            send_telegram(
+                                f"🧾 手動平倉完成（{active_trade.get('direction', '-') }）\n"
+                                f"平倉價: {close_px:.2f}",
+                                priority=True,
+                            )
+                            continue
+
+                    text = msg_obj.get("text", "")
 
                 try:
                     if not text:
@@ -3170,7 +3325,7 @@ def run_bot():
                     text_norm = str(text or "").strip()
                     if TELEGRAM_PRIVATE_CHAT_LOCK and private_chat_id and str(chat_id) == private_chat_id:
                         allowed_exact = {"倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板", "👥 跟單設定"}
-                        allowed_prefix = ("/follow", "/binance", "/restart")
+                        allowed_prefix = ("/follow", "/binance", "/restart", "/close")
                         if text_norm not in allowed_exact and (not any(text_norm.startswith(p) for p in allowed_prefix)):
                             continue
 
@@ -3178,6 +3333,31 @@ def run_bot():
                     if text_norm == "👥 跟單設定":
                         text = "/follow"
                         text_norm = "/follow"
+
+                    # 文字指令手動平倉（/close）
+                    if text_norm.startswith("/close"):
+                        if not active_trade.get("open"):
+                            reply = "📋 目前無持倉，無需手動平倉。"
+                        else:
+                            close_px = _safe_float(WS_PRICE, 0.0)
+                            if close_px <= 0:
+                                close_px = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+                            ok_close, close_msg = sync_binance_close_position(close_px, reason="MANUAL")
+                            if not ok_close:
+                                reply = f"⚠️ 手動平倉失敗：{close_msg}"
+                            else:
+                                _reset_active_trade_after_manual_close(close_px)
+                                last_signal_cache = None
+                                remove_position_keyboard()
+                                reply = f"🧾 手動平倉完成\n平倉價: {close_px:.2f}"
+
+                        payload = _with_forced_remove_reply_keyboard({"chat_id": chat_id, "text": reply}, chat_id)
+                        requests.post(
+                            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                            json=payload,
+                            timeout=5,
+                        )
+                        continue
 
                     # AI / 新聞指令
                     context = {

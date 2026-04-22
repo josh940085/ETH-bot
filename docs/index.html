@@ -205,6 +205,62 @@
       border-color: #e74c3c;
     }
 
+    .hit-history {
+      margin-top: 12px;
+      background: #151515;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .hit-history-title {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .hit-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px dashed #2a2a2a;
+    }
+    .hit-item:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+    .hit-left {
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .hit-left.tp { color: #2ecc71; }
+    .hit-left.sl { color: #e74c3c; }
+    .hit-right {
+      font-size: 11px;
+      color: #9a9a9a;
+      text-align: right;
+    }
+
+    .action-row {
+      margin-top: 10px;
+      display: flex;
+      justify-content: center;
+    }
+    .close-btn {
+      border: 1px solid #e74c3c;
+      background: #351818;
+      color: #ffb3ad;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    .close-btn:active {
+      transform: translateY(1px);
+    }
+
     .loading {
       text-align: center;
       padding: 40px;
@@ -225,7 +281,7 @@
   let ENTRY  = parseFloat(p.get("entry") || "0");
   let TP     = parseFloat(p.get("tp")    || "0");
   let SL     = parseFloat(p.get("sl")    || "0");
-  let SIZE   = parseInt(p.get("size")    || "20", 10);
+  let SIZE   = parseFloat(p.get("size")  || "20");
   const PAIR   = p.get("pair")  || "ETHUSDT";
   const LEV    = parseInt(p.get("lev")     || "10", 10);
   let POSITION_OPEN = true;
@@ -234,6 +290,9 @@
   let LAST_CLOSE_TS = 0;
   let LAST_CLOSE_CANDLE_HIGH = 0;
   let LAST_CLOSE_CANDLE_LOW = 0;
+  let CLOSE_HITS = [];
+  let POSITION_NOTIONAL_USDT = 0;
+  let POSITION_MARGIN_USDT = 0;
 
   // 調試：確認參數被正確讀取
   console.log("URL Params:", { DIR, ENTRY, TP, SL, SIZE, PAIR, LEV, APP_VERSION });
@@ -294,8 +353,8 @@
     const data = picked.data;
     const dataAge = picked.ts > 0 ? nowSec - picked.ts : Infinity;
 
-    // 若取到的資料沒有比目前新，直接跳過（CDN 快取舊版本，避免重複覆蓋）
-    if (picked.ts > 0 && picked.ts <= LAST_POSITION_TS) return;
+    // 若取到的資料比目前舊，直接跳過（同秒資料仍允許覆蓋，避免漏更新）
+    if (picked.ts > 0 && picked.ts < LAST_POSITION_TS) return;
 
     if (picked.ts > 0) {
       LAST_POSITION_TS = picked.ts;
@@ -312,7 +371,9 @@
       if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
       if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
       if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
-      if (Number.isFinite(Number(data.size))) SIZE = Math.round(Number(data.size) * 100);
+      if (Number.isFinite(Number(data.size))) SIZE = Number(data.size) * 100;
+      POSITION_NOTIONAL_USDT = Number.isFinite(Number(data.position_notional_usdt)) ? Number(data.position_notional_usdt) : 0;
+      POSITION_MARGIN_USDT = Number.isFinite(Number(data.position_margin_usdt)) ? Number(data.position_margin_usdt) : 0;
     } else if (dataAge < STALE_CLOSE_SEC) {
       // 已平倉且資料是新鮮的（15 分鐘內）→ 確認關閉
       POSITION_OPEN = false;
@@ -321,6 +382,19 @@
       LAST_CLOSE_TS = Number.isFinite(Number(data.last_close_ts)) ? Number(data.last_close_ts) : 0;
       LAST_CLOSE_CANDLE_HIGH = Number.isFinite(Number(data.last_close_candle_high)) ? parseFloat(data.last_close_candle_high) : 0;
       LAST_CLOSE_CANDLE_LOW = Number.isFinite(Number(data.last_close_candle_low)) ? parseFloat(data.last_close_candle_low) : 0;
+      POSITION_NOTIONAL_USDT = Number.isFinite(Number(data.position_notional_usdt)) ? Number(data.position_notional_usdt) : 0;
+      POSITION_MARGIN_USDT = Number.isFinite(Number(data.position_margin_usdt)) ? Number(data.position_margin_usdt) : 0;
+    }
+    if (Array.isArray(data.close_hits)) {
+      CLOSE_HITS = data.close_hits
+        .map((h) => ({
+          reason: String((h && h.reason) || "").toUpperCase(),
+          price: Number.isFinite(Number(h && h.price)) ? Number(h.price) : 0,
+          ts: Number.isFinite(Number(h && h.ts)) ? Number(h.ts) : 0,
+        }))
+        .filter((h) => h.reason === "TP" || h.reason === "SL")
+        .sort((a, b) => b.ts - a.ts)
+        .slice(0, 10);
     }
     // else: 資料過期且 open=false → 保留目前 POSITION_OPEN 狀態不動
 
@@ -352,9 +426,41 @@
     const raw = DIR === "long"
       ? (live - ENTRY) / ENTRY
       : (ENTRY - live) / ENTRY;
-    const pct  = raw * LEV * 100;
-    const usdt = raw * ENTRY * (SIZE / 100) * LEV;
+    let usdt = raw * ENTRY * (SIZE / 100) * LEV;
+    let pct = raw * LEV * 100;
+    if (POSITION_NOTIONAL_USDT > 0) {
+      usdt = raw * POSITION_NOTIONAL_USDT;
+      if (POSITION_MARGIN_USDT > 0) {
+        pct = (usdt / POSITION_MARGIN_USDT) * 100;
+      }
+    }
     return { pct, usdt };
+  }
+
+  function fmt_size(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "0.0";
+    return v.toFixed(1);
+  }
+
+  function triggerManualClose() {
+    if (!(window.Telegram && window.Telegram.WebApp && Telegram.WebApp.sendData)) {
+      if (window.alert) alert("請在 Telegram 內開啟此面板，才能使用手動平倉。");
+      return;
+    }
+    const payload = {
+      action: "manual_close",
+      source: "mini_app",
+      ts: Date.now(),
+    };
+    try {
+      Telegram.WebApp.sendData(JSON.stringify(payload));
+      if (Telegram.WebApp.showAlert) {
+        Telegram.WebApp.showAlert("已送出手動平倉請求，請稍候 Bot 回覆。");
+      }
+    } catch (_) {
+      if (window.alert) alert("手動平倉請求送出失敗，請稍後再試。");
+    }
   }
 
   // ── 判斷 SL 是否已觸發 ──
@@ -393,6 +499,33 @@
     return `${hh}:${mm}:${ss}`;
   }
 
+  function renderCloseHits() {
+    if (!Array.isArray(CLOSE_HITS) || CLOSE_HITS.length === 0) {
+      return `
+  <div class="hit-history">
+    <div class="hit-history-title">最近 TP / SL 命中</div>
+    <div style="font-size:12px;color:#777;">目前尚無歷史命中紀錄</div>
+  </div>`;
+    }
+
+    const rows = CLOSE_HITS.map((h) => {
+      const cls = h.reason === "TP" ? "tp" : "sl";
+      const label = h.reason === "TP" ? "TP 命中" : "SL 命中";
+      const priceText = h.price > 0 ? fmt(h.price) : "-";
+      return `
+    <div class="hit-item">
+      <div class="hit-left ${cls}">${label}</div>
+      <div class="hit-right">${ts_str(h.ts)} ｜ ${priceText}</div>
+    </div>`;
+    }).join("");
+
+    return `
+  <div class="hit-history">
+    <div class="hit-history-title">最近 TP / SL 命中</div>
+    ${rows}
+  </div>`;
+  }
+
   // ── 渲染 UI ──
   function render() {
     // 已平倉：顯示簡單的已平倉面板
@@ -425,6 +558,7 @@
     <div style="font-size:12px;color:#777;margin-top:4px;">1m 高/低：${closeCandleText}</div>
     <div style="font-size:12px;color:#777;margin-top:4px;">命中時間：${ts_str(LAST_CLOSE_TS)}</div>
   </div>
+  ${renderCloseHits()}
   <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
       return;
@@ -466,11 +600,11 @@
       </div>
       <div style="text-align:right">
         <div class="label">目前倉位</div>
-        <div class="size-val">${SIZE}.00%</div>
+        <div class="size-val">${fmt_size(SIZE)}%</div>
       </div>
     </div>
     <div class="progress-wrap">
-      <div class="progress-bar" style="width:${Math.min(SIZE, 100)}%"></div>
+      <div class="progress-bar" style="width:${Math.min(Math.max(SIZE, 0), 100)}%"></div>
     </div>
   </div>
 
@@ -522,6 +656,12 @@
   <div class="legend">
     <span>盈利增加 → 紅色</span>｜<span>觸發止損 → 綠色</span>
   </div>
+
+  <div class="action-row">
+    <button class="close-btn" onclick="triggerManualClose()">手動平倉</button>
+  </div>
+
+  ${renderCloseHits()}
 
   <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
