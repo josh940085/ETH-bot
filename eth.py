@@ -1558,6 +1558,24 @@ def _looks_like_macro_news_title(text):
     ]) or len(text.split()) >= 6
 
 
+def _is_low_value_filing_news(text):
+    """
+    過濾對 ETH 交易參考價值極低的法規申報類新聞（例如 Form 144）。
+    這類通常是個股內部人可能賣股申報，對加密市場方向關聯弱。
+    """
+    low = str(text or "").lower().strip()
+    if not low:
+        return False
+
+    if re.search(r"\bform\s*144\b", low):
+        return True
+    if re.search(r"\bsec\s*form\s*144\b", low):
+        return True
+    if re.search(r"\b144\s+filing\b", low):
+        return True
+    return False
+
+
 def fetch_rss_news(feed_url, source_name):
     """抓 RSS / Atom，回傳 [{source, text}]，比抓 HTML 穩定很多。"""
     headers = {
@@ -1590,6 +1608,8 @@ def fetch_rss_news(feed_url, source_name):
         title = normalize_news_text(title_el.text if title_el is not None else "")
         if not title or not _looks_like_macro_news_title(title):
             continue
+        if _is_low_value_filing_news(title):
+            continue
         low = title.lower()
         if low in seen:
             continue
@@ -1600,6 +1620,8 @@ def fetch_rss_news(feed_url, source_name):
         title_el = entry.find("{http://www.w3.org/2005/Atom}title")
         title = normalize_news_text(title_el.text if title_el is not None else "")
         if not title or not _looks_like_macro_news_title(title):
+            continue
+        if _is_low_value_filing_news(title):
             continue
         low = title.lower()
         if low in seen:
@@ -1701,6 +1723,8 @@ def refresh_rss_news_cache(force=False):
             src = str(item.get("source", "News")).strip() or "News"
             text = normalize_news_text(item.get("text", ""))
             if not text:
+                continue
+            if _is_low_value_filing_news(text):
                 continue
             key = f"{src}|{text.lower()}"
             if key in dedup_now:
@@ -2313,6 +2337,42 @@ model = None
 online_model = SGDClassifier(loss="log_loss")
 online_initialized = False
 
+try:
+    MODEL_LABEL_HORIZON_SEC = max(30.0, float(os.getenv("MODEL_LABEL_HORIZON_SEC", "180")))
+except Exception:
+    MODEL_LABEL_HORIZON_SEC = 180.0
+try:
+    MODEL_LABEL_DEADZONE_PCT = max(0.0, float(os.getenv("MODEL_LABEL_DEADZONE_PCT", "0.0008")))
+except Exception:
+    MODEL_LABEL_DEADZONE_PCT = 0.0008
+try:
+    MODEL_SAMPLE_INTERVAL_SEC = max(3.0, float(os.getenv("MODEL_SAMPLE_INTERVAL_SEC", "15")))
+except Exception:
+    MODEL_SAMPLE_INTERVAL_SEC = 15.0
+try:
+    MODEL_RETRAIN_INTERVAL_SEC = max(600.0, float(os.getenv("MODEL_RETRAIN_INTERVAL_SEC", "14400")))
+except Exception:
+    MODEL_RETRAIN_INTERVAL_SEC = 14400.0
+try:
+    MODEL_MIN_NEW_LABELS_FOR_RETRAIN = max(20, int(float(os.getenv("MODEL_MIN_NEW_LABELS_FOR_RETRAIN", "120"))))
+except Exception:
+    MODEL_MIN_NEW_LABELS_FOR_RETRAIN = 120
+MODEL_RETRAIN_ON_BOOT = str(os.getenv("MODEL_RETRAIN_ON_BOOT", "0")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _align_features_for_model(features, model_obj):
+    """依模型訓練欄位對齊特徵，避免 predict 時欄位順序或缺欄導致失敗。"""
+    X = pd.DataFrame([features])
+    expected = getattr(model_obj, "feature_names_in_", None)
+    if expected is None:
+        return X
+
+    expected_cols = list(expected)
+    for col in expected_cols:
+        if col not in X.columns:
+            X[col] = 0.0
+    return X[expected_cols]
+
 def load_model():
     global model, online_model, online_initialized
 
@@ -2340,20 +2400,8 @@ def load_model():
 def update_online_model(features, label):
     global online_model, online_initialized
 
-    X = pd.DataFrame([features])
+    X = _align_features_for_model(features, online_model) if online_initialized else pd.DataFrame([features])
     y = np.array([label])
-
-    # ===== FIX: 強制對齊 feature columns =====
-    if online_initialized and hasattr(online_model, "feature_names_in_"):
-        expected_cols = list(online_model.feature_names_in_)
-
-        # 補缺的欄位
-        for col in expected_cols:
-            if col not in X.columns:
-                X[col] = 0
-
-        # 移除多餘欄位
-        X = X[expected_cols]
 
     try:
         if not online_initialized:
@@ -2560,6 +2608,14 @@ try:
     MANUAL_CLOSE_COOLDOWN_SEC = max(0.0, float(os.getenv("MANUAL_CLOSE_COOLDOWN_SEC", "300")))
 except Exception:
     MANUAL_CLOSE_COOLDOWN_SEC = 300.0
+try:
+    POSITION_STATUS_SYNC_SEC = max(2.0, float(os.getenv("POSITION_STATUS_SYNC_SEC", "5")))
+except Exception:
+    POSITION_STATUS_SYNC_SEC = 5.0
+try:
+    POSITION_HEARTBEAT_SEC = max(20.0, float(os.getenv("POSITION_HEARTBEAT_SEC", "120")))
+except Exception:
+    POSITION_HEARTBEAT_SEC = 120.0
 
 
 def _build_webapp_url(*, restart=False, direction=None, entry=None, tp=None, sl=None, size_pct=None):
@@ -2739,7 +2795,7 @@ def refresh_position_panel_from_active_trade():
 
 
 _last_position_push_ts = 0
-_POSITION_PUSH_MIN_INTERVAL = 5  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
+_POSITION_PUSH_MIN_INTERVAL = 2  # 最短推送間隔（秒），可透過環境變數 POSITION_PUSH_INTERVAL 調整
 _position_push_lock = Lock()
 _position_push_git_lock = Lock()
 
@@ -2863,7 +2919,7 @@ def push_position_json():
     """在背景執行緒中 git commit + push docs/position.json（有節流保護）。"""
     global _last_position_push_ts
     try:
-        min_interval = max(3.0, float(os.getenv("POSITION_PUSH_INTERVAL", str(_POSITION_PUSH_MIN_INTERVAL))))
+        min_interval = max(1.0, float(os.getenv("POSITION_PUSH_INTERVAL", str(_POSITION_PUSH_MIN_INTERVAL))))
     except Exception:
         min_interval = float(_POSITION_PUSH_MIN_INTERVAL)
     now = time.time()
@@ -3418,7 +3474,8 @@ def run_bot():
     global performance, BOT_SOFT_RESTART_REQUESTED, KLINE_CACHE, MACRO_CACHE, NEWS_CACHE
 
     load_model()  # 加載所有模型，包括新聞模型
-    retrain_model()  # 啟動時重新訓練 AI 模型
+    if MODEL_RETRAIN_ON_BOOT:
+        retrain_model()
 
     last_signal = None
     last_trade_time = 0
@@ -3429,12 +3486,15 @@ def run_bot():
     losing_streak = 0
     MAX_LOSS_STREAK = 3
     last_entry_price = None
-    last_direction = None
     # trade_open 移除，改用 active_trade 控制是否可開單
 
     # ===== 每日報告 =====
     last_report_time = 0
     manual_close_until_ts = 0.0
+    pending_ml_samples = deque()
+    last_ml_sample_ts = 0.0
+    last_model_retrain_ts = time.time()
+    new_labels_since_retrain = 0
 
     last_update_id = load_last_update_id()
 
@@ -3452,9 +3512,12 @@ def run_bot():
                 last_trade_time = 0
                 last_trade_signal = None
                 last_entry_price = None
-                last_direction = None
                 last_signal_cache = None
                 manual_close_until_ts = 0.0
+                pending_ml_samples.clear()
+                last_ml_sample_ts = 0.0
+                last_model_retrain_ts = time.time()
+                new_labels_since_retrain = 0
                 load_model()
                 print("♻️ 已完成軟重啟：模型重載、快取清空")
 
@@ -3900,7 +3963,7 @@ def run_bot():
                 if not hasattr(run_bot, "last_news_monitor_ts"):
                     run_bot.last_news_monitor_ts = 0
 
-                if time.time() - run_bot.last_position_status_ts > 15:
+                if time.time() - run_bot.last_position_status_ts > POSITION_STATUS_SYNC_SEC:
                     # 開啟跟單時，定期從 Binance 同步：進場均價 + 偵測原生止損是否已觸發
                     if _is_binance_copy_ready():
                         direction_now = active_trade.get("direction", "")
@@ -3949,10 +4012,10 @@ def run_bot():
                     print(f"📰 新聞監控中 | {latest_news_preview}")
                     run_bot.last_news_monitor_ts = time.time()
 
-                # 持倉心跳：每 5 分鐘定期推送 position.json，確保 mini app 抓到最新 ts
+                # 持倉心跳：依設定間隔定期推送 position.json，確保 mini app 抓到最新 ts
                 if not hasattr(run_bot, "last_position_heartbeat_ts"):
                     run_bot.last_position_heartbeat_ts = 0
-                if time.time() - run_bot.last_position_heartbeat_ts > 300:
+                if time.time() - run_bot.last_position_heartbeat_ts > POSITION_HEARTBEAT_SEC:
                     write_position_json()
                     push_position_json()
                     run_bot.last_position_heartbeat_ts = time.time()
@@ -4081,15 +4144,15 @@ def run_bot():
             ai_prob = 0.5
 
             try:
-                X = pd.DataFrame([features])
-
                 # Online model（主模型）
                 if online_initialized:
-                    ai_prob = online_model.predict_proba(X)[0][1]
+                    X_online = _align_features_for_model(features, online_model)
+                    ai_prob = online_model.predict_proba(X_online)[0][1]
 
                 # 備用模型
                 elif model:
-                    ai_prob = model.predict_proba(X)[0][1]
+                    X_model = _align_features_for_model(features, model)
+                    ai_prob = model.predict_proba(X_model)[0][1]
 
             except Exception:
                 ai_prob = 0.5
@@ -4213,6 +4276,43 @@ def run_bot():
                 news_score_adjust = news_bias * 0.08  # 將新聞 bias 轉換為 score 調整（-0.16 到 0.16）
                 score += news_score_adjust
                 score = max(0.05, min(score, 0.95))  # 確保在範圍內
+
+            # ===== 監督學習標籤（延遲 horizon 報酬，降低 1-2 秒噪音）=====
+            ml_now = time.time()
+            if ml_now - last_ml_sample_ts >= MODEL_SAMPLE_INTERVAL_SEC:
+                pending_ml_samples.append(
+                    {
+                        "ts": ml_now,
+                        "entry_price": float(price),
+                        "features": dict(features),
+                    }
+                )
+                last_ml_sample_ts = ml_now
+
+            current_px_for_label = _safe_float(WS_PRICE if WS_PRICE else price, 0.0)
+            while pending_ml_samples and (ml_now - _safe_float(pending_ml_samples[0].get("ts"), 0.0) >= MODEL_LABEL_HORIZON_SEC):
+                sample = pending_ml_samples.popleft()
+                base_px = _safe_float(sample.get("entry_price"), 0.0)
+                if base_px <= 0 or current_px_for_label <= 0:
+                    continue
+                ret = (current_px_for_label - base_px) / base_px
+                if abs(ret) < MODEL_LABEL_DEADZONE_PCT:
+                    continue
+                label = 1 if ret > 0 else 0
+                sample_features = sample.get("features") if isinstance(sample.get("features"), dict) else None
+                if not sample_features:
+                    continue
+                log_data(sample_features, label)
+                update_online_model(sample_features, label)
+                new_labels_since_retrain += 1
+
+            if (
+                ml_now - last_model_retrain_ts >= MODEL_RETRAIN_INTERVAL_SEC
+                and new_labels_since_retrain >= MODEL_MIN_NEW_LABELS_FOR_RETRAIN
+            ):
+                train_model()
+                last_model_retrain_ts = ml_now
+                new_labels_since_retrain = 0
 
             # ===== 最終決策（含進場 / TP / SL / 倉位）=====
             entry = price
@@ -4626,7 +4726,6 @@ def run_bot():
                 last_trade_time = now_ts
                 last_trade_signal = final
                 last_entry_price = price
-                last_direction = final
 
                 # ===== 建立真實交易 =====
                 direction = "long" if "做多" in final else "short"
@@ -4684,35 +4783,6 @@ def run_bot():
                 send_follow_button(is_update=False)
                 write_position_json()
                 push_position_json()
-
-            # ===== 記錄（未來價格）=====
-            future_price = price
-            time.sleep(1.2)
-
-            new_price = WS_PRICE if WS_PRICE else price
-
-            # （原簡易績效追蹤區塊已移除，現由真實交易管理統計）
-
-            # ===== 更乾淨學習（避免噪音）=====
-            # AI 標籤（根據實際進場方向與結果）
-            if last_direction and last_entry_price:
-                if "做多" in last_direction:
-                    label = 1 if new_price > last_entry_price else 0
-                elif "做空" in last_direction:
-                    label = 1 if new_price < last_entry_price else 0
-                else:
-                    continue
-            else:
-                continue
-
-            log_data(features, label)
-
-            # ===== 即時學習（核心升級）=====
-            update_online_model(features, label)
-
-            # 每60秒嘗試訓練一次（更穩定）
-            if int(time.time()) % 60 == 0:
-                train_model()
 
             # ===== 更新信號（平滑 + 防洗單記錄）=====
             last_signal = score
