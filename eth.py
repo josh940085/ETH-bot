@@ -155,8 +155,8 @@ try:
 except Exception:
     BINANCE_MIN_QTY = 0.001
 
-# 100% 倉位基準改為「帳戶總資產的 1/3」
-BINANCE_USE_ACCOUNT_THIRD = str(os.getenv("COPY_TRADE_USE_ACCOUNT_THIRD", "1")).strip() == "1"
+# 預設 100% 倉位基準使用固定 ETH 數量；設為 1 才切到帳戶總資產 1/3 模式
+BINANCE_USE_ACCOUNT_THIRD = str(os.getenv("COPY_TRADE_USE_ACCOUNT_THIRD", "0")).strip() == "1"
 
 _BINANCE_POSITION_MODE_CACHE = {"dual": None, "ts": 0.0}
 _BINANCE_ACCOUNT_CACHE = {"asset": 0.0, "ts": 0.0}
@@ -278,7 +278,7 @@ def _get_binance_total_asset_usdt(force=False):
 
 
 def _binance_qty_from_size_ratio(size_ratio, current_price, enforce_min_notional=False):
-    """根據倉位比例計算下單數量。預設 100% = 帳戶總資產 1/3（USDT）。"""
+    """根據倉位比例計算下單數量。預設 100% = 固定 ETH 數量。"""
     ratio = max(0.0, min(float(size_ratio), 1.0))
     px = max(0.0, _safe_float(current_price, 0.0))
     if ratio <= 0 or px <= 0:
