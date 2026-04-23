@@ -309,6 +309,13 @@
   let CLOSE_HITS = [];
   let POSITION_NOTIONAL_USDT = 0;
   let POSITION_MARGIN_USDT = 0;
+  let BINANCE_ENTRY_PRICE = 0;
+  let BINANCE_MARK_PRICE = 0;
+  let BINANCE_UNREALIZED_PNL_USDT = null;
+  let ROUND_TRIP_FEE_RATE = 0;
+  let FUNDING_RATE = 0;
+  let FUNDING_COST_RATE_EST = 0;
+  let COST_EVAL_HOLD_HOURS = 0;
 
   let livePrice = 0;
 
@@ -390,7 +397,13 @@
     if (data.open && dataAge < STALE_OPEN_SEC) {
       POSITION_OPEN = true;
       if (typeof data.direction === "string" && data.direction) DIR = data.direction;
-      if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
+      const be = Number(data.binance_entry_price);
+      if (Number.isFinite(be) && be > 0) {
+        BINANCE_ENTRY_PRICE = be;
+        ENTRY = be;
+      } else if (Number.isFinite(Number(data.entry))) {
+        ENTRY = parseFloat(data.entry);
+      }
       if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
       if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
       if (Number.isFinite(Number(data.size))) SIZE = Number(data.size) * 100;
@@ -411,6 +424,12 @@
       if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
       if (Number.isFinite(Number(data.size))) SIZE = Number(data.size) * 100;
     }
+    ROUND_TRIP_FEE_RATE = Number.isFinite(Number(data.fee_round_trip_rate)) ? Number(data.fee_round_trip_rate) : ROUND_TRIP_FEE_RATE;
+    FUNDING_RATE = Number.isFinite(Number(data.funding_rate)) ? Number(data.funding_rate) : FUNDING_RATE;
+    FUNDING_COST_RATE_EST = Number.isFinite(Number(data.funding_cost_rate_est)) ? Number(data.funding_cost_rate_est) : FUNDING_COST_RATE_EST;
+    COST_EVAL_HOLD_HOURS = Number.isFinite(Number(data.cost_eval_hold_hours)) ? Number(data.cost_eval_hold_hours) : COST_EVAL_HOLD_HOURS;
+    BINANCE_MARK_PRICE = Number.isFinite(Number(data.binance_mark_price)) ? Number(data.binance_mark_price) : BINANCE_MARK_PRICE;
+    BINANCE_UNREALIZED_PNL_USDT = Number.isFinite(Number(data.binance_unrealized_pnl_usdt)) ? Number(data.binance_unrealized_pnl_usdt) : null;
     if (Array.isArray(data.close_hits)) {
       CLOSE_HITS = data.close_hits
         .map((h) => ({
@@ -462,19 +481,38 @@
 
   // ── 計算未實現盈虧 ──
   function calcPnl(live) {
-    if (!live || !ENTRY) return { pct: 0, usdt: 0 };
-    const raw = DIR === "long"
-      ? (live - ENTRY) / ENTRY
-      : (ENTRY - live) / ENTRY;
-    let usdt = raw * ENTRY * (SIZE / 100) * LEV;
-    let pct = raw * LEV * 100;
-    if (POSITION_NOTIONAL_USDT > 0) {
-      usdt = raw * POSITION_NOTIONAL_USDT;
-      if (POSITION_MARGIN_USDT > 0) {
-        pct = (usdt / POSITION_MARGIN_USDT) * 100;
-      }
+    const livePx = (Number.isFinite(Number(live)) && Number(live) > 0)
+      ? Number(live)
+      : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : 0);
+    if (!livePx || !ENTRY) {
+      return {
+        gross_pct: 0,
+        gross_usdt: 0,
+        shown_pct: 0,
+        shown_usdt: 0,
+        net_pct: 0,
+        net_usdt: 0,
+        cost_usdt: 0,
+        total_cost_rate: 0,
+        source: "estimate",
+      };
     }
-    return { pct, usdt };
+    const raw = DIR === "long"
+      ? (livePx - ENTRY) / ENTRY
+      : (ENTRY - livePx) / ENTRY;
+    const notional = POSITION_NOTIONAL_USDT > 0 ? POSITION_NOTIONAL_USDT : Math.max(0, ENTRY * (SIZE / 100) * LEV);
+    const margin = POSITION_MARGIN_USDT > 0 ? POSITION_MARGIN_USDT : (notional > 0 ? notional / Math.max(1, LEV) : 0);
+    const gross_usdt = raw * notional;
+    const gross_pct = margin > 0 ? (gross_usdt / margin) * 100 : raw * LEV * 100;
+    const hasExchangePnl = Number.isFinite(BINANCE_UNREALIZED_PNL_USDT);
+    const shown_usdt = hasExchangePnl ? BINANCE_UNREALIZED_PNL_USDT : gross_usdt;
+    const shown_pct = margin > 0 ? (shown_usdt / margin) * 100 : gross_pct;
+
+    const total_cost_rate = Math.max(0, ROUND_TRIP_FEE_RATE) + Math.max(0, FUNDING_COST_RATE_EST);
+    const cost_usdt = notional * total_cost_rate;
+    const net_usdt = shown_usdt - cost_usdt;
+    const net_pct = margin > 0 ? (net_usdt / margin) * 100 : shown_pct;
+    return { gross_pct, gross_usdt, shown_pct, shown_usdt, net_pct, net_usdt, cost_usdt, total_cost_rate, source: hasExchangePnl ? "binance" : "estimate" };
   }
 
   function fmt_size(n) {
@@ -614,7 +652,7 @@
       return;
     }
 
-    const live = livePrice;
+    const live = livePrice > 0 ? livePrice : BINANCE_MARK_PRICE;
     const pnl  = calcPnl(live);
     const sl_off = slTriggered(live);
     const isLong  = DIR === "long";
@@ -622,7 +660,7 @@
     const dirLabel = isLong ? "多單 ↑" : "空單 ↓";
     const dirClass = isLong ? "long" : "short";
 
-    const pnlClass  = pnl.pct >= 0 ? "profit" : "loss";
+    const pnlClass  = pnl.shown_pct >= 0 ? "profit" : "loss";
 
     const liveDiff  = live ? live - ENTRY : 0;
     const liveDiffStr = `${liveDiff >= 0 ? "↑" : "↓"} ${Math.abs(liveDiff).toFixed(2)} (${(liveDiff / ENTRY * 100).toFixed(2)}%)`;
@@ -675,8 +713,13 @@
       </div>
       <div class="pnl-block">
         <div class="label">未實現盈虧</div>
-        <div class="pnl-pct ${pnlClass}">${live ? fmt_signed(pnl.pct) + "%" : "─"}</div>
-        <div class="pnl-usdt ${pnlClass}">${live ? fmt_signed(pnl.usdt) + " USDT" : ""}</div>
+        <div class="pnl-pct ${pnlClass}">${live ? fmt_signed(pnl.shown_pct) + "%" : "─"}</div>
+        <div class="pnl-usdt ${pnlClass}">${live ? fmt_signed(pnl.shown_usdt) + " USDT" : ""}</div>
+        <div style="font-size:11px;color:#888;margin-top:2px">
+          ${live ? (pnl.source === "binance"
+            ? `交易所盈虧 ${fmt_signed(pnl.shown_usdt)} | 成本估 -${pnl.cost_usdt.toFixed(2)} (${(pnl.total_cost_rate*100).toFixed(3)}%)`
+            : `估算盈虧 ${fmt_signed(pnl.gross_usdt)} | 成本估 -${pnl.cost_usdt.toFixed(2)} (${(pnl.total_cost_rate*100).toFixed(3)}%)`) : ""}
+        </div>
       </div>
     </div>
   </div>

@@ -160,6 +160,24 @@ BINANCE_USE_ACCOUNT_THIRD = str(os.getenv("COPY_TRADE_USE_ACCOUNT_THIRD", "0")).
 
 _BINANCE_POSITION_MODE_CACHE = {"dual": None, "ts": 0.0}
 _BINANCE_ACCOUNT_CACHE = {"asset": 0.0, "ts": 0.0}
+_BINANCE_FUNDING_CACHE = {"rate": 0.0, "next_ts": 0.0, "ts": 0.0}
+
+try:
+    BINANCE_TAKER_FEE_RATE = max(0.0, float(os.getenv("BINANCE_TAKER_FEE_RATE", "0.0005")))
+except Exception:
+    BINANCE_TAKER_FEE_RATE = 0.0005
+try:
+    COST_EVAL_HOLD_HOURS = max(0.1, float(os.getenv("COST_EVAL_HOLD_HOURS", "4")))
+except Exception:
+    COST_EVAL_HOLD_HOURS = 4.0
+try:
+    MIN_NET_RR_AFTER_COST = max(0.5, float(os.getenv("MIN_NET_RR_AFTER_COST", "1.15")))
+except Exception:
+    MIN_NET_RR_AFTER_COST = 1.15
+try:
+    MAX_COST_TO_REWARD_RATIO = max(0.0, float(os.getenv("MAX_COST_TO_REWARD_RATIO", "0.35")))
+except Exception:
+    MAX_COST_TO_REWARD_RATIO = 0.35
 
 
 def _is_binance_copy_ready():
@@ -541,26 +559,87 @@ def sync_binance_set_native_stop_loss(direction, stop_price):
     return ok, data
 
 
-def _fetch_binance_position_entry(direction):
-    """查詢 Binance 實際持倉均價（entryPrice），未持倉或失敗時回傳 0.0。"""
+def _fetch_binance_position_snapshot(direction=None):
+    """
+    查詢 Binance 實際持倉快照。
+    回傳 dict（含 entry/notional/unrealized 等），未持倉或失敗回傳 None。
+    """
     try:
         data = _binance_request("GET", "/fapi/v2/positionRisk", {"symbol": BINANCE_SYMBOL}, signed=True)
-        target_side = "LONG" if direction == "long" else "SHORT"
-        for pos in (data if isinstance(data, list) else []):
+        rows = data if isinstance(data, list) else []
+        dual_mode = _binance_is_dual_side_mode()
+        desired = str(direction or "").lower()
+        all_candidates = []
+        matched_candidates = []
+
+        for pos in rows:
+            if not isinstance(pos, dict):
+                continue
             if pos.get("symbol") != BINANCE_SYMBOL:
                 continue
-            # Hedge Mode：比對 positionSide；One-way Mode：忽略
-            if _binance_is_dual_side_mode():
-                if pos.get("positionSide") != target_side:
-                    continue
-            ep = _safe_float(pos.get("entryPrice"), 0.0)
+
             amt = _safe_float(pos.get("positionAmt"), 0.0)
-            if abs(amt) > 1e-9 and ep > 0:
-                return ep
-        return 0.0
+            qty_abs = abs(amt)
+            if qty_abs <= 1e-9:
+                continue
+
+            side = "long" if amt > 0 else "short"
+            if dual_mode:
+                pos_side = str(pos.get("positionSide") or "").upper()
+                if pos_side == "LONG":
+                    side = "long"
+                elif pos_side == "SHORT":
+                    side = "short"
+
+            entry_price = _safe_float(pos.get("entryPrice"), 0.0)
+            break_even_price = _safe_float(pos.get("breakEvenPrice"), 0.0)
+            mark_price = _safe_float(pos.get("markPrice"), 0.0)
+            unrealized_pnl_usdt = _safe_float(pos.get("unRealizedProfit"), 0.0)
+
+            notional_usdt = abs(_safe_float(pos.get("notional"), 0.0))
+            if notional_usdt <= 0 and qty_abs > 0 and mark_price > 0:
+                notional_usdt = qty_abs * mark_price
+
+            leverage = max(1.0, _safe_float(pos.get("leverage"), BINANCE_LEVERAGE))
+            initial_margin = _safe_float(pos.get("initialMargin"), 0.0)
+            if initial_margin <= 0 and notional_usdt > 0:
+                initial_margin = notional_usdt / leverage
+            isolated_margin = _safe_float(pos.get("isolatedMargin"), 0.0)
+            margin_usdt = isolated_margin if isolated_margin > 0 else initial_margin
+
+            snapshot = {
+                "direction": side,
+                "qty_abs": float(qty_abs),
+                "entry_price": float(entry_price),
+                "break_even_price": float(break_even_price),
+                "mark_price": float(mark_price),
+                "notional_usdt": float(notional_usdt),
+                "margin_usdt": float(max(0.0, margin_usdt)),
+                "unrealized_pnl_usdt": float(unrealized_pnl_usdt),
+                "leverage": float(leverage),
+            }
+            all_candidates.append(snapshot)
+            if desired in ("long", "short") and side == desired:
+                matched_candidates.append(snapshot)
+
+        if desired in ("long", "short") and matched_candidates:
+            return max(matched_candidates, key=lambda x: x["qty_abs"])
+        if all_candidates:
+            return max(all_candidates, key=lambda x: x["qty_abs"])
+        return None
     except Exception as e:
-        print(f"⚠️ 查詢 Binance 進場均價失敗: {e}")
-        return 0.0
+        print(f"⚠️ 查詢 Binance 持倉快照失敗: {e}")
+        return None
+
+
+def _fetch_binance_position_entry(direction):
+    """查詢 Binance 實際持倉均價（entryPrice），未持倉或失敗時回傳 0.0。"""
+    snapshot = _fetch_binance_position_snapshot(direction)
+    if snapshot:
+        ep = _safe_float(snapshot.get("entry_price"), 0.0)
+        if ep > 0:
+            return ep
+    return 0.0
 
 
 def sync_binance_open_position(direction, size_ratio, current_price):
@@ -1952,6 +2031,62 @@ def get_macro_bias():
     MACRO_CACHE = {"sp": sp_change, "nq": nq_change, "btc": btc_change, "dxy": dxy_change, "news": news_bias, "event": event_risk, "news_list": news_list, "ts": now}
     return sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk, news_list
 
+
+def _get_binance_funding_context(force=False):
+    """讀取 ETHUSDT 當前 funding rate（緩存 30 秒）。"""
+    now = time.time()
+    cached_rate = _safe_float(_BINANCE_FUNDING_CACHE.get("rate"), 0.0)
+    cached_next = _safe_float(_BINANCE_FUNDING_CACHE.get("next_ts"), 0.0)
+    cached_ts = _safe_float(_BINANCE_FUNDING_CACHE.get("ts"), 0.0)
+    if (not force) and now - cached_ts < 30:
+        return cached_rate, cached_next
+
+    try:
+        resp = HTTP_SESSION.get(
+            f"{BINANCE_BASE_URL}/fapi/v1/premiumIndex",
+            params={"symbol": BINANCE_SYMBOL},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp is not None else {}
+        if not isinstance(data, dict):
+            raise ValueError("funding_payload_invalid")
+
+        rate = _safe_float(data.get("lastFundingRate"), cached_rate)
+        next_ms = _safe_float(data.get("nextFundingTime"), 0.0)
+        next_ts = next_ms / 1000.0 if next_ms > 0 else cached_next
+        _BINANCE_FUNDING_CACHE["rate"] = rate
+        _BINANCE_FUNDING_CACHE["next_ts"] = next_ts
+        _BINANCE_FUNDING_CACHE["ts"] = now
+        return rate, next_ts
+    except Exception:
+        return cached_rate, cached_next
+
+
+def _estimate_trade_costs(direction, reward_rate=0.0):
+    """估算 round-trip 手續費 + 資金費成本比例。"""
+    side = "long" if direction == "long" else "short"
+    funding_rate, funding_next_ts = _get_binance_funding_context(force=False)
+
+    fee_round_trip_rate = max(0.0, BINANCE_TAKER_FEE_RATE) * 2.0
+    hold_periods = max(0.0, COST_EVAL_HOLD_HOURS / 8.0)
+    if side == "long":
+        funding_cost_rate = max(0.0, funding_rate) * hold_periods
+    else:
+        funding_cost_rate = max(0.0, -funding_rate) * hold_periods
+
+    total_cost_rate = fee_round_trip_rate + funding_cost_rate
+    reward = max(0.0, _safe_float(reward_rate, 0.0))
+    cost_to_reward_ratio = total_cost_rate / max(1e-9, reward)
+    return {
+        "fee_round_trip_rate": float(fee_round_trip_rate),
+        "funding_rate": float(funding_rate),
+        "funding_cost_rate": float(funding_cost_rate),
+        "total_cost_rate": float(total_cost_rate),
+        "funding_next_ts": float(funding_next_ts),
+        "cost_to_reward_ratio": float(cost_to_reward_ratio),
+    }
+
 # ===== Online Model Persistence =====
 ONLINE_MODEL_PATH = "/Volumes/SSD/trading/online_model.pkl"
 
@@ -2613,6 +2748,7 @@ def write_position_json():
     """將目前 active_trade 狀態寫入 docs/position.json，供 mini app / web app 即時讀取。"""
     try:
         is_open = bool(active_trade.get("open", False))
+        direction = str(active_trade.get("direction") or "")
         # 使用 avg_entry（平均進場價），與 refresh_position_panel_from_active_trade 保持一致
         entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
         tp = _safe_float(active_trade.get("tp"), 0.0)
@@ -2622,6 +2758,53 @@ def write_position_json():
         lev = max(1.0, _safe_float(BINANCE_LEVERAGE, 10.0))
         position_notional = tracked_qty * entry if (tracked_qty > 0 and entry > 0) else 0.0
         position_margin = (position_notional / lev) if position_notional > 0 else 0.0
+        mark_price = 0.0
+        break_even_price = 0.0
+        unrealized_pnl_usdt = 0.0
+
+        # 優先以 Binance 實際持倉覆蓋，確保進場價與未實現盈虧對齊交易所。
+        if is_open and _is_binance_copy_ready():
+            snapshot = _fetch_binance_position_snapshot(direction if direction in ("long", "short") else None)
+            if snapshot:
+                snap_dir = str(snapshot.get("direction") or "")
+                snap_entry = _safe_float(snapshot.get("entry_price"), 0.0)
+                snap_qty = max(0.0, _safe_float(snapshot.get("qty_abs"), 0.0))
+                snap_notional = max(0.0, _safe_float(snapshot.get("notional_usdt"), 0.0))
+                snap_margin = max(0.0, _safe_float(snapshot.get("margin_usdt"), 0.0))
+                mark_price = _safe_float(snapshot.get("mark_price"), 0.0)
+                break_even_price = _safe_float(snapshot.get("break_even_price"), 0.0)
+                unrealized_pnl_usdt = _safe_float(snapshot.get("unrealized_pnl_usdt"), 0.0)
+                lev = max(1.0, _safe_float(snapshot.get("leverage"), lev))
+
+                if snap_dir in ("long", "short"):
+                    direction = snap_dir
+                    active_trade["direction"] = snap_dir
+                if snap_entry > 0:
+                    entry = snap_entry
+                    active_trade["entry"] = snap_entry
+                    active_trade["avg_entry"] = snap_entry
+                if snap_qty > 0:
+                    tracked_qty = snap_qty
+                    active_trade["binance_qty"] = snap_qty
+                if snap_notional > 0:
+                    position_notional = snap_notional
+                elif tracked_qty > 0 and entry > 0:
+                    position_notional = tracked_qty * entry
+                if snap_margin > 0:
+                    position_margin = snap_margin
+                elif position_notional > 0:
+                    position_margin = position_notional / lev
+
+        funding_rate, funding_next_ts = _get_binance_funding_context(force=False)
+        fee_round_trip_rate = max(0.0, BINANCE_TAKER_FEE_RATE) * 2.0
+        hold_periods = max(0.0, COST_EVAL_HOLD_HOURS / 8.0)
+        if direction == "long":
+            funding_cost_rate_est = max(0.0, funding_rate) * hold_periods
+        elif direction == "short":
+            funding_cost_rate_est = max(0.0, -funding_rate) * hold_periods
+        else:
+            funding_cost_rate_est = 0.0
+        total_cost_rate_est = fee_round_trip_rate + funding_cost_rate_est
         raw_hits = active_trade.get("close_hits")
         close_hits = []
         if isinstance(raw_hits, list):
@@ -2639,7 +2822,7 @@ def write_position_json():
                 )
         data = {
             "open": is_open,
-            "direction": active_trade.get("direction") or "",
+            "direction": direction,
             "entry": round(entry, 4),
             "tp": round(tp, 4),
             "sl": round(sl, 4),
@@ -2653,6 +2836,16 @@ def write_position_json():
             "binance_qty": round(tracked_qty, 6),
             "position_notional_usdt": round(position_notional, 4),
             "position_margin_usdt": round(position_margin, 4),
+            "binance_entry_price": round(entry, 4),
+            "binance_mark_price": round(mark_price, 4),
+            "binance_break_even_price": round(break_even_price, 4),
+            "binance_unrealized_pnl_usdt": round(unrealized_pnl_usdt, 4),
+            "fee_round_trip_rate": round(fee_round_trip_rate, 8),
+            "funding_rate": round(funding_rate, 8),
+            "funding_next_ts": int(funding_next_ts) if funding_next_ts > 0 else 0,
+            "funding_cost_rate_est": round(funding_cost_rate_est, 8),
+            "total_cost_rate_est": round(total_cost_rate_est, 8),
+            "cost_eval_hold_hours": round(COST_EVAL_HOLD_HOURS, 3),
             "pair": "ETHUSDT",
             "lev": int(lev),
             "ts": int(time.time()),
@@ -3600,12 +3793,13 @@ def run_bot():
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
-                        send_telegram(
+                        sl_msg = (
                             f"❌ SL 命中（{active_trade['direction']}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
-                            f"已關閉倉位，等待下一筆交易",
-                            priority=True
+                            f"已關閉倉位，等待下一筆交易"
                         )
+                        send_telegram(sl_msg, priority=True)
+                        _send_private_telegram_text(sl_msg)
 
                     elif tp_hit:
                         ok_close, close_msg = sync_binance_close_position(current, reason="TP")
@@ -3625,12 +3819,13 @@ def run_bot():
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
-                        send_telegram(
+                        tp_msg = (
                             f"✅ TP 命中（{active_trade['direction']}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
-                            f"已關閉倉位，等待下一筆交易",
-                            priority=True
+                            f"已關閉倉位，等待下一筆交易"
                         )
+                        send_telegram(tp_msg, priority=True)
+                        _send_private_telegram_text(tp_msg)
 
                 elif active_trade["direction"] == "short":
                     tp_hit = (current <= active_trade["tp"]) or (candle_low <= active_trade["tp"])
@@ -3660,12 +3855,13 @@ def run_bot():
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
-                        send_telegram(
+                        sl_msg = (
                             f"❌ SL 命中（{active_trade['direction']}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
-                            f"已關閉倉位，等待下一筆交易",
-                            priority=True
+                            f"已關閉倉位，等待下一筆交易"
                         )
+                        send_telegram(sl_msg, priority=True)
+                        _send_private_telegram_text(sl_msg)
 
                     elif tp_hit:
                         ok_close, close_msg = sync_binance_close_position(current, reason="TP")
@@ -3685,12 +3881,13 @@ def run_bot():
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
-                        send_telegram(
+                        tp_msg = (
                             f"✅ TP 命中（{active_trade['direction']}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
-                            f"已關閉倉位，等待下一筆交易",
-                            priority=True
+                            f"已關閉倉位，等待下一筆交易"
                         )
+                        send_telegram(tp_msg, priority=True)
+                        _send_private_telegram_text(tp_msg)
 
             # 命中止盈止損前提下，持倉中允許補倉/減倉
             if active_trade["open"]:
@@ -3733,11 +3930,12 @@ def run_bot():
                             losing_streak += 1
                             last_signal_cache = None
                             remove_position_keyboard()  # 內部已呼叫 write/push_position_json
-                            send_telegram(
+                            native_sl_msg = (
                                 f"❌ SL 命中（Binance 原生止損觸發，Bot 同步）\n"
-                                f"已關閉倉位，等待下一筆交易",
-                                priority=True
+                                f"已關閉倉位，等待下一筆交易"
                             )
+                            send_telegram(native_sl_msg, priority=True)
+                            _send_private_telegram_text(native_sl_msg)
                             run_bot.last_position_status_ts = time.time()
                             continue
                     monitor_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
@@ -4025,6 +4223,10 @@ def run_bot():
             sl = None
             tp = None
             position_size = 0
+            cost_eval = None
+            risk_rate = 0.0
+            reward_rate = 0.0
+            net_rr_after_cost = 0.0
 
             # ===== 提前進場機制（升級）=====
             early_entry = False
@@ -4320,6 +4522,21 @@ def run_bot():
             if final != "觀望":
                 final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
 
+            # ===== 成本評估（手續費 + 資金費）=====
+            if final != "觀望":
+                direction_for_cost = get_signal_direction(final)
+                if direction_for_cost in ("long", "short"):
+                    risk_rate = max(abs(entry - _safe_float(sl, entry)) / max(entry, 1e-9), 1e-9)
+                    reward_rate = max(abs(_safe_float(tp, entry) - entry) / max(entry, 1e-9), 0.0)
+                    cost_eval = _estimate_trade_costs(direction_for_cost, reward_rate=reward_rate)
+                    net_reward_rate = max(0.0, reward_rate - cost_eval["total_cost_rate"])
+                    net_rr_after_cost = net_reward_rate / risk_rate
+                    if (
+                        cost_eval["cost_to_reward_ratio"] > MAX_COST_TO_REWARD_RATIO
+                        or net_rr_after_cost < MIN_NET_RR_AFTER_COST
+                    ):
+                        final = "觀望（成本過高）"
+
             # ===== 開單頻率 + 訊號去重（核心修正）=====
             now_ts = time.time()
 
@@ -4376,6 +4593,15 @@ def run_bot():
                 # 防止同一訊號重複刷
                 if last_signal_cache == msg:
                     continue
+
+                if cost_eval:
+                    fee_pct = cost_eval["fee_round_trip_rate"] * 100.0
+                    funding_pct = cost_eval["funding_cost_rate"] * 100.0
+                    total_pct = cost_eval["total_cost_rate"] * 100.0
+                    msg += (
+                        f"\n💸 成本評估: 手續費{fee_pct:.3f}% + 資金費{funding_pct:.3f}%"
+                        f" = {total_pct:.3f}% | 淨RR: {net_rr_after_cost:.2f}"
+                    )
 
                 print("📤 發送 Telegram")
                 send_telegram(msg, priority=True)
