@@ -23,6 +23,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
 from threading import Lock
 
+# ===== 手續費設定 =====
+# Binance 永續合約 Taker 手續費（單邊 0.04%）
+# 開倉 + 平倉合計 = 0.08%，TP 必須覆蓋此費用才能獲利
+TAKER_FEE_RATE = 0.0004          # 單邊 0.04%
+ROUND_TRIP_FEE_RATE = TAKER_FEE_RATE * 2  # 雙邊合計 0.08%
+
 # ===== Macro / News Engine =====
 
 MACRO_CACHE = {"sp": 0, "nq": 0, "btc": 0, "dxy": 0, "news": 0, "event": 0, "news_list": [], "ts": 0}
@@ -1198,7 +1204,8 @@ def manage_position_scaling(current_price, atr=None):
 
 
 def maybe_decay_take_profit(current_price):
-    """同一張單持倉超過 4 小時後，逐步降低止盈位。"""
+    """同一張單持倉超過 4 小時後，逐步降低止盈位。
+    下修底線為進場均價加計雙邊手續費（含 50% 緩衝），確保止盈仍能獲利。"""
     if not active_trade.get("open"):
         return
 
@@ -1226,6 +1233,9 @@ def maybe_decay_take_profit(current_price):
     if steps <= 0:
         return
 
+    # 手續費底線：TP 至少要超過進場均價 + 雙邊手續費（加 50% 緩衝）
+    fee_buffer = entry * ROUND_TRIP_FEE_RATE * 1.5
+
     old_tp = tp
     for _ in range(steps):
         if direction == "long":
@@ -1233,12 +1243,18 @@ def maybe_decay_take_profit(current_price):
             if dist <= 0:
                 break
             tp = entry + dist * (1.0 - decay_ratio)
+            # ① 不得低於手續費底線（確保止盈後實際獲利為正）
+            tp = max(tp, entry + fee_buffer)
+            # ② 不得低於當前價格小幅上方（避免立即觸發止盈）
             tp = max(tp, current_price * 1.0004)
         else:
             dist = max(entry - tp, 0.0)
             if dist <= 0:
                 break
             tp = entry - dist * (1.0 - decay_ratio)
+            # ① 不得高於手續費底線（確保止盈後實際獲利為正）
+            tp = min(tp, entry - fee_buffer)
+            # ② 不得高於當前價格小幅下方（避免立即觸發止盈）
             tp = min(tp, current_price * 0.9996)
 
     active_trade["tp"] = float(tp)
@@ -1265,7 +1281,7 @@ def get_signal_direction(signal):
 
 
 def auto_fix_trade_plan(signal, entry, sl, tp, atr):
-    """最終開單前修正 TP/SL，避免方向錯誤或風險距離過小。"""
+    """最終開單前修正 TP/SL，避免方向錯誤、風險距離過小，或止盈後實際收益為負（含手續費）。"""
     direction = get_signal_direction(signal)
     if direction is None:
         return signal, sl, tp
@@ -1278,18 +1294,21 @@ def auto_fix_trade_plan(signal, entry, sl, tp, atr):
     # 最小風險距離：避免 SL/TP 太近造成雜訊掃損
     min_risk = max(entry * 0.0008, atr * 0.35, 0.3)
 
+    # 手續費最低獲利門檻：TP 必須超過開倉 + 平倉雙邊手續費，加上額外緩衝（50%）
+    fee_buffer = entry * ROUND_TRIP_FEE_RATE * 1.5
+
     if direction == "long":
         if sl >= entry - min_risk:
             sl = entry - min_risk
         risk = max(entry - sl, min_risk)
-        min_tp = entry + max(risk * 1.4, min_risk * 1.2)
+        min_tp = entry + max(risk * 1.4, min_risk * 1.2, fee_buffer)
         if tp <= min_tp:
             tp = min_tp
     else:
         if sl <= entry + min_risk:
             sl = entry + min_risk
         risk = max(sl - entry, min_risk)
-        min_tp = entry - max(risk * 1.4, min_risk * 1.2)
+        min_tp = entry - max(risk * 1.4, min_risk * 1.2, fee_buffer)
         if tp >= min_tp:
             tp = min_tp
 
@@ -2312,6 +2331,10 @@ def run_bot():
                     elif tp_hit:
                         performance["win"] += 1
                         performance["total"] += 1
+                        tp_exit = active_trade["tp"]
+                        avg_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), tp_exit)
+                        gross_pct = (tp_exit - avg_entry) / avg_entry if avg_entry > 0 else 0.0
+                        net_pct = gross_pct - ROUND_TRIP_FEE_RATE
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2326,6 +2349,8 @@ def run_bot():
                         send_telegram(
                             f"✅ TP 命中（{active_trade['direction']}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
+                            f"進場均價: {avg_entry:.2f} | TP: {tp_exit:.2f}\n"
+                            f"毛利: {gross_pct*100:+.3f}% | 手續費: -{ROUND_TRIP_FEE_RATE*100:.3f}% | 淨利: {net_pct*100:+.3f}%\n"
                             f"已關閉倉位，等待下一筆交易",
                             priority=True
                         )
@@ -2364,6 +2389,10 @@ def run_bot():
                     elif tp_hit:
                         performance["win"] += 1
                         performance["total"] += 1
+                        tp_exit = active_trade["tp"]
+                        avg_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), tp_exit)
+                        gross_pct = (avg_entry - tp_exit) / avg_entry if avg_entry > 0 else 0.0
+                        net_pct = gross_pct - ROUND_TRIP_FEE_RATE
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2378,6 +2407,8 @@ def run_bot():
                         send_telegram(
                             f"✅ TP 命中（{active_trade['direction']}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
+                            f"進場均價: {avg_entry:.2f} | TP: {tp_exit:.2f}\n"
+                            f"毛利: {gross_pct*100:+.3f}% | 手續費: -{ROUND_TRIP_FEE_RATE*100:.3f}% | 淨利: {net_pct*100:+.3f}%\n"
                             f"已關閉倉位，等待下一筆交易",
                             priority=True
                         )
