@@ -2082,6 +2082,7 @@ def run_bot():
     last_signal = None
     last_trade_time = 0
     TRADE_COOLDOWN = 300  # 冷卻加長（防洗單）
+    SL_COOLDOWN = 60      # 止損後縮短冷卻時間，避免開單頻率過低
     MIN_PRICE_CHANGE = 0.002  # 至少0.2%價格變動才允許新單
     MIN_SIGNAL_DIFF = 0.05  # 信號差異門檻
     last_trade_signal = None  # 避免同一訊號重複開單
@@ -2295,6 +2296,11 @@ def run_bot():
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
+                        # 止損後重置防洗單記憶，改用短冷卻時間，避免開單頻率過低
+                        last_entry_price = None
+                        last_trade_signal = None
+                        last_signal = None
+                        last_trade_time = time.time() - (TRADE_COOLDOWN - SL_COOLDOWN)
                         print("❌ SL 命中")
                         send_telegram(
                             f"❌ SL 命中（{active_trade['direction']}）\n"
@@ -2342,6 +2348,11 @@ def run_bot():
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
+                        # 止損後重置防洗單記憶，改用短冷卻時間，避免開單頻率過低
+                        last_entry_price = None
+                        last_trade_signal = None
+                        last_signal = None
+                        last_trade_time = time.time() - (TRADE_COOLDOWN - SL_COOLDOWN)
                         print("❌ SL 命中")
                         send_telegram(
                             f"❌ SL 命中（{active_trade['direction']}）\n"
