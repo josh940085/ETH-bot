@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 import xml.etree.ElementTree as ET
 
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import SGDClassifier, LogisticRegression
 from sklearn.feature_extraction.text import TfidfVectorizer
 from threading import Lock
@@ -39,12 +39,29 @@ NEWS_MODEL_PATH = "news_model.pkl"
 NEWS_VECTORIZER_PATH = "news_vectorizer.pkl"
 NEWS_PERFORMANCE_LOG = "news_predictions.jsonl"   # 記錄所有預測結果用於評估
 NEWS_LEARNING_BUFFER = "learning_buffer.pkl"       # 增量學習緩衝區
+NEWS_MODEL_META_PATH = Path(__file__).resolve().parent / "news_model_meta.json"
+NEWS_EVAL_PENDING_PATH = Path(__file__).resolve().parent / "news_eval_pending.pkl"
+NEWS_STATS_CACHE_PATH = Path(__file__).resolve().parent / "news_stats_cache.json"
 news_model = None
 news_vectorizer = None
+NEWS_STATS_CACHE = None
 
 # 增量學習配置
 INCREMENTAL_LEARNING_ENABLED = True
 MIN_PREDICTIONS_FOR_RETRAIN = 50  # 每50個預測後考慮重新訓練
+
+NEWS_EVAL_HORIZON_SEC = 1800.0
+NEWS_IMPACT_THRESHOLD_PCT = 0.0025
+NEWS_EVAL_REPORT_INTERVAL_SEC = 1800.0
+NEWS_EVAL_STATS_WINDOW_SEC = 86400.0
+NEWS_MODEL_RETRAIN_INTERVAL_SEC = 21600.0
+NEWS_MODEL_MIN_EVALS_FOR_RETRAIN = 40
+NEWS_LOG_MAX_BYTES = 20 * 1024 * 1024
+NEWS_LOG_KEEP_FILES = 3
+NEWS_STATS_LOOKBACK_SEC = 7 * 86400.0
+NEWS_STATS_RECENT_MAX = 5000
+NEWS_STATS_BACKFILL_MAX_BYTES = 64 * 1024 * 1024
+NEWS_BUFFER_MAX_PER_LABEL = 120
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -97,7 +114,71 @@ def _get_env_with_alias(primary, aliases=None, default=""):
     return default
 
 
+def _reload_news_runtime_settings():
+    """新聞 AI / 評估設定在 .env 載入後重新讀取。"""
+    global NEWS_EVAL_HORIZON_SEC, NEWS_IMPACT_THRESHOLD_PCT, NEWS_EVAL_REPORT_INTERVAL_SEC
+    global NEWS_EVAL_STATS_WINDOW_SEC, NEWS_MODEL_RETRAIN_INTERVAL_SEC, NEWS_MODEL_MIN_EVALS_FOR_RETRAIN
+    global NEWS_LOG_MAX_BYTES, NEWS_LOG_KEEP_FILES, NEWS_STATS_LOOKBACK_SEC
+    global NEWS_STATS_RECENT_MAX, NEWS_STATS_BACKFILL_MAX_BYTES, NEWS_BUFFER_MAX_PER_LABEL
+
+    try:
+        NEWS_EVAL_HORIZON_SEC = max(60.0, float(os.getenv("NEWS_EVAL_HORIZON_SEC", "1800")))
+    except Exception:
+        NEWS_EVAL_HORIZON_SEC = 1800.0
+    try:
+        NEWS_IMPACT_THRESHOLD_PCT = max(0.0, float(os.getenv("NEWS_IMPACT_THRESHOLD_PCT", "0.0025")))
+    except Exception:
+        NEWS_IMPACT_THRESHOLD_PCT = 0.0025
+    try:
+        NEWS_EVAL_REPORT_INTERVAL_SEC = max(120.0, float(os.getenv("NEWS_EVAL_REPORT_INTERVAL_SEC", "1800")))
+    except Exception:
+        NEWS_EVAL_REPORT_INTERVAL_SEC = 1800.0
+    try:
+        NEWS_EVAL_STATS_WINDOW_SEC = max(600.0, float(os.getenv("NEWS_EVAL_STATS_WINDOW_SEC", "86400")))
+    except Exception:
+        NEWS_EVAL_STATS_WINDOW_SEC = 86400.0
+    try:
+        NEWS_MODEL_RETRAIN_INTERVAL_SEC = max(600.0, float(os.getenv("NEWS_MODEL_RETRAIN_INTERVAL_SEC", "21600")))
+    except Exception:
+        NEWS_MODEL_RETRAIN_INTERVAL_SEC = 21600.0
+    try:
+        NEWS_MODEL_MIN_EVALS_FOR_RETRAIN = max(10, int(float(os.getenv("NEWS_MODEL_MIN_EVALS_FOR_RETRAIN", "40"))))
+    except Exception:
+        NEWS_MODEL_MIN_EVALS_FOR_RETRAIN = 40
+    try:
+        NEWS_LOG_MAX_BYTES = max(5 * 1024 * 1024, int(float(os.getenv("NEWS_LOG_MAX_BYTES", str(20 * 1024 * 1024)))))
+    except Exception:
+        NEWS_LOG_MAX_BYTES = 20 * 1024 * 1024
+    try:
+        NEWS_LOG_KEEP_FILES = max(1, int(float(os.getenv("NEWS_LOG_KEEP_FILES", "3"))))
+    except Exception:
+        NEWS_LOG_KEEP_FILES = 3
+    try:
+        NEWS_STATS_LOOKBACK_SEC = max(
+            NEWS_EVAL_STATS_WINDOW_SEC,
+            float(os.getenv("NEWS_STATS_LOOKBACK_SEC", str(7 * 86400))),
+        )
+    except Exception:
+        NEWS_STATS_LOOKBACK_SEC = max(NEWS_EVAL_STATS_WINDOW_SEC, 7 * 86400.0)
+    try:
+        NEWS_STATS_RECENT_MAX = max(200, int(float(os.getenv("NEWS_STATS_RECENT_MAX", "5000"))))
+    except Exception:
+        NEWS_STATS_RECENT_MAX = 5000
+    try:
+        NEWS_STATS_BACKFILL_MAX_BYTES = max(
+            0,
+            int(float(os.getenv("NEWS_STATS_BACKFILL_MAX_BYTES", str(64 * 1024 * 1024)))),
+        )
+    except Exception:
+        NEWS_STATS_BACKFILL_MAX_BYTES = 64 * 1024 * 1024
+    try:
+        NEWS_BUFFER_MAX_PER_LABEL = max(20, int(float(os.getenv("NEWS_BUFFER_MAX_PER_LABEL", "120"))))
+    except Exception:
+        NEWS_BUFFER_MAX_PER_LABEL = 120
+
+
 _load_local_env()
+_reload_news_runtime_settings()
 
 TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "")
@@ -1069,54 +1150,153 @@ NEWS_TRAINING_DATA = [
     ("Policy announcement", 0),
 ]
 
-def train_news_model():
-    global news_model, news_vectorizer
-    if news_model is not None:
-        return  # 已訓練
-
-    texts = [item[0] for item in NEWS_TRAINING_DATA]
-    labels = [item[1] for item in NEWS_TRAINING_DATA]
-
-    # 改進的特徵提取：使用雙詞組合 + 子線性 TF
-    news_vectorizer = TfidfVectorizer(
-        max_features=2000,
-        ngram_range=(1, 2),      # 捕捉詞組
+def _create_news_vectorizer():
+    return TfidfVectorizer(
+        max_features=3000,
+        ngram_range=(1, 3),
         min_df=1,
-        sublinear_tf=True,        # 改進詞頻計算
-        stop_words='english'
+        sublinear_tf=True,
+        strip_accents="unicode",
+        stop_words="english",
     )
-    X = news_vectorizer.fit_transform(texts)
-    y = np.array(labels)
 
-    # 使用集成投票模型（Gradient Boosting + Random Forest + Logistic Regression）
-    news_model = VotingClassifier(
-        estimators=[
-            ('gb', GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, max_depth=5, random_state=42)),
-            ('rf', RandomForestClassifier(n_estimators=150, max_depth=8, random_state=42)),
-            ('lr', LogisticRegression(max_iter=200, random_state=42))
-        ],
-        voting='soft'  # 使用概率投票
+
+def _create_news_classifier():
+    # 稀疏文字特徵用線性模型比樹模型更穩定也更快。
+    return LogisticRegression(
+        max_iter=600,
+        C=2.5,
+        class_weight="balanced",
+        random_state=42,
     )
-    news_model.fit(X, y)
 
-    # 保存模型
+
+def _is_news_model_compatible(model_obj, vectorizer_obj):
+    return (
+        isinstance(model_obj, LogisticRegression)
+        and isinstance(vectorizer_obj, TfidfVectorizer)
+        and hasattr(model_obj, "predict_proba")
+    )
+
+
+def _save_news_model_bundle(model_obj, vectorizer_obj, sample_count):
     try:
         with open(NEWS_MODEL_PATH, "wb") as f:
-            pickle.dump(news_model, f)
+            pickle.dump(model_obj, f)
         with open(NEWS_VECTORIZER_PATH, "wb") as f:
-            pickle.dump(news_vectorizer, f)
-    except:
+            pickle.dump(vectorizer_obj, f)
+        NEWS_MODEL_META_PATH.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "model_type": "logistic_regression",
+                    "vectorizer": "tfidf_1_3",
+                    "sample_count": int(sample_count),
+                    "updated_at": datetime.datetime.now().isoformat(),
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
         pass
 
-def load_news_model():
+
+def _load_news_learning_samples():
+    try:
+        with open(NEWS_LEARNING_BUFFER, "rb") as f:
+            buffer = pickle.load(f)
+    except Exception:
+        buffer = []
+
+    if not isinstance(buffer, list):
+        return []
+
+    out = []
+    for item in buffer[-2000:]:
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        text, label = item
+        norm_text = normalize_news_text(text)
+        if not norm_text:
+            continue
+        label_int = int(_safe_float(label, 0))
+        if label_int not in (-2, -1, 0, 1, 2):
+            continue
+        out.append((norm_text, label_int))
+    return out
+
+
+def _build_news_training_dataset():
+    latest_by_text = {}
+
+    for text, label in NEWS_TRAINING_DATA:
+        norm_text = normalize_news_text(text)
+        if norm_text:
+            latest_by_text[norm_text.lower()] = (norm_text, int(label))
+
+    for text, label in _load_news_learning_samples():
+        latest_by_text[text.lower()] = (text, int(label))
+
+    buckets = {-2: [], -1: [], 0: [], 1: [], 2: []}
+    for text, label in latest_by_text.values():
+        buckets.setdefault(int(label), []).append((text, int(label)))
+
+    dataset = []
+    for label in (-2, -1, 0, 1, 2):
+        bucket = buckets.get(label, [])
+        if len(bucket) > NEWS_BUFFER_MAX_PER_LABEL:
+            bucket = bucket[-NEWS_BUFFER_MAX_PER_LABEL:]
+        dataset.extend(bucket)
+
+    if len(dataset) < len(NEWS_TRAINING_DATA):
+        dataset = [(normalize_news_text(text), int(label)) for text, label in NEWS_TRAINING_DATA]
+
+    texts = [text for text, label in dataset if text and label in (-2, -1, 0, 1, 2)]
+    labels = np.array([label for text, label in dataset if text and label in (-2, -1, 0, 1, 2)], dtype=int)
+    return texts, labels
+
+
+def train_news_model(force=False):
     global news_model, news_vectorizer
+    if news_model is not None and not force and _is_news_model_compatible(news_model, news_vectorizer):
+        return
+
+    texts, y = _build_news_training_dataset()
+    if not texts or len(texts) != len(y):
+        texts = [item[0] for item in NEWS_TRAINING_DATA]
+        y = np.array([item[1] for item in NEWS_TRAINING_DATA], dtype=int)
+
+    vectorizer_obj = _create_news_vectorizer()
+    X = vectorizer_obj.fit_transform(texts)
+
+    model_obj = _create_news_classifier()
+    model_obj.fit(X, y)
+
+    news_model = model_obj
+    news_vectorizer = vectorizer_obj
+    _save_news_model_bundle(model_obj, vectorizer_obj, len(texts))
+
+
+def load_news_model(force_retrain=False):
+    global news_model, news_vectorizer
+    if force_retrain:
+        train_news_model(force=True)
+        return
+
     try:
         with open(NEWS_MODEL_PATH, "rb") as f:
-            news_model = pickle.load(f)
+            loaded_model = pickle.load(f)
         with open(NEWS_VECTORIZER_PATH, "rb") as f:
-            news_vectorizer = pickle.load(f)
-    except:
-        train_news_model()
+            loaded_vectorizer = pickle.load(f)
+
+        if not _is_news_model_compatible(loaded_model, loaded_vectorizer):
+            raise ValueError("outdated_news_model")
+
+        news_model = loaded_model
+        news_vectorizer = loaded_vectorizer
+    except Exception:
+        train_news_model(force=True)
 
 def predict_news_sentiment(text):
     """預測新聞情緒（舊函數，保持兼容性）"""
@@ -1126,7 +1306,11 @@ def predict_news_sentiment(text):
     if news_model is None:
         return 0  # 預設中性
 
-    X = news_vectorizer.transform([text])
+    clean_text = normalize_news_text(text)
+    if not clean_text:
+        return 0
+
+    X = news_vectorizer.transform([clean_text])
     prediction = news_model.predict(X)[0]
     return int(prediction)
 
@@ -1140,15 +1324,22 @@ def predict_news_sentiment_with_confidence(text):
         return 0, 0.33  # 預設中性，低置信度
 
     try:
-        X = news_vectorizer.transform([text])
+        clean_text = normalize_news_text(text)
+        if not clean_text:
+            return 0, 0.33
+
+        X = news_vectorizer.transform([clean_text])
         prediction = news_model.predict(X)[0]
-        
-        # 獲取概率分布
+
         probabilities = news_model.predict_proba(X)[0]
-        confidence = max(probabilities)  # 取最高概率
-        
+        sorted_probs = np.sort(probabilities)
+        top1 = float(sorted_probs[-1])
+        top2 = float(sorted_probs[-2]) if len(sorted_probs) > 1 else 0.0
+        # 多分類線性模型的機率通常偏平，加入 top-1 / top-2 margin 讓顯示更貼近決策確定度。
+        confidence = min(0.99, max(top1, top1 + max(0.0, top1 - top2) * 2.0))
+
         return int(prediction), float(confidence)
-    except:
+    except Exception:
         return 0, 0.33
 
 
@@ -1206,43 +1397,220 @@ def _refine_neutral_bias(text, ai_bias, ai_confidence):
 
 
 # ===== 增量學習系統：記錄預測並持續改進 =====
-def log_prediction_result(news_text, predicted_bias, actual_market_move=None, correct=None):
+def _new_news_stats_cache():
+    return {
+        "version": 1,
+        "lifetime": {
+            "evaluated_total": 0,
+            "directional_total": 0,
+            "directional_correct": 0,
+            "impactful": 0,
+        },
+        "recent": [],
+        "updated_at": 0.0,
+    }
+
+
+def _normalize_news_stats_cache(cache):
+    payload = cache if isinstance(cache, dict) else {}
+    lifetime = payload.get("lifetime") if isinstance(payload.get("lifetime"), dict) else {}
+    recent = payload.get("recent") if isinstance(payload.get("recent"), list) else []
+    normalized = _new_news_stats_cache()
+    normalized["lifetime"]["evaluated_total"] = int(_safe_float(lifetime.get("evaluated_total"), 0))
+    normalized["lifetime"]["directional_total"] = int(_safe_float(lifetime.get("directional_total"), 0))
+    normalized["lifetime"]["directional_correct"] = int(_safe_float(lifetime.get("directional_correct"), 0))
+    normalized["lifetime"]["impactful"] = int(_safe_float(lifetime.get("impactful"), 0))
+    normalized["recent"] = _prune_news_stats_recent(recent)
+    normalized["updated_at"] = float(_safe_float(payload.get("updated_at"), 0.0))
+    return normalized
+
+
+def _parse_news_record_ts(record):
+    ts_raw = record.get("timestamp")
+    if isinstance(ts_raw, (int, float)):
+        return float(ts_raw)
+    if isinstance(ts_raw, str):
+        try:
+            return datetime.datetime.fromisoformat(ts_raw).timestamp()
+        except Exception:
+            return 0.0
+    return 0.0
+
+
+def _prune_news_stats_recent(records, now_ts=None):
+    now_ts = _safe_float(now_ts, time.time())
+    cutoff = now_ts - max(60.0, NEWS_STATS_LOOKBACK_SEC)
+    pruned = []
+
+    for item in records[-max(NEWS_STATS_RECENT_MAX * 2, NEWS_STATS_RECENT_MAX):]:
+        if not isinstance(item, dict):
+            continue
+        ts = _safe_float(item.get("ts"), 0.0)
+        if ts < cutoff:
+            continue
+        corr = item.get("is_correct")
+        pruned.append(
+            {
+                "ts": float(ts),
+                "is_correct": None if corr is None else bool(corr),
+                "has_impact": bool(item.get("has_impact")),
+            }
+        )
+
+    if len(pruned) > NEWS_STATS_RECENT_MAX:
+        pruned = pruned[-NEWS_STATS_RECENT_MAX:]
+    return pruned
+
+
+def _news_log_archive_path(index):
+    return Path(f"{NEWS_PERFORMANCE_LOG}.{int(index)}")
+
+
+def _iter_news_log_backfill_paths():
+    paths = []
+    for idx in range(NEWS_LOG_KEEP_FILES, 0, -1):
+        path = _news_log_archive_path(idx)
+        if path.exists():
+            paths.append(path)
+    current = Path(NEWS_PERFORMANCE_LOG)
+    if current.exists():
+        paths.append(current)
+    return paths
+
+
+def _apply_record_to_news_stats(cache, record):
+    if not isinstance(record, dict) or not record.get("evaluation_done"):
+        return cache
+
+    payload = _normalize_news_stats_cache(cache)
+    lifetime = payload["lifetime"]
+    lifetime["evaluated_total"] += 1
+
+    corr = record.get("is_correct")
+    if corr is not None:
+        lifetime["directional_total"] += 1
+        if bool(corr):
+            lifetime["directional_correct"] += 1
+    if record.get("has_impact"):
+        lifetime["impactful"] += 1
+
+    payload["recent"].append(
+        {
+            "ts": float(_parse_news_record_ts(record) or time.time()),
+            "is_correct": None if corr is None else bool(corr),
+            "has_impact": bool(record.get("has_impact")),
+        }
+    )
+    payload["recent"] = _prune_news_stats_recent(payload["recent"])
+    payload["updated_at"] = time.time()
+    return payload
+
+
+def _rebuild_news_stats_cache_from_logs():
+    cache = _new_news_stats_cache()
+    paths = _iter_news_log_backfill_paths()
+    total_bytes = sum(path.stat().st_size for path in paths if path.exists())
+    if total_bytes <= 0 or (NEWS_STATS_BACKFILL_MAX_BYTES > 0 and total_bytes > NEWS_STATS_BACKFILL_MAX_BYTES):
+        return cache
+
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    try:
+                        record = json.loads(line)
+                    except Exception:
+                        continue
+                    cache = _apply_record_to_news_stats(cache, record)
+        except Exception:
+            continue
+
+    cache["recent"] = _prune_news_stats_recent(cache.get("recent", []))
+    cache["updated_at"] = time.time()
+    return cache
+
+
+def _load_news_stats_cache():
+    global NEWS_STATS_CACHE
+    if isinstance(NEWS_STATS_CACHE, dict):
+        return NEWS_STATS_CACHE
+
+    try:
+        raw = json.loads(NEWS_STATS_CACHE_PATH.read_text(encoding="utf-8"))
+        NEWS_STATS_CACHE = _normalize_news_stats_cache(raw)
+    except Exception:
+        NEWS_STATS_CACHE = _rebuild_news_stats_cache_from_logs()
+        _save_news_stats_cache(NEWS_STATS_CACHE)
+    return NEWS_STATS_CACHE
+
+
+def _save_news_stats_cache(cache=None):
+    global NEWS_STATS_CACHE
+    payload = _normalize_news_stats_cache(cache or NEWS_STATS_CACHE or _new_news_stats_cache())
+    NEWS_STATS_CACHE = payload
+    try:
+        NEWS_STATS_CACHE_PATH.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _update_news_stats_cache(record):
+    global NEWS_STATS_CACHE
+    if not isinstance(record, dict) or not record.get("evaluation_done"):
+        return
+    payload = _apply_record_to_news_stats(_load_news_stats_cache(), record)
+    NEWS_STATS_CACHE = payload
+    _save_news_stats_cache(payload)
+
+
+def _maybe_rotate_news_performance_log():
+    log_path = Path(NEWS_PERFORMANCE_LOG)
+    try:
+        if not log_path.exists() or log_path.stat().st_size < NEWS_LOG_MAX_BYTES:
+            return
+
+        for idx in range(NEWS_LOG_KEEP_FILES, 0, -1):
+            src = log_path if idx == 1 else _news_log_archive_path(idx - 1)
+            dst = _news_log_archive_path(idx)
+            if dst.exists():
+                dst.unlink()
+            if src.exists():
+                src.replace(dst)
+    except Exception:
+        pass
+
+
+def log_prediction_result(news_text, predicted_bias, actual_market_move=None, correct=None, **extra):
     """記錄預測結果用於增量學習和精準度評估"""
     try:
+        _maybe_rotate_news_performance_log()
         record = {
             "timestamp": datetime.datetime.now().isoformat(),
-            "news": news_text[:150],
+            "news": str(news_text or "")[:150],
             "predicted_bias": predicted_bias,
             "actual_move": actual_market_move,
-            "is_correct": correct
+            "is_correct": correct,
         }
-        
-        with open(NEWS_PERFORMANCE_LOG, "a") as f:
+        if extra:
+            record.update(extra)
+
+        with open(NEWS_PERFORMANCE_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except:
+        _update_news_stats_cache(record)
+    except Exception:
         pass
 
 
 def get_prediction_accuracy():
     """計算模型預測準確度"""
     try:
-        total = 0
-        correct = 0
-        
-        with open(NEWS_PERFORMANCE_LOG, "r") as f:
-            for line in f:
-                try:
-                    record = json.loads(line)
-                    if record.get("is_correct") is not None:
-                        total += 1
-                        if record["is_correct"]:
-                            correct += 1
-                except:
-                    pass
-        
+        cache = _load_news_stats_cache()
+        lifetime = cache.get("lifetime", {})
+        total = int(_safe_float(lifetime.get("directional_total"), 0))
+        correct = int(_safe_float(lifetime.get("directional_correct"), 0))
         accuracy = (correct / total * 100) if total > 0 else 0
         return {"accuracy": round(accuracy, 2), "total": total, "correct": correct}
-    except:
+    except Exception:
         return {"accuracy": 0, "total": 0, "correct": 0}
 
 
@@ -1253,78 +1621,260 @@ def update_learning_buffer(news_text, true_label):
         try:
             with open(NEWS_LEARNING_BUFFER, "rb") as f:
                 buffer = pickle.load(f)
-        except:
+        except Exception:
             buffer = []
-        
-        buffer.append((news_text, true_label))
-        
-        # 緩衝區最多保留 200 個樣本
-        if len(buffer) > 200:
-            buffer = buffer[-200:]
-        
+
+        buffer.append((normalize_news_text(news_text), int(_safe_float(true_label, 0))))
+
+        max_buffer = max(200, NEWS_BUFFER_MAX_PER_LABEL * 5)
+        if len(buffer) > max_buffer:
+            buffer = buffer[-max_buffer:]
+
         with open(NEWS_LEARNING_BUFFER, "wb") as f:
             pickle.dump(buffer, f)
-    except:
+    except Exception:
         pass
+
+
+NEWS_EVAL_PENDING = deque()
+_NEWS_EVAL_SEEN = set()
+
+
+def _load_news_eval_pending():
+    """載入待評估新聞樣本（重啟後可續跑）。"""
+    global NEWS_EVAL_PENDING, _NEWS_EVAL_SEEN
+    try:
+        if not NEWS_EVAL_PENDING_PATH.exists():
+            NEWS_EVAL_PENDING = deque()
+            _NEWS_EVAL_SEEN = set()
+            return
+        raw = pickle.loads(NEWS_EVAL_PENDING_PATH.read_bytes())
+        if not isinstance(raw, list):
+            NEWS_EVAL_PENDING = deque()
+            _NEWS_EVAL_SEEN = set()
+            return
+        filtered = []
+        seen = set()
+        for item in raw[-2000:]:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("news_key") or "")
+            if not key:
+                continue
+            filtered.append(item)
+            seen.add(key)
+        NEWS_EVAL_PENDING = deque(filtered)
+        _NEWS_EVAL_SEEN = seen
+    except Exception:
+        NEWS_EVAL_PENDING = deque()
+        _NEWS_EVAL_SEEN = set()
+
+
+def _save_news_eval_pending():
+    """落地待評估新聞樣本。"""
+    try:
+        payload = list(NEWS_EVAL_PENDING)[-2000:]
+        NEWS_EVAL_PENDING_PATH.write_bytes(pickle.dumps(payload))
+    except Exception:
+        pass
+
+
+def _get_spot_price_for_news_eval():
+    """取得新聞評估基準價：優先 WS，失敗時用 Binance ticker。"""
+    ws_px = _safe_float(globals().get("WS_PRICE"), 0.0)
+    if ws_px > 0:
+        return ws_px
+    try:
+        resp = HTTP_SESSION.get(
+            f"{BINANCE_BASE_URL}/fapi/v1/ticker/price",
+            params={"symbol": BINANCE_SYMBOL},
+            timeout=3,
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp is not None else {}
+        px = _safe_float(data.get("price"), 0.0) if isinstance(data, dict) else 0.0
+        return px if px > 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def _register_news_eval_sample(news_text, predicted_bias, source="News", ai_confidence=0.0):
+    """註冊待評估新聞樣本：稍後檢查方向正確率與影響力。"""
+    global _NEWS_EVAL_SEEN
+    text = normalize_news_text(news_text)
+    if not text:
+        return
+    src = str(source or "News").strip() or "News"
+    base_key = f"{src}|{text.lower()}"
+    if base_key in _NEWS_EVAL_SEEN:
+        return
+
+    entry_price = _get_spot_price_for_news_eval()
+    if entry_price <= 0:
+        return
+
+    now = time.time()
+    sample = {
+        "news_key": base_key,
+        "source": src,
+        "news": text,
+        "predicted_bias": int(_safe_float(predicted_bias, 0)),
+        "ai_confidence": float(_safe_float(ai_confidence, 0.0)),
+        "entry_price": float(entry_price),
+        "entry_ts": float(now),
+        "due_ts": float(now + NEWS_EVAL_HORIZON_SEC),
+    }
+    NEWS_EVAL_PENDING.append(sample)
+    _NEWS_EVAL_SEEN.add(base_key)
+    if len(NEWS_EVAL_PENDING) > 2000:
+        NEWS_EVAL_PENDING.popleft()
+    if len(_NEWS_EVAL_SEEN) > 6000:
+        _NEWS_EVAL_SEEN = set(list(_NEWS_EVAL_SEEN)[-3000:])
+    _save_news_eval_pending()
+
+
+def _move_to_news_label(move_pct):
+    """將市場變動幅度映射為新聞情緒標籤（-2..2）。"""
+    m = _safe_float(move_pct, 0.0)
+    th = max(1e-6, NEWS_IMPACT_THRESHOLD_PCT)
+    strong_th = th * 2.2
+    if abs(m) < th:
+        return 0
+    if m > 0:
+        return 2 if abs(m) >= strong_th else 1
+    return -2 if abs(m) >= strong_th else -1
+
+
+def process_news_evaluation_cycle(current_price=0.0, now_ts=None):
+    """
+    定期回填新聞評估：
+    1) 新聞方向是否判對
+    2) 該新聞是否產生足夠市場影響（變動幅度）
+    """
+    global NEWS_EVAL_PENDING
+    if now_ts is None:
+        now_ts = time.time()
+    now_ts = _safe_float(now_ts, time.time())
+    px = _safe_float(current_price, 0.0)
+    if px <= 0:
+        px = _get_spot_price_for_news_eval()
+    if px <= 0 or not NEWS_EVAL_PENDING:
+        return {"processed": 0, "directional_total": 0, "directional_correct": 0, "impactful": 0}
+
+    remain = deque()
+    processed = 0
+    directional_total = 0
+    directional_correct = 0
+    impactful = 0
+    th = max(0.0, NEWS_IMPACT_THRESHOLD_PCT)
+
+    while NEWS_EVAL_PENDING:
+        item = NEWS_EVAL_PENDING.popleft()
+        due_ts = _safe_float(item.get("due_ts"), 0.0)
+        if due_ts <= 0 or now_ts < due_ts:
+            remain.append(item)
+            continue
+
+        base = _safe_float(item.get("entry_price"), 0.0)
+        if base <= 0:
+            continue
+        move = (px - base) / max(base, 1e-9)
+        has_impact = abs(move) >= th
+        pred_bias = int(_safe_float(item.get("predicted_bias"), 0))
+
+        is_correct = None
+        if pred_bias > 0:
+            directional_total += 1
+            is_correct = move > 0
+            if is_correct:
+                directional_correct += 1
+        elif pred_bias < 0:
+            directional_total += 1
+            is_correct = move < 0
+            if is_correct:
+                directional_correct += 1
+
+        if has_impact:
+            impactful += 1
+
+        true_label = _move_to_news_label(move)
+        update_learning_buffer(item.get("news", ""), true_label)
+        log_prediction_result(
+            item.get("news", ""),
+            pred_bias,
+            actual_market_move=round(move, 6),
+            correct=is_correct,
+            source=item.get("source", "News"),
+            ai_confidence=round(_safe_float(item.get("ai_confidence"), 0.0), 4),
+            entry_price=round(base, 4),
+            eval_price=round(px, 4),
+            horizon_sec=int(max(0, now_ts - _safe_float(item.get("entry_ts"), now_ts))),
+            impact_threshold_pct=th,
+            has_impact=bool(has_impact),
+            evaluation_done=True,
+        )
+        processed += 1
+
+    NEWS_EVAL_PENDING = remain
+    _save_news_eval_pending()
+    return {
+        "processed": processed,
+        "directional_total": directional_total,
+        "directional_correct": directional_correct,
+        "impactful": impactful,
+    }
+
+
+def get_recent_news_eval_stats(window_sec=86400):
+    """讀取近期新聞評估統計（方向正確率 / 影響力比例）。"""
+    try:
+        now = time.time()
+        cutoff = now - max(60.0, _safe_float(window_sec, 86400.0))
+        cache = _load_news_stats_cache()
+        recent = cache.get("recent", [])
+
+        total = 0
+        directional_total = 0
+        directional_correct = 0
+        impactful = 0
+        for item in recent:
+            ts = _safe_float(item.get("ts"), 0.0)
+            if ts < cutoff:
+                continue
+            total += 1
+            corr = item.get("is_correct")
+            if corr is not None:
+                directional_total += 1
+                if bool(corr):
+                    directional_correct += 1
+            if item.get("has_impact"):
+                impactful += 1
+    except Exception:
+        return {"total": 0, "directional_total": 0, "directional_correct": 0, "accuracy": 0.0, "impact_rate": 0.0}
+
+    accuracy = (directional_correct / directional_total * 100.0) if directional_total > 0 else 0.0
+    impact_rate = (impactful / total * 100.0) if total > 0 else 0.0
+    return {
+        "total": total,
+        "directional_total": directional_total,
+        "directional_correct": directional_correct,
+        "accuracy": round(accuracy, 2),
+        "impact_rate": round(impact_rate, 2),
+    }
 
 
 def incremental_train_news_model():
     """增量學習：結合原始訓練數據 + 學習緩衝區新樣本進行重新訓練"""
-    global news_model, news_vectorizer
-    
-    texts = [item[0] for item in NEWS_TRAINING_DATA]
-    labels = [item[1] for item in NEWS_TRAINING_DATA]
-    
-    # 讀取學習緩衝區的新樣本
     try:
-        with open(NEWS_LEARNING_BUFFER, "rb") as f:
-            buffer = pickle.load(f)
-            for text, label in buffer:
-                texts.append(text)
-                labels.append(label)
-    except:
-        pass
-    
-    # 防止訓練數據過多導致過擬合
-    if len(texts) > 500:
-        texts = texts[-500:]
-        labels = labels[-500:]
-    
-    # 重新訓練模型
-    try:
-        news_vectorizer = TfidfVectorizer(
-            max_features=2000,
-            ngram_range=(1, 2),
-            min_df=1,
-            sublinear_tf=True,
-            stop_words='english'
-        )
-        X = news_vectorizer.fit_transform(texts)
-        y = np.array(labels)
-
-        news_model = VotingClassifier(
-            estimators=[
-                ('gb', GradientBoostingClassifier(n_estimators=200, learning_rate=0.1, max_depth=5, random_state=42)),
-                ('rf', RandomForestClassifier(n_estimators=150, max_depth=8, random_state=42)),
-                ('lr', LogisticRegression(max_iter=200, random_state=42))
-            ],
-            voting='soft'
-        )
-        news_model.fit(X, y)
-
-        # 保存更新的模型
-        with open(NEWS_MODEL_PATH, "wb") as f:
-            pickle.dump(news_model, f)
-        with open(NEWS_VECTORIZER_PATH, "wb") as f:
-            pickle.dump(news_vectorizer, f)
-        
+        texts, _ = _build_news_training_dataset()
+        train_news_model(force=True)
         print(f"✓ 增量學習完成：使用 {len(texts)} 個樣本重新訓練模型")
     except Exception as e:
         print(f"✗ 增量學習失敗: {e}")
 
 
 # 新聞情緒/事件分析（更穩定的分類）
-def analyze_news_text(raw_text):
+def analyze_news_text(raw_text, track_prediction=True, source="News"):
     """更穩定的新聞分類：拆分多空 / 事件 / 影響，避免單一關鍵字誤判。"""
     text = str(raw_text or "").strip()
 
@@ -1356,8 +1906,20 @@ def analyze_news_text(raw_text):
         sentiment = "偏空 (強)"
         impact = "利空（價格可能下跌）"
 
-    # 記錄預測結果用於增量學習評估
-    log_prediction_result(text, final_bias)
+    if track_prediction:
+        log_prediction_result(
+            text,
+            final_bias,
+            source=str(source or "News"),
+            ai_confidence=round(float(ai_confidence), 4),
+            evaluation_done=False,
+        )
+        _register_news_eval_sample(
+            text,
+            final_bias,
+            source=source,
+            ai_confidence=ai_confidence,
+        )
 
     return {
         "sentiment": sentiment,
@@ -1389,7 +1951,7 @@ def build_news_message(news_text, now_time=None):
     zh_text = translate_news_to_zh(raw_text)
 
     # ===== AI 交易解讀 =====
-    analysis = analyze_news_text(raw_text)
+    analysis = analyze_news_text(raw_text, track_prediction=False, source=source)
     sentiment = analysis["sentiment"]
     impact = analysis["impact"]
     confidence = analysis["ai_confidence"]
@@ -1745,7 +2307,7 @@ def refresh_rss_news_cache(force=False):
                 src = item["source"]
                 text = item["text"]
                 refresh_rss_news_cache.seen_news.add(f"{src}|{text}")
-                analysis = analyze_news_text(text)
+                analysis = analyze_news_text(text, track_prediction=True, source=src)
                 news_bias += int(analysis.get("bias", 0))
                 event_risk += int(analysis.get("event_risk", 0))
                 news_list.append(f"[{src}] {text[:200]}")
@@ -1763,7 +2325,7 @@ def refresh_rss_news_cache(force=False):
                     continue
 
                 refresh_rss_news_cache.seen_news.add(seen_key)
-                analysis = analyze_news_text(text)
+                analysis = analyze_news_text(text, track_prediction=True, source=src)
                 news_bias += int(analysis.get("bias", 0))
                 event_risk += int(analysis.get("event_risk", 0))
                 news_list.append(f"[{src}] {text[:200]}")
@@ -1809,6 +2371,8 @@ def _safe_float(value, default=0.0):
 
 def manage_position_scaling(current_price, atr=None):
     """持倉中的補倉/減倉管理（虛擬倉位）。"""
+    if not TRADE_AUTO_SCALE_ENABLED:
+        return
     if not active_trade.get("open"):
         return
 
@@ -2002,6 +2566,295 @@ def auto_fix_trade_plan(signal, entry, sl, tp, atr):
     return signal, float(sl), float(tp)
 
 
+def _get_reference_position_notional(current_price):
+    """估算 size_ratio=1.0 時對應的名目價值，供固定風險 sizing 使用。"""
+    px = max(0.0, _safe_float(current_price, 0.0))
+    if px <= 0:
+        return 0.0
+
+    qty = _binance_qty_from_size_ratio(1.0, px, enforce_min_notional=True)
+    if qty > 0:
+        return float(qty * px)
+
+    if BINANCE_USE_ACCOUNT_THIRD and _is_binance_copy_ready():
+        total_asset = _get_binance_total_asset_usdt(force=False)
+        if total_asset > 0:
+            return float(total_asset / 3.0)
+
+    if BINANCE_ORDER_ETH_QTY > 0:
+        return float(BINANCE_ORDER_ETH_QTY * px)
+    return float(max(0.0, BINANCE_ORDER_NOTIONAL_USDT))
+
+
+def _compute_position_size_from_risk(entry, sl, current_price, confidence=0.0, regime="range", event_risk=0, losing_streak=0, signal_label="", atr=0.0):
+    """依固定風險預算推算 size ratio，避免同樣 50% 倉位承擔不同風險。"""
+    entry = max(0.0, _safe_float(entry, 0.0))
+    sl = _safe_float(sl, entry)
+    px = max(0.0, _safe_float(current_price, entry))
+    confidence = max(0.0, min(1.0, _safe_float(confidence, 0.0)))
+    atr_rate = max(0.0, _safe_float(atr, 0.0)) / max(entry, 1e-9) if entry > 0 else 0.0
+
+    if entry <= 0 or px <= 0:
+        return {"size_ratio": 0.0, "risk_rate": 0.0, "risk_budget_usdt": 0.0, "capital_base_usdt": 0.0}
+
+    risk_rate = abs(entry - sl) / max(entry, 1e-9)
+    if risk_rate <= 0:
+        return {"size_ratio": 0.0, "risk_rate": 0.0, "risk_budget_usdt": 0.0, "capital_base_usdt": 0.0}
+
+    budget_pct = TRADE_RISK_BUDGET_PCT
+    if regime.endswith("strong"):
+        budget_pct *= 1.12
+    elif regime == "range":
+        budget_pct *= 0.75
+
+    if confidence < 0.35:
+        budget_pct *= 0.8
+    elif confidence > 0.7:
+        budget_pct *= 1.08
+
+    if int(event_risk) >= 2:
+        budget_pct *= 0.65
+    elif int(event_risk) == 1:
+        budget_pct *= 0.8
+
+    if int(losing_streak) >= 3:
+        budget_pct *= 0.55
+
+    if "三角" in str(signal_label or "") and "突破" not in str(signal_label or ""):
+        budget_pct *= 0.8
+
+    capital_base = 0.0
+    if _is_binance_copy_ready():
+        capital_base = _get_binance_total_asset_usdt(force=False)
+
+    reference_notional = _get_reference_position_notional(px)
+    if capital_base <= 0:
+        capital_base = reference_notional
+
+    if capital_base <= 0 or reference_notional <= 0:
+        return {"size_ratio": 0.0, "risk_rate": risk_rate, "risk_budget_usdt": 0.0, "capital_base_usdt": capital_base}
+
+    if atr_rate > 0:
+        vol_factor = (TRADE_VOL_TARGET_PCT / max(atr_rate, TRADE_VOL_TARGET_PCT * 0.45)) ** 0.35
+        budget_pct *= min(1.12, max(0.72, vol_factor))
+
+    capital_factor = (capital_base / max(TRADE_CAPITAL_PIVOT_USDT, 1.0)) ** 0.08
+    budget_pct *= min(1.12, max(0.88, capital_factor))
+    budget_pct = min(TRADE_RISK_BUDGET_PCT_MAX, max(TRADE_RISK_BUDGET_PCT_MIN, budget_pct))
+
+    risk_budget_usdt = capital_base * budget_pct
+    desired_notional = risk_budget_usdt / max(risk_rate, 1e-9)
+    raw_ratio = desired_notional / max(reference_notional, 1e-9)
+
+    if raw_ratio < TRADE_MIN_OPEN_SIZE_RATIO:
+        size_ratio = 0.0
+    else:
+        size_ratio = min(TRADE_MAX_OPEN_SIZE_RATIO, raw_ratio)
+
+    return {
+        "size_ratio": float(max(0.0, size_ratio)),
+        "raw_ratio": float(max(0.0, raw_ratio)),
+        "risk_rate": float(risk_rate),
+        "atr_rate": float(max(0.0, atr_rate)),
+        "risk_budget_usdt": float(max(0.0, risk_budget_usdt)),
+        "capital_base_usdt": float(max(0.0, capital_base)),
+        "reference_notional_usdt": float(max(0.0, reference_notional)),
+        "budget_pct": float(max(0.0, budget_pct)),
+    }
+
+
+def _compute_trade_protection_plan(entry, sl, tp, atr=0.0, confidence=0.0, regime="range", event_risk=0):
+    """依波動/趨勢/信心，調整保本與部分止盈節奏。"""
+    entry = max(0.0, _safe_float(entry, 0.0))
+    sl = _safe_float(sl, entry)
+    tp = _safe_float(tp, entry)
+    confidence = max(0.0, min(1.0, _safe_float(confidence, 0.0)))
+    atr_rate = max(0.0, _safe_float(atr, 0.0)) / max(entry, 1e-9) if entry > 0 else 0.0
+    risk_rate = abs(entry - sl) / max(entry, 1e-9) if entry > 0 else 0.0
+    reward_rate = abs(tp - entry) / max(entry, 1e-9) if entry > 0 else 0.0
+    initial_rr = reward_rate / max(risk_rate, 1e-9) if risk_rate > 0 else 0.0
+    vol_ratio = atr_rate / max(TRADE_VOL_TARGET_PCT, 1e-9) if atr_rate > 0 else 1.0
+
+    break_even_r = TRADE_BREAK_EVEN_TRIGGER_R
+    partial_r = TRADE_PARTIAL_TP_TRIGGER_R
+    partial_close_ratio = TRADE_PARTIAL_TP_CLOSE_RATIO
+    break_even_buffer_abs = max(entry * max(0.0, TRADE_BREAK_EVEN_BUFFER_PCT), abs(entry - sl) * 0.05)
+
+    if vol_ratio > 1.15:
+        break_even_r -= 0.10
+        partial_r -= 0.12
+        partial_close_ratio += 0.05
+        break_even_buffer_abs *= 1.2
+    elif vol_ratio < 0.8:
+        break_even_r += 0.08
+        partial_r += 0.08
+        partial_close_ratio -= 0.03
+
+    if regime.endswith("strong"):
+        break_even_r += 0.08
+        partial_r += 0.12
+        partial_close_ratio -= 0.04
+    elif regime == "range":
+        break_even_r -= 0.08
+        partial_r -= 0.08
+        partial_close_ratio += 0.04
+
+    if int(event_risk) >= 2:
+        break_even_r -= 0.12
+        partial_r -= 0.12
+        partial_close_ratio += 0.07
+        break_even_buffer_abs *= 1.15
+    elif int(event_risk) == 1:
+        break_even_r -= 0.05
+        partial_r -= 0.05
+        partial_close_ratio += 0.03
+
+    if confidence >= 0.72:
+        break_even_r += 0.06
+        partial_r += 0.07
+        partial_close_ratio -= 0.03
+    elif confidence <= 0.38:
+        break_even_r -= 0.05
+        partial_r -= 0.06
+        partial_close_ratio += 0.03
+
+    if initial_rr >= 2.2:
+        partial_r += 0.08
+        partial_close_ratio -= 0.03
+    elif initial_rr <= 1.55:
+        break_even_r -= 0.05
+        partial_r -= 0.07
+        partial_close_ratio += 0.04
+
+    break_even_r = min(TRADE_BREAK_EVEN_TRIGGER_R_MAX, max(TRADE_BREAK_EVEN_TRIGGER_R_MIN, break_even_r))
+    partial_r = min(TRADE_PARTIAL_TP_TRIGGER_R_MAX, max(max(TRADE_PARTIAL_TP_TRIGGER_R_MIN, break_even_r + 0.15), partial_r))
+    partial_close_ratio = min(TRADE_PARTIAL_TP_CLOSE_RATIO_MAX, max(TRADE_PARTIAL_TP_CLOSE_RATIO_MIN, partial_close_ratio))
+
+    return {
+        "break_even_trigger_r": float(break_even_r),
+        "partial_tp_trigger_r": float(partial_r),
+        "partial_tp_close_ratio": float(partial_close_ratio),
+        "break_even_buffer_abs": float(max(0.0, break_even_buffer_abs)),
+        "atr_rate": float(max(0.0, atr_rate)),
+        "risk_rate": float(max(0.0, risk_rate)),
+        "reward_rate": float(max(0.0, reward_rate)),
+        "initial_rr": float(max(0.0, initial_rr)),
+    }
+
+
+def _calc_trade_progress_r(current_price):
+    if not active_trade.get("open"):
+        return 0.0
+    direction = active_trade.get("direction")
+    entry = _safe_float(active_trade.get("initial_entry", active_trade.get("avg_entry", active_trade.get("entry"))), 0.0)
+    initial_risk = max(0.0, _safe_float(active_trade.get("initial_risk"), 0.0))
+    px = _safe_float(current_price, 0.0)
+    if direction not in ("long", "short") or entry <= 0 or initial_risk <= 0 or px <= 0:
+        return 0.0
+    if direction == "long":
+        return (px - entry) / initial_risk
+    return (entry - px) / initial_risk
+
+
+def _move_active_trade_stop_to_break_even(current_price, reason="保本"):
+    if not active_trade.get("open"):
+        return False
+
+    direction = active_trade.get("direction")
+    entry = _safe_float(active_trade.get("initial_entry", active_trade.get("avg_entry", active_trade.get("entry"))), 0.0)
+    current_sl = _safe_float(active_trade.get("sl"), 0.0)
+    if direction not in ("long", "short") or entry <= 0:
+        return False
+
+    buffer = max(
+        _safe_float(active_trade.get("break_even_buffer_abs"), 0.0),
+        entry * max(0.0, TRADE_BREAK_EVEN_BUFFER_PCT),
+    )
+    if direction == "long":
+        new_sl = max(current_sl, entry + buffer)
+        if current_sl > 0 and new_sl <= current_sl + 1e-9:
+            return False
+    else:
+        new_sl = min(current_sl if current_sl > 0 else entry - buffer, entry - buffer)
+        if current_sl > 0 and new_sl >= current_sl - 1e-9:
+            return False
+
+    active_trade["sl"] = float(new_sl)
+    active_trade["break_even_done"] = True
+    ok_native_sl, native_sl_msg = sync_binance_set_native_stop_loss(direction, new_sl)
+    if not ok_native_sl:
+        send_telegram(f"⚠️ {reason}移動止損失敗，暫保留 Bot 監控止損: {native_sl_msg}", priority=True)
+    return True
+
+
+def maybe_manage_trade_protection(current_price):
+    """盈利達到指定 R 倍數後，先保本，再部分止盈。"""
+    if not active_trade.get("open"):
+        return
+
+    direction = active_trade.get("direction")
+    size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+    min_size = max(0.0, _safe_float(active_trade.get("min_size"), 0.0))
+    if direction not in ("long", "short") or size <= 0:
+        return
+
+    progress_r = _calc_trade_progress_r(current_price)
+    if progress_r <= 0:
+        return
+
+    break_even_trigger_r = max(0.1, _safe_float(active_trade.get("break_even_trigger_r"), TRADE_BREAK_EVEN_TRIGGER_R))
+    partial_tp_trigger_r = max(
+        break_even_trigger_r + 0.05,
+        _safe_float(active_trade.get("partial_tp_trigger_r"), TRADE_PARTIAL_TP_TRIGGER_R),
+    )
+    partial_tp_close_ratio = min(
+        TRADE_PARTIAL_TP_CLOSE_RATIO_MAX,
+        max(TRADE_PARTIAL_TP_CLOSE_RATIO_MIN, _safe_float(active_trade.get("partial_tp_close_ratio"), TRADE_PARTIAL_TP_CLOSE_RATIO)),
+    )
+
+    if (not active_trade.get("break_even_done")) and progress_r >= break_even_trigger_r:
+        if _move_active_trade_stop_to_break_even(current_price, reason="保本"):
+            send_telegram(
+                f"🛡️ 移動保本止損（{direction}）\n現價: {current_price:.2f} | 進度: {progress_r:.2f}R\n"
+                f"保本觸發: {break_even_trigger_r:.2f}R | SL 已移到保本區",
+                priority=True,
+            )
+            refresh_position_panel_from_active_trade()
+
+    if active_trade.get("partial_tp_done") or progress_r < partial_tp_trigger_r:
+        return
+
+    delta = min(size * partial_tp_close_ratio, max(0.0, size - min_size))
+    if delta <= 0:
+        active_trade["partial_tp_done"] = True
+        return
+
+    ok_sync, sync_msg = sync_binance_adjust_position(direction, "reduce", delta, current_price)
+    if not ok_sync:
+        if "too_small" in str(sync_msg):
+            active_trade["partial_tp_done"] = True
+        send_telegram(f"⚠️ 部分止盈失敗，已略過本次保護減倉: {sync_msg}", priority=True)
+        return
+
+    new_size = max(0.0, size - delta)
+    active_trade["size"] = float(new_size)
+    active_trade["reduce_count"] = int(active_trade.get("reduce_count", 0)) + 1
+    active_trade["last_adjust_ts"] = time.time()
+    active_trade["partial_tp_done"] = True
+
+    tp_text = f"{_safe_float(active_trade.get('tp'), 0.0):.2f}" if active_trade.get("tp") is not None else "N/A"
+    sl_text = f"{_safe_float(active_trade.get('sl'), 0.0):.2f}" if active_trade.get("sl") is not None else "N/A"
+    send_telegram(
+        f"💰 部分止盈（{direction}）\n現價: {current_price:.2f} | 進度: {progress_r:.2f}R\n"
+        f"部分止盈觸發: {partial_tp_trigger_r:.2f}R | 平倉比例: {partial_tp_close_ratio:.0%}\n"
+        f"減倉: -{int(delta*100)}% | 倉位: {int(size*100)}% → {int(new_size*100)}%\n"
+        f"TP: {tp_text} | SL: {sl_text}",
+        priority=True,
+    )
+    send_follow_action_alert("reduce", direction, current_price, delta, new_size, _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), current_price), tp_text, sl_text)
+    refresh_position_panel_from_active_trade()
+
+
 def get_macro_bias():
     global MACRO_CACHE
 
@@ -2132,7 +2985,14 @@ active_trade = {
     "direction": None,
     "entry": None,
     "avg_entry": None,
+    "initial_entry": None,
+    "initial_risk": 0.0,
+    "risk_budget_usdt": 0.0,
+    "size_mode": "dynamic",
+    "atr_rate_at_entry": 0.0,
+    "initial_rr": 0.0,
     "tp": None,
+    "initial_tp": None,
     "sl": None,
     "open": False,
     "size": 0.0,
@@ -2143,6 +3003,12 @@ active_trade = {
     "last_adjust_ts": 0.0,
     "open_ts": 0.0,
     "tp_decay_count": 0,
+    "break_even_done": False,
+    "partial_tp_done": False,
+    "break_even_trigger_r": 0.9,
+    "partial_tp_trigger_r": 1.2,
+    "partial_tp_close_ratio": 0.35,
+    "break_even_buffer_abs": 0.0,
     "binance_qty": 0.0,
     "binance_sl_order_id": None,
     "binance_sl_price": 0.0,
@@ -2153,6 +3019,39 @@ active_trade = {
     "last_close_candle_low": 0.0,
     "close_hits": [],
 }
+
+
+def _clear_active_trade_open_fields():
+    """重置當前持倉狀態，但保留最近平倉資訊與歷史紀錄。"""
+    _clear_native_stop_tracking()
+    active_trade["direction"] = None
+    active_trade["entry"] = None
+    active_trade["avg_entry"] = None
+    active_trade["initial_entry"] = None
+    active_trade["initial_risk"] = 0.0
+    active_trade["risk_budget_usdt"] = 0.0
+    active_trade["size_mode"] = "dynamic"
+    active_trade["atr_rate_at_entry"] = 0.0
+    active_trade["initial_rr"] = 0.0
+    active_trade["tp"] = None
+    active_trade["initial_tp"] = None
+    active_trade["sl"] = None
+    active_trade["open"] = False
+    active_trade["size"] = 0.0
+    active_trade["max_size"] = 1.0
+    active_trade["min_size"] = max(0.05, TRADE_MIN_OPEN_SIZE_RATIO)
+    active_trade["add_count"] = 0
+    active_trade["reduce_count"] = 0
+    active_trade["last_adjust_ts"] = 0.0
+    active_trade["open_ts"] = 0.0
+    active_trade["tp_decay_count"] = 0
+    active_trade["break_even_done"] = False
+    active_trade["partial_tp_done"] = False
+    active_trade["break_even_trigger_r"] = TRADE_BREAK_EVEN_TRIGGER_R
+    active_trade["partial_tp_trigger_r"] = TRADE_PARTIAL_TP_TRIGGER_R
+    active_trade["partial_tp_close_ratio"] = TRADE_PARTIAL_TP_CLOSE_RATIO
+    active_trade["break_even_buffer_abs"] = 0.0
+    active_trade["binance_qty"] = 0.0
 
 
 def _record_close_hit(reason, current_price, candle_high, candle_low):
@@ -2184,22 +3083,7 @@ def _reset_active_trade_after_manual_close(close_price):
     """手動平倉成功後重置持倉狀態。"""
     px = _safe_float(close_price, 0.0)
     _record_close_hit("MANUAL", px, px, px)
-    _clear_native_stop_tracking()
-    active_trade["direction"] = None
-    active_trade["entry"] = None
-    active_trade["avg_entry"] = None
-    active_trade["tp"] = None
-    active_trade["sl"] = None
-    active_trade["open"] = False
-    active_trade["size"] = 0.0
-    active_trade["max_size"] = 1.0
-    active_trade["min_size"] = 0.15
-    active_trade["add_count"] = 0
-    active_trade["reduce_count"] = 0
-    active_trade["last_adjust_ts"] = 0.0
-    active_trade["open_ts"] = 0.0
-    active_trade["tp_decay_count"] = 0
-    active_trade["binance_qty"] = 0.0
+    _clear_active_trade_open_fields()
 
 # =============================
 # KLINE CACHE（避免打爆API）
@@ -2616,6 +3500,245 @@ try:
     POSITION_HEARTBEAT_SEC = max(20.0, float(os.getenv("POSITION_HEARTBEAT_SEC", "120")))
 except Exception:
     POSITION_HEARTBEAT_SEC = 120.0
+SIGNAL_NOISE_ENABLED = str(os.getenv("SIGNAL_NOISE_ENABLED", "0")).strip().lower() in ("1", "true", "yes", "on")
+FORCE_ENTRY_ENABLED = str(os.getenv("FORCE_ENTRY_ENABLED", "0")).strip().lower() in ("1", "true", "yes", "on")
+TRADE_AUTO_SCALE_ENABLED = str(os.getenv("TRADE_AUTO_SCALE_ENABLED", "0")).strip().lower() in ("1", "true", "yes", "on")
+try:
+    TRADE_RISK_BUDGET_PCT = max(0.0001, float(os.getenv("TRADE_RISK_BUDGET_PCT", "0.0012")))
+except Exception:
+    TRADE_RISK_BUDGET_PCT = 0.0012
+try:
+    TRADE_MIN_OPEN_SIZE_RATIO = max(0.01, float(os.getenv("TRADE_MIN_OPEN_SIZE_RATIO", "0.08")))
+except Exception:
+    TRADE_MIN_OPEN_SIZE_RATIO = 0.08
+try:
+    TRADE_MAX_OPEN_SIZE_RATIO = max(TRADE_MIN_OPEN_SIZE_RATIO, float(os.getenv("TRADE_MAX_OPEN_SIZE_RATIO", "1.0")))
+except Exception:
+    TRADE_MAX_OPEN_SIZE_RATIO = 1.0
+try:
+    TRADE_BREAK_EVEN_TRIGGER_R = max(0.2, float(os.getenv("TRADE_BREAK_EVEN_TRIGGER_R", "0.9")))
+except Exception:
+    TRADE_BREAK_EVEN_TRIGGER_R = 0.9
+try:
+    TRADE_BREAK_EVEN_BUFFER_PCT = max(0.0, float(os.getenv("TRADE_BREAK_EVEN_BUFFER_PCT", "0.00025")))
+except Exception:
+    TRADE_BREAK_EVEN_BUFFER_PCT = 0.00025
+try:
+    TRADE_PARTIAL_TP_TRIGGER_R = max(TRADE_BREAK_EVEN_TRIGGER_R, float(os.getenv("TRADE_PARTIAL_TP_TRIGGER_R", "1.2")))
+except Exception:
+    TRADE_PARTIAL_TP_TRIGGER_R = 1.2
+try:
+    TRADE_PARTIAL_TP_CLOSE_RATIO = min(0.9, max(0.1, float(os.getenv("TRADE_PARTIAL_TP_CLOSE_RATIO", "0.35"))))
+except Exception:
+    TRADE_PARTIAL_TP_CLOSE_RATIO = 0.35
+try:
+    TRADE_RISK_BUDGET_PCT_MIN = max(0.0001, float(os.getenv("TRADE_RISK_BUDGET_PCT_MIN", "0.0007")))
+except Exception:
+    TRADE_RISK_BUDGET_PCT_MIN = 0.0007
+try:
+    TRADE_RISK_BUDGET_PCT_MAX = max(TRADE_RISK_BUDGET_PCT_MIN, float(os.getenv("TRADE_RISK_BUDGET_PCT_MAX", "0.0018")))
+except Exception:
+    TRADE_RISK_BUDGET_PCT_MAX = 0.0018
+try:
+    TRADE_VOL_TARGET_PCT = max(0.001, float(os.getenv("TRADE_VOL_TARGET_PCT", "0.006")))
+except Exception:
+    TRADE_VOL_TARGET_PCT = 0.006
+try:
+    TRADE_CAPITAL_PIVOT_USDT = max(100.0, float(os.getenv("TRADE_CAPITAL_PIVOT_USDT", "1000")))
+except Exception:
+    TRADE_CAPITAL_PIVOT_USDT = 1000.0
+try:
+    TRADE_BREAK_EVEN_TRIGGER_R_MIN = max(0.2, float(os.getenv("TRADE_BREAK_EVEN_TRIGGER_R_MIN", "0.6")))
+except Exception:
+    TRADE_BREAK_EVEN_TRIGGER_R_MIN = 0.6
+try:
+    TRADE_BREAK_EVEN_TRIGGER_R_MAX = max(TRADE_BREAK_EVEN_TRIGGER_R_MIN, float(os.getenv("TRADE_BREAK_EVEN_TRIGGER_R_MAX", "1.25")))
+except Exception:
+    TRADE_BREAK_EVEN_TRIGGER_R_MAX = 1.25
+try:
+    TRADE_PARTIAL_TP_TRIGGER_R_MIN = max(0.4, float(os.getenv("TRADE_PARTIAL_TP_TRIGGER_R_MIN", "0.95")))
+except Exception:
+    TRADE_PARTIAL_TP_TRIGGER_R_MIN = 0.95
+try:
+    TRADE_PARTIAL_TP_TRIGGER_R_MAX = max(TRADE_PARTIAL_TP_TRIGGER_R_MIN, float(os.getenv("TRADE_PARTIAL_TP_TRIGGER_R_MAX", "1.75")))
+except Exception:
+    TRADE_PARTIAL_TP_TRIGGER_R_MAX = 1.75
+try:
+    TRADE_PARTIAL_TP_CLOSE_RATIO_MIN = min(0.8, max(0.05, float(os.getenv("TRADE_PARTIAL_TP_CLOSE_RATIO_MIN", "0.22"))))
+except Exception:
+    TRADE_PARTIAL_TP_CLOSE_RATIO_MIN = 0.22
+try:
+    TRADE_PARTIAL_TP_CLOSE_RATIO_MAX = min(0.95, max(TRADE_PARTIAL_TP_CLOSE_RATIO_MIN, float(os.getenv("TRADE_PARTIAL_TP_CLOSE_RATIO_MAX", "0.55"))))
+except Exception:
+    TRADE_PARTIAL_TP_CLOSE_RATIO_MAX = 0.55
+
+TRADE_PRESET = str(os.getenv("TRADE_PRESET", "balanced")).strip().lower() or "balanced"
+TRADE_PRESET_CONFIGS = {
+    "conservative": {
+        "TRADE_RISK_BUDGET_PCT": 0.0009,
+        "TRADE_RISK_BUDGET_PCT_MIN": 0.0005,
+        "TRADE_RISK_BUDGET_PCT_MAX": 0.0012,
+        "TRADE_MIN_OPEN_SIZE_RATIO": 0.06,
+        "TRADE_MAX_OPEN_SIZE_RATIO": 0.55,
+        "TRADE_VOL_TARGET_PCT": 0.0072,
+        "TRADE_BREAK_EVEN_TRIGGER_R": 0.85,
+        "TRADE_BREAK_EVEN_TRIGGER_R_MIN": 0.55,
+        "TRADE_BREAK_EVEN_TRIGGER_R_MAX": 1.05,
+        "TRADE_BREAK_EVEN_BUFFER_PCT": 0.0003,
+        "TRADE_PARTIAL_TP_TRIGGER_R": 1.15,
+        "TRADE_PARTIAL_TP_TRIGGER_R_MIN": 0.9,
+        "TRADE_PARTIAL_TP_TRIGGER_R_MAX": 1.45,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO": 0.42,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO_MIN": 0.28,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO_MAX": 0.62,
+        "SIGNAL_NOISE_ENABLED": False,
+        "FORCE_ENTRY_ENABLED": False,
+        "TRADE_AUTO_SCALE_ENABLED": False,
+    },
+    "balanced": {
+        "TRADE_RISK_BUDGET_PCT": 0.0012,
+        "TRADE_RISK_BUDGET_PCT_MIN": 0.0007,
+        "TRADE_RISK_BUDGET_PCT_MAX": 0.0018,
+        "TRADE_MIN_OPEN_SIZE_RATIO": 0.08,
+        "TRADE_MAX_OPEN_SIZE_RATIO": 0.8,
+        "TRADE_VOL_TARGET_PCT": 0.006,
+        "TRADE_BREAK_EVEN_TRIGGER_R": 0.9,
+        "TRADE_BREAK_EVEN_TRIGGER_R_MIN": 0.6,
+        "TRADE_BREAK_EVEN_TRIGGER_R_MAX": 1.25,
+        "TRADE_BREAK_EVEN_BUFFER_PCT": 0.00025,
+        "TRADE_PARTIAL_TP_TRIGGER_R": 1.2,
+        "TRADE_PARTIAL_TP_TRIGGER_R_MIN": 0.95,
+        "TRADE_PARTIAL_TP_TRIGGER_R_MAX": 1.75,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO": 0.35,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO_MIN": 0.22,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO_MAX": 0.55,
+        "SIGNAL_NOISE_ENABLED": False,
+        "FORCE_ENTRY_ENABLED": False,
+        "TRADE_AUTO_SCALE_ENABLED": False,
+    },
+    "aggressive": {
+        "TRADE_RISK_BUDGET_PCT": 0.0015,
+        "TRADE_RISK_BUDGET_PCT_MIN": 0.0009,
+        "TRADE_RISK_BUDGET_PCT_MAX": 0.0023,
+        "TRADE_MIN_OPEN_SIZE_RATIO": 0.1,
+        "TRADE_MAX_OPEN_SIZE_RATIO": 1.0,
+        "TRADE_VOL_TARGET_PCT": 0.0052,
+        "TRADE_BREAK_EVEN_TRIGGER_R": 1.0,
+        "TRADE_BREAK_EVEN_TRIGGER_R_MIN": 0.7,
+        "TRADE_BREAK_EVEN_TRIGGER_R_MAX": 1.45,
+        "TRADE_BREAK_EVEN_BUFFER_PCT": 0.0002,
+        "TRADE_PARTIAL_TP_TRIGGER_R": 1.35,
+        "TRADE_PARTIAL_TP_TRIGGER_R_MIN": 1.05,
+        "TRADE_PARTIAL_TP_TRIGGER_R_MAX": 2.05,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO": 0.28,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO_MIN": 0.18,
+        "TRADE_PARTIAL_TP_CLOSE_RATIO_MAX": 0.45,
+        "SIGNAL_NOISE_ENABLED": False,
+        "FORCE_ENTRY_ENABLED": False,
+        "TRADE_AUTO_SCALE_ENABLED": False,
+    },
+}
+TRADE_PRESET_LABELS = {
+    "conservative": "保守",
+    "balanced": "平衡",
+    "aggressive": "積極",
+}
+TRADE_PRESET_APPLIED_KEYS = []
+
+
+def _env_var_is_explicit(name):
+    value = os.getenv(name)
+    return value is not None and str(value).strip() != ""
+
+
+def _clamp_trade_runtime_settings():
+    global TRADE_RISK_BUDGET_PCT, TRADE_RISK_BUDGET_PCT_MIN, TRADE_RISK_BUDGET_PCT_MAX
+    global TRADE_MIN_OPEN_SIZE_RATIO, TRADE_MAX_OPEN_SIZE_RATIO, TRADE_VOL_TARGET_PCT, TRADE_CAPITAL_PIVOT_USDT
+    global TRADE_BREAK_EVEN_TRIGGER_R, TRADE_BREAK_EVEN_TRIGGER_R_MIN, TRADE_BREAK_EVEN_TRIGGER_R_MAX
+    global TRADE_BREAK_EVEN_BUFFER_PCT, TRADE_PARTIAL_TP_TRIGGER_R, TRADE_PARTIAL_TP_TRIGGER_R_MIN
+    global TRADE_PARTIAL_TP_TRIGGER_R_MAX, TRADE_PARTIAL_TP_CLOSE_RATIO, TRADE_PARTIAL_TP_CLOSE_RATIO_MIN
+    global TRADE_PARTIAL_TP_CLOSE_RATIO_MAX
+
+    TRADE_RISK_BUDGET_PCT_MIN = max(0.0001, _safe_float(TRADE_RISK_BUDGET_PCT_MIN, 0.0007))
+    TRADE_RISK_BUDGET_PCT_MAX = max(TRADE_RISK_BUDGET_PCT_MIN, _safe_float(TRADE_RISK_BUDGET_PCT_MAX, 0.0018))
+    TRADE_RISK_BUDGET_PCT = min(TRADE_RISK_BUDGET_PCT_MAX, max(TRADE_RISK_BUDGET_PCT_MIN, _safe_float(TRADE_RISK_BUDGET_PCT, 0.0012)))
+    TRADE_MIN_OPEN_SIZE_RATIO = max(0.01, _safe_float(TRADE_MIN_OPEN_SIZE_RATIO, 0.08))
+    TRADE_MAX_OPEN_SIZE_RATIO = max(TRADE_MIN_OPEN_SIZE_RATIO, _safe_float(TRADE_MAX_OPEN_SIZE_RATIO, 0.8))
+    TRADE_VOL_TARGET_PCT = max(0.001, _safe_float(TRADE_VOL_TARGET_PCT, 0.006))
+    TRADE_CAPITAL_PIVOT_USDT = max(100.0, _safe_float(TRADE_CAPITAL_PIVOT_USDT, 1000.0))
+    TRADE_BREAK_EVEN_TRIGGER_R_MIN = max(0.2, _safe_float(TRADE_BREAK_EVEN_TRIGGER_R_MIN, 0.6))
+    TRADE_BREAK_EVEN_TRIGGER_R_MAX = max(TRADE_BREAK_EVEN_TRIGGER_R_MIN, _safe_float(TRADE_BREAK_EVEN_TRIGGER_R_MAX, 1.25))
+    TRADE_BREAK_EVEN_TRIGGER_R = min(
+        TRADE_BREAK_EVEN_TRIGGER_R_MAX,
+        max(TRADE_BREAK_EVEN_TRIGGER_R_MIN, _safe_float(TRADE_BREAK_EVEN_TRIGGER_R, 0.9)),
+    )
+    TRADE_BREAK_EVEN_BUFFER_PCT = max(0.0, _safe_float(TRADE_BREAK_EVEN_BUFFER_PCT, 0.00025))
+    TRADE_PARTIAL_TP_TRIGGER_R_MIN = max(0.4, _safe_float(TRADE_PARTIAL_TP_TRIGGER_R_MIN, 0.95))
+    TRADE_PARTIAL_TP_TRIGGER_R_MAX = max(TRADE_PARTIAL_TP_TRIGGER_R_MIN, _safe_float(TRADE_PARTIAL_TP_TRIGGER_R_MAX, 1.75))
+    TRADE_PARTIAL_TP_TRIGGER_R = min(
+        TRADE_PARTIAL_TP_TRIGGER_R_MAX,
+        max(max(TRADE_PARTIAL_TP_TRIGGER_R_MIN, TRADE_BREAK_EVEN_TRIGGER_R), _safe_float(TRADE_PARTIAL_TP_TRIGGER_R, 1.2)),
+    )
+    TRADE_PARTIAL_TP_CLOSE_RATIO_MIN = min(0.8, max(0.05, _safe_float(TRADE_PARTIAL_TP_CLOSE_RATIO_MIN, 0.22)))
+    TRADE_PARTIAL_TP_CLOSE_RATIO_MAX = min(
+        0.95,
+        max(TRADE_PARTIAL_TP_CLOSE_RATIO_MIN, _safe_float(TRADE_PARTIAL_TP_CLOSE_RATIO_MAX, 0.55)),
+    )
+    TRADE_PARTIAL_TP_CLOSE_RATIO = min(
+        TRADE_PARTIAL_TP_CLOSE_RATIO_MAX,
+        max(TRADE_PARTIAL_TP_CLOSE_RATIO_MIN, _safe_float(TRADE_PARTIAL_TP_CLOSE_RATIO, 0.35)),
+    )
+
+
+def _apply_trade_preset_defaults():
+    global TRADE_PRESET, TRADE_PRESET_APPLIED_KEYS
+
+    if TRADE_PRESET not in TRADE_PRESET_CONFIGS:
+        print(f"⚠️ 未知 TRADE_PRESET={TRADE_PRESET}，改用 balanced")
+        TRADE_PRESET = "balanced"
+
+    preset = TRADE_PRESET_CONFIGS.get(TRADE_PRESET, {})
+    applied = []
+    for key, value in preset.items():
+        if _env_var_is_explicit(key):
+            continue
+        globals()[key] = value
+        applied.append(key)
+
+    TRADE_PRESET_APPLIED_KEYS = applied
+    _clamp_trade_runtime_settings()
+
+
+def _trade_preset_display_name():
+    return f"{TRADE_PRESET_LABELS.get(TRADE_PRESET, TRADE_PRESET)} ({TRADE_PRESET})"
+
+
+def _trade_preset_summary_line():
+    return (
+        f"{_trade_preset_display_name()} | risk {TRADE_RISK_BUDGET_PCT_MIN*100:.2f}%~{TRADE_RISK_BUDGET_PCT_MAX*100:.2f}%"
+        f" | BE {TRADE_BREAK_EVEN_TRIGGER_R_MIN:.2f}-{TRADE_BREAK_EVEN_TRIGGER_R_MAX:.2f}R"
+        f" | PT {TRADE_PARTIAL_TP_TRIGGER_R_MIN:.2f}-{TRADE_PARTIAL_TP_TRIGGER_R_MAX:.2f}R"
+    )
+
+
+_apply_trade_preset_defaults()
+
+
+def _build_trade_risk_config_message():
+    applied_count = len(TRADE_PRESET_APPLIED_KEYS)
+    override_mode = "preset-only" if applied_count > 0 else "manual/explicit"
+    return (
+        "⚙️ 交易風控設定\n"
+        f"Preset: {_trade_preset_display_name()}\n"
+        f"模式: {override_mode}\n"
+        f"風險預算: {TRADE_RISK_BUDGET_PCT_MIN*100:.2f}% ~ {TRADE_RISK_BUDGET_PCT_MAX*100:.2f}%\n"
+        f"開倉比例: {TRADE_MIN_OPEN_SIZE_RATIO*100:.0f}% ~ {TRADE_MAX_OPEN_SIZE_RATIO*100:.0f}%\n"
+        f"目標波動: {TRADE_VOL_TARGET_PCT*100:.2f}%\n"
+        f"保本觸發: {TRADE_BREAK_EVEN_TRIGGER_R_MIN:.2f}R ~ {TRADE_BREAK_EVEN_TRIGGER_R_MAX:.2f}R\n"
+        f"部分止盈: {TRADE_PARTIAL_TP_TRIGGER_R_MIN:.2f}R ~ {TRADE_PARTIAL_TP_TRIGGER_R_MAX:.2f}R\n"
+        f"減倉比例: {TRADE_PARTIAL_TP_CLOSE_RATIO_MIN:.0%} ~ {TRADE_PARTIAL_TP_CLOSE_RATIO_MAX:.0%}\n"
+        f"Noise: {'on' if SIGNAL_NOISE_ENABLED else 'off'} | ForceEntry: {'on' if FORCE_ENTRY_ENABLED else 'off'} | AutoScale: {'on' if TRADE_AUTO_SCALE_ENABLED else 'off'}"
+    )
 
 
 def _build_webapp_url(*, restart=False, direction=None, entry=None, tp=None, sl=None, size_pct=None):
@@ -2945,12 +4068,24 @@ def push_position_json():
 
         try:
             with _position_push_git_lock:
-                _run_git(["add", rel_path], timeout=10)
+                _run_git(["add", "--", rel_path], timeout=10)
+                staged_res = _run_git(["diff", "--cached", "--name-only", "--", rel_path], timeout=10)
+                staged_out = (staged_res.stdout or "").strip()
+                if rel_path not in staged_out.splitlines():
+                    return
 
-                result = _run_git(["commit", "-m", "chore: update position data"], timeout=10)
+                result = _run_git(["commit", "-m", "chore: update position data", "--only", "--", rel_path], timeout=10)
                 commit_out = (result.stdout or "").strip()
 
-                if result.returncode != 0 and "nothing to commit" not in commit_out:
+                if result.returncode != 0:
+                    commit_out_lower = commit_out.lower()
+                    benign = (
+                        "nothing to commit" in commit_out_lower
+                        or "nothing added to commit" in commit_out_lower
+                        or "no changes added to commit" in commit_out_lower
+                    )
+                    if benign:
+                        return
                     print(f"⚠️ 提交 position.json 失敗: {commit_out}")
                     return
 
@@ -3409,6 +4544,9 @@ Volume Spike: {context.get('volume_spike')}
             f"可下單: {'是' if ready else '否（請確認 BINANCE_REAL_COPY_ENABLED=1 與 API 金鑰）'}"
         )
 
+    if text.startswith("/risk"):
+        return _build_trade_risk_config_message()
+
     normalized = str(text or "").strip()
     if normalized in ("倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板"):
         if active_trade.get("open"):
@@ -3474,6 +4612,8 @@ def run_bot():
     global performance, BOT_SOFT_RESTART_REQUESTED, KLINE_CACHE, MACRO_CACHE, NEWS_CACHE
 
     load_model()  # 加載所有模型，包括新聞模型
+    _load_news_eval_pending()
+    print(f"⚙️ 交易風控預設: {_trade_preset_summary_line()}")
     if MODEL_RETRAIN_ON_BOOT:
         retrain_model()
 
@@ -3495,6 +4635,9 @@ def run_bot():
     last_ml_sample_ts = 0.0
     last_model_retrain_ts = time.time()
     new_labels_since_retrain = 0
+    last_news_eval_report_ts = 0.0
+    last_news_model_retrain_ts = time.time()
+    news_evals_since_retrain = 0
 
     last_update_id = load_last_update_id()
 
@@ -3518,7 +4661,11 @@ def run_bot():
                 last_ml_sample_ts = 0.0
                 last_model_retrain_ts = time.time()
                 new_labels_since_retrain = 0
+                last_news_eval_report_ts = 0.0
+                last_news_model_retrain_ts = time.time()
+                news_evals_since_retrain = 0
                 load_model()
+                _load_news_eval_pending()
                 print("♻️ 已完成軟重啟：模型重載、快取清空")
 
             # ===== Telegram 指令接收 =====
@@ -3653,7 +4800,7 @@ def run_bot():
                     text_norm = str(text or "").strip()
                     if TELEGRAM_PRIVATE_CHAT_LOCK and private_chat_id and str(chat_id) == private_chat_id:
                         allowed_exact = {"倉位面板", "📊 倉位面板", "開啟倉位面板", "📊 開啟倉位面板", "👥 跟單設定", "🧾 手動平倉"}
-                        allowed_prefix = ("/follow", "/binance", "/restart", "/close")
+                        allowed_prefix = ("/follow", "/binance", "/restart", "/close", "/risk")
                         if text_norm not in allowed_exact and (not any(text_norm.startswith(p) for p in allowed_prefix)):
                             continue
 
@@ -3754,6 +4901,41 @@ def run_bot():
             recent_low = df_5m["low"].iloc[-5:-1].min()
             price = WS_PRICE if WS_PRICE else df_1m["close"].iloc[-1]
 
+            # ===== 新聞評估週期：方向正確率 + 影響力 =====
+            now_eval = time.time()
+            eval_result = process_news_evaluation_cycle(current_price=price, now_ts=now_eval)
+            processed_eval = int(eval_result.get("processed", 0))
+            if processed_eval > 0:
+                news_evals_since_retrain += processed_eval
+                directional_total = int(eval_result.get("directional_total", 0))
+                directional_correct = int(eval_result.get("directional_correct", 0))
+                impactful_count = int(eval_result.get("impactful", 0))
+                acc_pct = (directional_correct / directional_total * 100.0) if directional_total > 0 else 0.0
+                impact_pct = (impactful_count / processed_eval * 100.0) if processed_eval > 0 else 0.0
+                print(
+                    f"🧪 新聞評估完成 {processed_eval} 則 | 方向準確 {acc_pct:.1f}% "
+                    f"({directional_correct}/{directional_total}) | 有影響 {impact_pct:.1f}% ({impactful_count}/{processed_eval})"
+                )
+
+            if (
+                INCREMENTAL_LEARNING_ENABLED
+                and news_evals_since_retrain >= NEWS_MODEL_MIN_EVALS_FOR_RETRAIN
+                and now_eval - last_news_model_retrain_ts >= NEWS_MODEL_RETRAIN_INTERVAL_SEC
+            ):
+                incremental_train_news_model()
+                last_news_model_retrain_ts = now_eval
+                news_evals_since_retrain = 0
+
+            if now_eval - last_news_eval_report_ts >= NEWS_EVAL_REPORT_INTERVAL_SEC:
+                stats = get_recent_news_eval_stats(window_sec=NEWS_EVAL_STATS_WINDOW_SEC)
+                print(
+                    f"📊 新聞檢測統計({int(NEWS_EVAL_STATS_WINDOW_SEC/3600)}h) | "
+                    f"樣本:{stats['total']} | 方向準確:{stats['accuracy']:.2f}% "
+                    f"({stats['directional_correct']}/{stats['directional_total']}) | "
+                    f"有影響:{stats['impact_rate']:.2f}%"
+                )
+                last_news_eval_report_ts = now_eval
+
             # ===== Macro（時事）=====
             sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk, news_list = get_macro_bias()
 
@@ -3827,6 +5009,7 @@ def run_bot():
 
                 # 同一張單持倉超過 4 小時，自動下修 TP
                 maybe_decay_take_profit(current)
+                maybe_manage_trade_protection(current)
 
                 if active_trade["direction"] == "long":
                     tp_hit = (current >= active_trade["tp"]) or (candle_high >= active_trade["tp"])
@@ -3834,6 +5017,7 @@ def run_bot():
 
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
+                        closed_direction = active_trade.get("direction")
                         # 已掛原生止損時，避免再重複送市價平倉。
                         if active_trade.get("binance_sl_order_id"):
                             _clear_native_stop_tracking()
@@ -3846,18 +5030,13 @@ def run_bot():
                         performance["loss"] += 1
                         performance["total"] += 1
                         _record_close_hit("SL", current, candle_high, candle_low)
-                        active_trade["open"] = False
-                        active_trade["size"] = 0.0
-                        active_trade["add_count"] = 0
-                        active_trade["reduce_count"] = 0
-                        active_trade["open_ts"] = 0.0
-                        active_trade["tp_decay_count"] = 0
+                        _clear_active_trade_open_fields()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
                         sl_msg = (
-                            f"❌ SL 命中（{active_trade['direction']}）\n"
+                            f"❌ SL 命中（{closed_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易"
                         )
@@ -3865,6 +5044,7 @@ def run_bot():
                         _send_private_telegram_text(sl_msg)
 
                     elif tp_hit:
+                        closed_direction = active_trade.get("direction")
                         ok_close, close_msg = sync_binance_close_position(current, reason="TP")
                         if not ok_close:
                             print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
@@ -3872,18 +5052,13 @@ def run_bot():
                         performance["win"] += 1
                         performance["total"] += 1
                         _record_close_hit("TP", current, candle_high, candle_low)
-                        active_trade["open"] = False
-                        active_trade["size"] = 0.0
-                        active_trade["add_count"] = 0
-                        active_trade["reduce_count"] = 0
-                        active_trade["open_ts"] = 0.0
-                        active_trade["tp_decay_count"] = 0
+                        _clear_active_trade_open_fields()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
                         tp_msg = (
-                            f"✅ TP 命中（{active_trade['direction']}）\n"
+                            f"✅ TP 命中（{closed_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易"
                         )
@@ -3896,6 +5071,7 @@ def run_bot():
 
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
+                        closed_direction = active_trade.get("direction")
                         # 已掛原生止損時，避免再重複送市價平倉。
                         if active_trade.get("binance_sl_order_id"):
                             _clear_native_stop_tracking()
@@ -3908,18 +5084,13 @@ def run_bot():
                         performance["loss"] += 1
                         performance["total"] += 1
                         _record_close_hit("SL", current, candle_high, candle_low)
-                        active_trade["open"] = False
-                        active_trade["size"] = 0.0
-                        active_trade["add_count"] = 0
-                        active_trade["reduce_count"] = 0
-                        active_trade["open_ts"] = 0.0
-                        active_trade["tp_decay_count"] = 0
+                        _clear_active_trade_open_fields()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak += 1
                         print("❌ SL 命中")
                         sl_msg = (
-                            f"❌ SL 命中（{active_trade['direction']}）\n"
+                            f"❌ SL 命中（{closed_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易"
                         )
@@ -3927,6 +5098,7 @@ def run_bot():
                         _send_private_telegram_text(sl_msg)
 
                     elif tp_hit:
+                        closed_direction = active_trade.get("direction")
                         ok_close, close_msg = sync_binance_close_position(current, reason="TP")
                         if not ok_close:
                             print(f"⚠️ Binance 平倉失敗，維持持倉重試: {close_msg}")
@@ -3934,18 +5106,13 @@ def run_bot():
                         performance["win"] += 1
                         performance["total"] += 1
                         _record_close_hit("TP", current, candle_high, candle_low)
-                        active_trade["open"] = False
-                        active_trade["size"] = 0.0
-                        active_trade["add_count"] = 0
-                        active_trade["reduce_count"] = 0
-                        active_trade["open_ts"] = 0.0
-                        active_trade["tp_decay_count"] = 0
+                        _clear_active_trade_open_fields()
                         remove_position_keyboard()
                         last_signal_cache = None
                         losing_streak = 0
                         print("✅ TP 命中")
                         tp_msg = (
-                            f"✅ TP 命中（{active_trade['direction']}）\n"
+                            f"✅ TP 命中（{closed_direction}）\n"
                             f"當前: {current:.2f} | 1m高低: {candle_high:.2f}/{candle_low:.2f}\n"
                             f"已關閉倉位，等待下一筆交易"
                         )
@@ -3984,12 +5151,7 @@ def run_bot():
                             performance["loss"] += 1
                             performance["total"] += 1
                             _record_close_hit("SL", current_for_sl, current_for_sl, current_for_sl)
-                            active_trade["open"] = False
-                            active_trade["size"] = 0.0
-                            active_trade["add_count"] = 0
-                            active_trade["reduce_count"] = 0
-                            active_trade["open_ts"] = 0.0
-                            active_trade["tp_decay_count"] = 0
+                            _clear_active_trade_open_fields()
                             losing_streak += 1
                             last_signal_cache = None
                             remove_position_keyboard()  # 內部已呼叫 write/push_position_json
@@ -4201,12 +5363,13 @@ def run_bot():
             else:
                 score = ai_prob
 
-            # ===== 自適應噪音（低信心才探索）=====
-            if abs(score - 0.5) < 0.08:
-                noise = np.random.uniform(-0.05, 0.05)
-            else:
-                noise = np.random.uniform(-0.02, 0.02)
-            score = max(0.05, min(score + noise, 0.95))
+            # 預設停用 live 隨機噪音，避免同條件下信號抖動；僅在明確開啟時保留探索。
+            if SIGNAL_NOISE_ENABLED:
+                if abs(score - 0.5) < 0.08:
+                    noise = np.random.uniform(-0.05, 0.05)
+                else:
+                    noise = np.random.uniform(-0.02, 0.02)
+                score = max(0.05, min(score + noise, 0.95))
 
             # ===== 小週期主導（Dual Flow v2）=====
             confluence = 0
@@ -4271,7 +5434,7 @@ def run_bot():
 
             # ===== 新聞影響強化（增加時事判斷權重）=====
             if news_text:
-                analysis = analyze_news_text(news_text)
+                analysis = analyze_news_text(news_text, track_prediction=False, source="SignalSummary")
                 news_bias = analysis["bias"]  # -2 到 2
                 news_score_adjust = news_bias * 0.08  # 將新聞 bias 轉換為 score 調整（-0.16 到 0.16）
                 score += news_score_adjust
@@ -4327,6 +5490,9 @@ def run_bot():
             risk_rate = 0.0
             reward_rate = 0.0
             net_rr_after_cost = 0.0
+            risk_sizing = None
+            protection_plan = None
+            confidence = abs(score - 0.5) * 2
 
             # ===== 提前進場機制（升級）=====
             early_entry = False
@@ -4443,38 +5609,33 @@ def run_bot():
                         risk = max(sl - entry, atr * 0.45, entry * 0.001)
                         tp = entry - risk * 1.5
 
-                    # ===== 倉位（動態） =====
-                    confidence = abs(score - 0.5) * 2
-
-                    if regime in ["bull_trend_strong", "bear_trend_strong"]:
-                        base = 0.5
-                    elif regime in ["bull_trend", "bear_trend"]:
-                        base = 0.35
-                    else:
-                        base = 0.2
-
-                    if confidence > 0.7:
-                        position_size = base
-                    elif confidence > 0.5:
-                        position_size = base * 0.7
-                    elif confidence > 0.3:
-                        position_size = base * 0.5
-                    else:
-                        position_size = base * 0.3
-
-                    if losing_streak >= MAX_LOSS_STREAK:
-                        position_size *= 0.5
-
-                    # 三角策略調整（提前單較小，突破加碼）
-                    if "三角" in final:
-                        if "突破" in final:
-                            position_size *= 1.2
-                        else:
-                            position_size *= 0.7
-
             # ===== 修正長短單 TP/SL（方向 + 最小風險距離） =====
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
+                risk_sizing = _compute_position_size_from_risk(
+                    entry,
+                    sl,
+                    price,
+                    confidence=confidence,
+                    regime=regime,
+                    event_risk=event_risk,
+                    losing_streak=losing_streak,
+                    signal_label=final,
+                    atr=atr,
+                )
+                position_size = _safe_float((risk_sizing or {}).get("size_ratio"), 0.0)
+                if position_size <= 0:
+                    final = "觀望（風險過高）"
+                else:
+                    protection_plan = _compute_trade_protection_plan(
+                        entry,
+                        sl,
+                        tp,
+                        atr=atr,
+                        confidence=confidence,
+                        regime=regime,
+                        event_risk=event_risk,
+                    )
 
             # ===== 中文時事解讀 =====
             macro_text = "中性"
@@ -4569,7 +5730,7 @@ def run_bot():
             # ===== 訊息格式（進場優先顯示）=====
             msg = ""
 
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 msg += f"📍 進場: {entry:.2f}\n"
 
                 if tp is not None:
@@ -4582,12 +5743,25 @@ def run_bot():
                 else:
                     msg += "🛑 止損: N/A\n"
 
-                msg += f"💰 倉位: {int(position_size*100)}%\n\n"
+                msg += f"💰 倉位: {int(position_size*100)}%\n"
+                if risk_sizing and _safe_float(risk_sizing.get("risk_budget_usdt"), 0.0) > 0:
+                    msg += (
+                        f"🛡️ 風險預算: {_safe_float(risk_sizing.get('risk_budget_usdt'), 0.0):.2f} USDT"
+                        f" | 風險率: {_safe_float(risk_sizing.get('risk_rate'), 0.0) * 100:.3f}%\n"
+                    )
+                if protection_plan:
+                    msg += (
+                        f"🎚️ 保護: 保本 {_safe_float(protection_plan.get('break_even_trigger_r'), 0.0):.2f}R"
+                        f" | 部分止盈 {_safe_float(protection_plan.get('partial_tp_trigger_r'), 0.0):.2f}R"
+                        f" | 減倉 {_safe_float(protection_plan.get('partial_tp_close_ratio'), 0.0):.0%}\n"
+                    )
+                msg += f"⚙️ 預設: {_trade_preset_display_name()}\n"
+                msg += "\n"
             
             # 提取訊息中的進場/止盈/止損價格（確保與網址一致）
-            entry_display_str = f"{entry:.2f}" if final != "觀望" else None
-            tp_display_str = f"{tp:.2f}" if (final != "觀望" and tp is not None) else "0.0"
-            sl_display_str = f"{sl:.2f}" if (final != "觀望" and sl is not None) else "0.0"
+            entry_display_str = f"{entry:.2f}" if not final.startswith("觀望") else None
+            tp_display_str = f"{tp:.2f}" if (not final.startswith("觀望") and tp is not None) else "0.0"
+            sl_display_str = f"{sl:.2f}" if (not final.startswith("觀望") and sl is not None) else "0.0"
 
             msg += (
                 f"🤖 AI信號：{display_signal}\n"
@@ -4599,19 +5773,19 @@ def run_bot():
                 f"🧠 判斷依據: {reason_text}"
             )
             # Fix spam log（觀望不要一直print）
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 print(msg)
 
-            # ===== 強制進場（解決AI高信心但被過濾掉） =====
-            if final == "觀望":
-                if score > 0.7:
+            # ===== 強制進場（預設關閉；只在明確開啟時使用更嚴格門檻） =====
+            if FORCE_ENTRY_ENABLED and final.startswith("觀望"):
+                if score > 0.82 and not fake_breakout and htf == 1 and mid_trend == 1 and macro_bias >= 0:
                     final = "🚀 做多（強制）"
                     recent_low_15 = df_15m["low"].tail(10).min()
                     sl = recent_low_15
                     risk = entry - sl
                     tp = entry + risk * 2
 
-                elif score < 0.3:
+                elif score < 0.18 and not fake_breakout and htf == -1 and mid_trend == -1 and macro_bias <= 0:
                     final = "🚀 做空（強制）"
                     recent_high_15 = df_15m["high"].tail(10).max()
                     sl = recent_high_15
@@ -4619,11 +5793,36 @@ def run_bot():
                     tp = entry - risk * 2
 
             # 強制單也必須再次經過自動修正，避免繞過前面的保護
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
+                if position_size <= 0:
+                    risk_sizing = _compute_position_size_from_risk(
+                        entry,
+                        sl,
+                        price,
+                        confidence=confidence,
+                        regime=regime,
+                        event_risk=event_risk,
+                        losing_streak=losing_streak,
+                        signal_label=final,
+                        atr=atr,
+                    )
+                    position_size = _safe_float((risk_sizing or {}).get("size_ratio"), 0.0)
+                    if position_size <= 0:
+                        final = "觀望（風險過高）"
+                    else:
+                        protection_plan = _compute_trade_protection_plan(
+                            entry,
+                            sl,
+                            tp,
+                            atr=atr,
+                            confidence=confidence,
+                            regime=regime,
+                            event_risk=event_risk,
+                        )
 
             # ===== 成本評估（手續費 + 資金費）=====
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 direction_for_cost = get_signal_direction(final)
                 if direction_for_cost in ("long", "short"):
                     risk_rate = max(abs(entry - _safe_float(sl, entry)) / max(entry, 1e-9), 1e-9)
@@ -4661,11 +5860,11 @@ def run_bot():
                     if abs(score - last_signal) < MIN_SIGNAL_DIFF:
                         final = "觀望（防洗單-信號重複）"
 
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 if now_ts < manual_close_until_ts:
                     final = "觀望（手動平倉冷卻中）"
 
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 # ===== 冷卻防洗單 =====
                 if now_ts - last_trade_time < TRADE_COOLDOWN:
                     final = "觀望（冷卻中）"
@@ -4684,7 +5883,7 @@ def run_bot():
             if fake_breakout and abs(score - 0.5) < 0.22:
                 continue
 
-            if final != "觀望":
+            if not final.startswith("觀望"):
 
                 # 保險：再次確認沒有持倉
                 if active_trade["open"]:
@@ -4733,14 +5932,26 @@ def run_bot():
                 active_trade["direction"] = direction
                 active_trade["entry"] = float(entry)
                 active_trade["avg_entry"] = float(entry)
+                active_trade["initial_entry"] = float(entry)
+                active_trade["initial_risk"] = max(abs(float(entry) - _safe_float(sl, entry)), 0.0)
+                active_trade["risk_budget_usdt"] = _safe_float((risk_sizing or {}).get("risk_budget_usdt"), 0.0)
+                active_trade["size_mode"] = "risk_budget"
+                active_trade["atr_rate_at_entry"] = _safe_float((risk_sizing or {}).get("atr_rate"), 0.0)
                 active_trade["tp"] = tp
+                active_trade["initial_tp"] = tp
                 active_trade["sl"] = sl
+                active_trade["initial_rr"] = _safe_float((protection_plan or {}).get("initial_rr"), 0.0)
+                active_trade["break_even_trigger_r"] = _safe_float((protection_plan or {}).get("break_even_trigger_r"), TRADE_BREAK_EVEN_TRIGGER_R)
+                active_trade["partial_tp_trigger_r"] = _safe_float((protection_plan or {}).get("partial_tp_trigger_r"), TRADE_PARTIAL_TP_TRIGGER_R)
+                active_trade["partial_tp_close_ratio"] = _safe_float((protection_plan or {}).get("partial_tp_close_ratio"), TRADE_PARTIAL_TP_CLOSE_RATIO)
+                active_trade["break_even_buffer_abs"] = _safe_float((protection_plan or {}).get("break_even_buffer_abs"), 0.0)
                 base_size = _safe_float(position_size, 0.0)
                 if base_size <= 0:
-                    base_size = 0.2
-                open_size_ratio = float(min(1.0, max(base_size, 0.1)))
+                    continue
+                open_size_ratio = float(min(TRADE_MAX_OPEN_SIZE_RATIO, max(base_size, TRADE_MIN_OPEN_SIZE_RATIO)))
                 ok_open, open_msg = sync_binance_open_position(direction, open_size_ratio, price)
                 if not ok_open:
+                    _clear_active_trade_open_fields()
                     send_telegram(f"⚠️ Binance 開倉失敗，已取消本次交易: {open_msg}", priority=True)
                     continue
                 
@@ -4748,13 +5959,15 @@ def run_bot():
                 # 需要同步更新顯示文本，確保通知和 mini app 用相同的進場價
 
                 active_trade["size"] = open_size_ratio
-                active_trade["max_size"] = 1.0
-                active_trade["min_size"] = max(0.1, active_trade["size"] * 0.3)
+                active_trade["max_size"] = TRADE_MAX_OPEN_SIZE_RATIO
+                active_trade["min_size"] = max(0.05, min(active_trade["size"], active_trade["size"] * 0.45))
                 active_trade["add_count"] = 0
                 active_trade["reduce_count"] = 0
                 active_trade["last_adjust_ts"] = 0.0
                 active_trade["open_ts"] = time.time()
                 active_trade["tp_decay_count"] = 0
+                active_trade["break_even_done"] = False
+                active_trade["partial_tp_done"] = False
                 active_trade["last_close_reason"] = ""
                 active_trade["last_close_price"] = 0.0
                 active_trade["last_close_ts"] = 0
@@ -4769,6 +5982,12 @@ def run_bot():
 
                 # 用實際成交價（已更新的 entry）重新生成顯示字符串
                 actual_entry = active_trade["entry"]
+                actual_initial_risk = abs(_safe_float(actual_entry, entry) - _safe_float(sl, actual_entry))
+                active_trade["initial_entry"] = float(actual_entry)
+                active_trade["initial_risk"] = float(max(actual_initial_risk, 0.0))
+                if active_trade["initial_risk"] > 0 and _safe_float(active_trade.get("initial_tp"), 0.0) > 0:
+                    actual_reward = abs(_safe_float(active_trade.get("initial_tp"), actual_entry) - actual_entry)
+                    active_trade["initial_rr"] = float(actual_reward / max(active_trade["initial_risk"], 1e-9))
                 actual_entry_display = f"{actual_entry:.2f}"
                 send_position_keyboard(
                     direction,

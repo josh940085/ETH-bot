@@ -5,4 +5,7 @@ __pycache__/
 *.pyc
 *.pkl
 *.jsonl
+*.jsonl.*
 .telegram_state.json
+news_stats_cache.json
+news_model_meta.json
