@@ -106,6 +106,8 @@ BINANCE_API_SECRET = _get_required_env("BINANCE_API_SECRET", "", mask=True)
 BINANCE_FAPI_BASE = "https://fapi.binance.com"
 # ETHUSDT 最小下單數量（Binance 規定 0.001 ETH）
 _MIN_ORDER_QTY = 0.001
+# 預設槓桿倍數（可透過環境變數 BINANCE_LEVERAGE 覆蓋）
+BINANCE_LEVERAGE = int(os.environ.get("BINANCE_LEVERAGE", "10"))
 
 
 def _normalize_finance_terms_zh(text):
@@ -1231,6 +1233,145 @@ def binance_futures_market_order(
     except Exception as e:
         print(f"⚠️ Binance 下單例外: {e}")
     return False
+
+
+def binance_set_leverage(symbol: str, leverage: int) -> bool:
+    """設定 Binance Futures 槓桿倍數，回傳 True 表示成功。"""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return False
+    params = {"symbol": symbol, "leverage": leverage}
+    _binance_sign(params)
+    try:
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        res = requests.post(
+            f"{BINANCE_FAPI_BASE}/fapi/v1/leverage",
+            params=params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if data.get("leverage"):
+            print(f"✅ Binance 槓桿設定成功: {data['leverage']}x")
+            return True
+        else:
+            print(f"⚠️ Binance 槓桿設定失敗: {data.get('msg', data)}")
+    except Exception as e:
+        print(f"⚠️ Binance 設定槓桿例外: {e}")
+    return False
+
+
+def binance_cancel_all_orders(symbol: str) -> bool:
+    """取消指定交易對的所有掛單，回傳 True 表示成功。"""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return False
+    params = {"symbol": symbol}
+    _binance_sign(params)
+    try:
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        res = requests.delete(
+            f"{BINANCE_FAPI_BASE}/fapi/v1/allOpenOrders",
+            params=params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if res.status_code == 200:
+            print(f"✅ Binance 已取消所有掛單 ({symbol})")
+            return True
+        else:
+            print(f"⚠️ Binance 取消掛單失敗: {data.get('msg', data)}")
+    except Exception as e:
+        print(f"⚠️ Binance 取消掛單例外: {e}")
+    return False
+
+
+def binance_place_tp_sl_orders(
+    symbol: str,
+    direction: str,
+    tp_price: float,
+    sl_price: float,
+) -> bool:
+    """在 Binance Futures 掛 TAKE_PROFIT_MARKET（止盈）與 STOP_MARKET（止損）單。
+    使用 closePosition=true，由交易所自動平倉整個倉位。
+    回傳 True 表示兩筆掛單均成功。
+    注意：使用 TAKE_PROFIT_MARKET / STOP_MARKET（非 TAKE_PROFIT / STOP），
+    避免 Binance 錯誤 -4120 (Order type not supported for this endpoint)。"""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        print("⚠️ 未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法掛 TP/SL")
+        return False
+
+    if tp_price <= 0 or sl_price <= 0:
+        print(f"⚠️ TP/SL 價格無效（tp={tp_price}, sl={sl_price}），略過掛單")
+        return False
+
+    # long: TP 在上（賣），SL 在下（賣）
+    # short: TP 在下（買），SL 在上（買）
+    if direction == "long":
+        tp_side = "SELL"
+        sl_side = "SELL"
+    else:
+        tp_side = "BUY"
+        sl_side = "BUY"
+
+    tp_ok = False
+    sl_ok = False
+    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+
+    # --- 止盈單 (TAKE_PROFIT_MARKET) ---
+    tp_params = {
+        "symbol": symbol,
+        "side": tp_side,
+        "type": "TAKE_PROFIT_MARKET",
+        "stopPrice": f"{tp_price:.2f}",
+        "closePosition": "true",
+        "workingType": "MARK_PRICE",
+        "priceProtect": "TRUE",
+    }
+    _binance_sign(tp_params)
+    try:
+        res = requests.post(
+            f"{BINANCE_FAPI_BASE}/fapi/v1/order",
+            params=tp_params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if data.get("orderId"):
+            print(f"✅ Binance TP 掛單成功 | stopPrice={tp_price:.2f} orderId={data['orderId']}")
+            tp_ok = True
+        else:
+            print(f"⚠️ Binance TP 掛單失敗: {data}")
+    except Exception as e:
+        print(f"⚠️ Binance TP 掛單例外: {e}")
+
+    # --- 止損單 (STOP_MARKET) ---
+    sl_params = {
+        "symbol": symbol,
+        "side": sl_side,
+        "type": "STOP_MARKET",
+        "stopPrice": f"{sl_price:.2f}",
+        "closePosition": "true",
+        "workingType": "MARK_PRICE",
+        "priceProtect": "TRUE",
+    }
+    _binance_sign(sl_params)
+    try:
+        res = requests.post(
+            f"{BINANCE_FAPI_BASE}/fapi/v1/order",
+            params=sl_params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if data.get("orderId"):
+            print(f"✅ Binance SL 掛單成功 | stopPrice={sl_price:.2f} orderId={data['orderId']}")
+            sl_ok = True
+        else:
+            print(f"⚠️ Binance SL 掛單失敗: {data}")
+    except Exception as e:
+        print(f"⚠️ Binance SL 掛單例外: {e}")
+
+    return tp_ok and sl_ok
 
 
 def manage_position_scaling(current_price, atr=None):
@@ -2439,6 +2580,7 @@ def run_bot():
                     if sl_hit:
                         performance["loss"] += 1
                         performance["total"] += 1
+                        binance_cancel_all_orders("ETHUSDT")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2469,6 +2611,7 @@ def run_bot():
                         avg_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), tp_exit)
                         gross_pct = (tp_exit - avg_entry) / avg_entry if avg_entry > 0 else 0.0
                         net_pct = gross_pct - ROUND_TRIP_FEE_RATE
+                        binance_cancel_all_orders("ETHUSDT")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2497,6 +2640,7 @@ def run_bot():
                     if sl_hit:
                         performance["loss"] += 1
                         performance["total"] += 1
+                        binance_cancel_all_orders("ETHUSDT")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2527,6 +2671,7 @@ def run_bot():
                         avg_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), tp_exit)
                         gross_pct = (avg_entry - tp_exit) / avg_entry if avg_entry > 0 else 0.0
                         net_pct = gross_pct - ROUND_TRIP_FEE_RATE
+                        binance_cancel_all_orders("ETHUSDT")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -3212,6 +3357,41 @@ def run_bot():
                 active_trade["open_ts"] = time.time()
                 active_trade["tp_decay_count"] = 0
                 active_trade["open"] = True
+
+                # ===== 實際向 Binance 下市價開倉單 + 掛 TP/SL =====
+                if BINANCE_API_KEY and BINANCE_API_SECRET:
+                    open_side = "BUY" if direction == "long" else "SELL"
+                    order_qty = active_trade["size"]
+                    lev_ok = binance_set_leverage("ETHUSDT", BINANCE_LEVERAGE)
+                    if not lev_ok:
+                        send_telegram(
+                            f"⚠️ Binance 槓桿設定失敗，已使用帳戶現有槓桿設定繼續開倉",
+                            priority=True,
+                        )
+                    order_ok = binance_futures_market_order(
+                        "ETHUSDT", open_side, order_qty, reduce_only=False
+                    )
+                    if order_ok:
+                        send_telegram(
+                            f"✅ Binance 已自動開單 | 方向: {direction} | "
+                            f"數量: {order_qty:.3f} ETH | 槓桿: {BINANCE_LEVERAGE}x",
+                            priority=True,
+                        )
+                        if tp is not None and sl is not None:
+                            tp_sl_ok = binance_place_tp_sl_orders(
+                                "ETHUSDT", direction, float(tp), float(sl)
+                            )
+                            if not tp_sl_ok:
+                                send_telegram(
+                                    "⚠️ TP/SL 掛單部分失敗，請手動確認交易所掛單狀態",
+                                    priority=True,
+                                )
+                    else:
+                        send_telegram(
+                            f"⚠️ Binance 開倉失敗，僅記錄虛擬倉位（{direction}）",
+                            priority=True,
+                        )
+
                 send_position_keyboard(
                     direction,
                     float(entry),
