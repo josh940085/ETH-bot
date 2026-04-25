@@ -1287,6 +1287,57 @@ def binance_cancel_all_orders(symbol: str) -> bool:
     return False
 
 
+def _binance_fapi_tp_sl_order(
+    symbol: str,
+    side: str,
+    order_type: str,
+    stop_price: float,
+    direction: str,
+    quantity: float = 0.0,
+) -> bool:
+    """使用標準 FAPI 端點掛止盈（TAKE_PROFIT_MARKET）或止損（STOP_MARKET）單。
+    適用於標準 USDM 合約帳戶（含跟單帳戶）。
+    order_type: 'TAKE_PROFIT_MARKET' 或 'STOP_MARKET'
+    回傳 True 表示成功。"""
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "positionSide": "LONG" if direction.lower() == "long" else "SHORT",
+        "type": order_type,
+        "stopPrice": f"{stop_price:.2f}",
+        "workingType": "MARK_PRICE",
+        "priceProtect": "TRUE",
+    }
+    qty = round(quantity, 3) if quantity else 0.0
+    if qty >= _MIN_ORDER_QTY:
+        params["quantity"] = f"{qty:.3f}"
+        params["reduceOnly"] = "true"
+    else:
+        params["closePosition"] = "true"
+
+    _binance_sign(params)
+    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+    try:
+        res = requests.post(
+            f"{BINANCE_FAPI_BASE}/fapi/v1/order",
+            params=params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if data.get("orderId"):
+            print(
+                f"✅ Binance FAPI {order_type} 掛單成功 | "
+                f"stopPrice={stop_price:.2f} orderId={data['orderId']}"
+            )
+            return True
+        else:
+            print(f"⚠️ Binance FAPI {order_type} 掛單失敗: {data}")
+    except Exception as e:
+        print(f"⚠️ Binance FAPI {order_type} 掛單例外: {e}")
+    return False
+
+
 def _binance_papi_conditional_order(
     symbol: str,
     side: str,
@@ -1296,7 +1347,7 @@ def _binance_papi_conditional_order(
     quantity: float = 0.0,
 ) -> bool:
     """使用 Binance Portfolio Margin API 掛條件單（止盈/止損）。
-    當標準 FAPI 端點回傳 -4120 時作為備援。
+    作為 FAPI 失敗時的備援，適用於 Portfolio Margin 帳戶。
     strategy_type: 'TAKE_PROFIT' 或 'STOP'
     回傳 True 表示成功。"""
     params = {
@@ -1338,6 +1389,28 @@ def _binance_papi_conditional_order(
     return False
 
 
+def _place_tp_sl_with_fallback(
+    symbol: str,
+    side: str,
+    fapi_order_type: str,
+    papi_strategy_type: str,
+    stop_price: float,
+    direction: str,
+    quantity: float = 0.0,
+) -> bool:
+    """先嘗試 FAPI 市價條件單，失敗時備援至 PAPI 條件單。
+    回傳 True 表示成功。"""
+    ok = _binance_fapi_tp_sl_order(
+        symbol, side, fapi_order_type, stop_price, direction, quantity
+    )
+    if not ok:
+        # FAPI 失敗時備援至 PAPI（Portfolio Margin 帳戶）
+        ok = _binance_papi_conditional_order(
+            symbol, side, papi_strategy_type, stop_price, direction, quantity
+        )
+    return ok
+
+
 def binance_place_tp_sl_orders(
     symbol: str,
     direction: str,
@@ -1345,7 +1418,9 @@ def binance_place_tp_sl_orders(
     sl_price: float,
     quantity: float = 0.0,
 ) -> bool:
-    """在 Binance 使用 PAPI Algo Order 端點掛止盈（TAKE_PROFIT）與止損（STOP）條件單。
+    """掛止盈（TAKE_PROFIT_MARKET）與止損（STOP_MARKET）條件單。
+    優先使用標準 FAPI 端點（適用所有帳戶類型，含跟單帳戶）；
+    若 FAPI 失敗則備援至 Portfolio Margin PAPI 端點。
     quantity: 持倉數量，優先傳入以提升相容性。
     回傳 True 表示兩筆掛單均成功。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
@@ -1365,11 +1440,12 @@ def binance_place_tp_sl_orders(
         tp_side = "BUY"
         sl_side = "BUY"
 
-    tp_ok = _binance_papi_conditional_order(
-        symbol, tp_side, "TAKE_PROFIT", tp_price, direction, quantity
+    # 優先使用 FAPI TAKE_PROFIT_MARKET / STOP_MARKET（標準合約帳戶通用）
+    tp_ok = _place_tp_sl_with_fallback(
+        symbol, tp_side, "TAKE_PROFIT_MARKET", "TAKE_PROFIT", tp_price, direction, quantity
     )
-    sl_ok = _binance_papi_conditional_order(
-        symbol, sl_side, "STOP", sl_price, direction, quantity
+    sl_ok = _place_tp_sl_with_fallback(
+        symbol, sl_side, "STOP_MARKET", "STOP", sl_price, direction, quantity
     )
 
     return tp_ok and sl_ok
@@ -3385,7 +3461,8 @@ def run_bot():
                             )
                             if not tp_sl_ok:
                                 send_telegram(
-                                    "⚠️ TP/SL 掛單部分失敗，請手動確認交易所掛單狀態",
+                                    f"⚠️ TP/SL 掛單部分失敗（tp={float(tp):.2f} sl={float(sl):.2f}）\n"
+                                    "請手動確認交易所掛單狀態",
                                     priority=True,
                                 )
                     else:
