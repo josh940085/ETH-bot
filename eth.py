@@ -1156,7 +1156,8 @@ def _binance_sign(params: dict) -> dict:
 
 
 def binance_get_position(symbol: str = "ETHUSDT") -> float:
-    """回傳 Binance Futures 目前持倉數量（正數=多，負數=空，0=無倉位）。
+    """回傳 Binance Portfolio Margin 目前持倉數量（正數=多，負數=空，0=無倉位）。
+    使用 PAPI 端點 /papi/v1/um/positionRisk。
     若 API Key 未設定則直接回傳 0.0。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return 0.0
@@ -1165,7 +1166,7 @@ def binance_get_position(symbol: str = "ETHUSDT") -> float:
         params = _binance_sign({"symbol": symbol})
         headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
         res = requests.get(
-            f"{BINANCE_FAPI_BASE}/fapi/v2/positionRisk",
+            f"{BINANCE_PAPI_BASE}/papi/v1/um/positionRisk",
             params=params,
             headers=headers,
             timeout=5,
@@ -1189,7 +1190,7 @@ def binance_futures_market_order(
     quantity: float,
     reduce_only: bool = False,
 ) -> bool:
-    """在 Binance Futures 下 MARKET 單。
+    """在 Binance Portfolio Margin 下 MARKET 單（使用 PAPI 端點 /papi/v1/um/order）。
     side: 'BUY' 或 'SELL'
     quantity: ETH 數量（正數，最小 0.001，精度 3 位小數）
     reduce_only: True = 減倉單（不會新開倉）
@@ -1217,7 +1218,7 @@ def binance_futures_market_order(
     try:
         headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
         res = requests.post(
-            f"{BINANCE_FAPI_BASE}/fapi/v1/order",
+            f"{BINANCE_PAPI_BASE}/papi/v1/um/order",
             params=params,
             headers=headers,
             timeout=5,
@@ -1238,7 +1239,8 @@ def binance_futures_market_order(
 
 
 def binance_set_leverage(symbol: str, leverage: int) -> bool:
-    """設定 Binance Futures 槓桿倍數，回傳 True 表示成功。"""
+    """設定 Binance Portfolio Margin 槓桿倍數（使用 PAPI 端點 /papi/v1/um/leverage）。
+    回傳 True 表示成功。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return False
     params = {"symbol": symbol, "leverage": leverage}
@@ -1246,7 +1248,7 @@ def binance_set_leverage(symbol: str, leverage: int) -> bool:
     try:
         headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
         res = requests.post(
-            f"{BINANCE_FAPI_BASE}/fapi/v1/leverage",
+            f"{BINANCE_PAPI_BASE}/papi/v1/um/leverage",
             params=params,
             headers=headers,
             timeout=5,
@@ -1263,7 +1265,8 @@ def binance_set_leverage(symbol: str, leverage: int) -> bool:
 
 
 def binance_cancel_all_orders(symbol: str) -> bool:
-    """取消指定交易對的所有掛單，回傳 True 表示成功。"""
+    """取消指定交易對的所有掛單（使用 PAPI 端點 /papi/v1/um/allOpenOrders）。
+    回傳 True 表示成功。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         return False
     params = {"symbol": symbol}
@@ -1271,7 +1274,7 @@ def binance_cancel_all_orders(symbol: str) -> bool:
     try:
         headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
         res = requests.delete(
-            f"{BINANCE_FAPI_BASE}/fapi/v1/allOpenOrders",
+            f"{BINANCE_PAPI_BASE}/papi/v1/um/allOpenOrders",
             params=params,
             headers=headers,
             timeout=5,
@@ -1296,7 +1299,6 @@ def _binance_papi_conditional_order(
     quantity: float = 0.0,
 ) -> bool:
     """使用 Binance Portfolio Margin API 掛條件單（止盈/止損）。
-    當標準 FAPI 端點回傳 -4120 時作為備援。
     strategy_type: 'TAKE_PROFIT' 或 'STOP'
     回傳 True 表示成功。"""
     params = {
@@ -2347,7 +2349,7 @@ def get_kline(interval, limit=100):
         if now - ts < KLINE_TTL.get(interval, 10):
             return data
 
-    url = "https://fapi.binance.com/fapi/v1/klines"
+    url = f"{BINANCE_FAPI_BASE}/fapi/v1/klines"
     data = requests.get(url, params={
         "symbol": "ETHUSDT",
         "interval": interval,
