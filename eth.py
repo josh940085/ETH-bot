@@ -13,6 +13,9 @@ import sys
 import re
 import html
 import subprocess
+import hmac
+import hashlib
+import urllib.parse
 from collections import deque
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -96,6 +99,13 @@ TELEGRAM_PINNED_MESSAGE_ID = None
 
 # ===== Discord（同步通知） =====
 DISCORD_WEBHOOK = _get_required_env("DISCORD_WEBHOOK", "", mask=True)
+
+# ===== Binance Futures 交易 API =====
+BINANCE_API_KEY = _get_required_env("BINANCE_API_KEY", "", mask=True)
+BINANCE_API_SECRET = _get_required_env("BINANCE_API_SECRET", "", mask=True)
+BINANCE_FAPI_BASE = "https://fapi.binance.com"
+# ETHUSDT 最小下單數量（Binance 規定 0.001 ETH）
+_MIN_ORDER_QTY = 0.001
 
 
 def _normalize_finance_terms_zh(text):
@@ -1127,8 +1137,104 @@ def _safe_float(value, default=0.0):
         return default
 
 
+# ===== Binance Futures 交易輔助函數 =====
+
+def _binance_sign(params: dict) -> dict:
+    """在 params 中加入 timestamp 並附上 HMAC-SHA256 簽名。"""
+    params["timestamp"] = int(time.time() * 1000)
+    query_string = urllib.parse.urlencode(params)
+    signature = hmac.new(
+        BINANCE_API_SECRET.encode("utf-8"),
+        query_string.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    params["signature"] = signature
+    return params
+
+
+def binance_get_position(symbol: str = "ETHUSDT") -> float:
+    """回傳 Binance Futures 目前持倉數量（正數=多，負數=空，0=無倉位）。
+    若 API Key 未設定則直接回傳 0.0。"""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        return 0.0
+
+    try:
+        params = _binance_sign({"symbol": symbol})
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        res = requests.get(
+            f"{BINANCE_FAPI_BASE}/fapi/v2/positionRisk",
+            params=params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if isinstance(data, list):
+            for item in data:
+                if item.get("symbol") == symbol:
+                    return float(item.get("positionAmt", 0.0))
+        elif isinstance(data, dict):
+            # 若回傳錯誤訊息
+            print(f"⚠️ binance_get_position 錯誤: {data.get('msg', data)}")
+    except Exception as e:
+        print(f"⚠️ binance_get_position 例外: {e}")
+    return 0.0
+
+
+def binance_futures_market_order(
+    symbol: str,
+    side: str,
+    quantity: float,
+    reduce_only: bool = False,
+) -> bool:
+    """在 Binance Futures 下 MARKET 單。
+    side: 'BUY' 或 'SELL'
+    quantity: ETH 數量（正數，最小 0.001，精度 3 位小數）
+    reduce_only: True = 減倉單（不會新開倉）
+    回傳 True 表示成功。"""
+    if not BINANCE_API_KEY or not BINANCE_API_SECRET:
+        print("⚠️ 未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法下單")
+        return False
+
+    qty = round(quantity, 3)
+    if qty < _MIN_ORDER_QTY:
+        print(f"⚠️ 下單數量 {qty} 過小，略過")
+        return False
+
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "type": "MARKET",
+        "quantity": f"{qty:.3f}",
+    }
+    if reduce_only:
+        params["reduceOnly"] = "true"
+
+    _binance_sign(params)
+
+    try:
+        headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+        res = requests.post(
+            f"{BINANCE_FAPI_BASE}/fapi/v1/order",
+            params=params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if data.get("orderId"):
+            print(
+                f"✅ Binance 下單成功 | {side} {qty} {symbol} "
+                f"orderId={data['orderId']}"
+            )
+            return True
+        else:
+            print(f"⚠️ Binance 下單失敗: {data.get('msg', data)}")
+    except Exception as e:
+        print(f"⚠️ Binance 下單例外: {e}")
+    return False
+
+
 def manage_position_scaling(current_price, atr=None):
-    """持倉中的補倉/減倉管理（虛擬倉位）。"""
+    """持倉中的補倉/減倉管理（虛擬倉位 + 實際下單）。"""
     if not active_trade.get("open"):
         return
 
@@ -1173,6 +1279,19 @@ def manage_position_scaling(current_price, atr=None):
             active_trade["size"] = float(new_size)
             active_trade["add_count"] = add_count + 1
             active_trade["last_adjust_ts"] = now_ts
+
+            # ===== 補倉：實際向 Binance 下加倉單 =====
+            if BINANCE_API_KEY and BINANCE_API_SECRET and current_price > 0:
+                position_amt = abs(binance_get_position("ETHUSDT"))
+                if position_amt > 0:
+                    # 按倉位比例計算本次加倉數量
+                    add_qty = position_amt * (delta / max(size, 1e-9))
+                    if add_qty >= _MIN_ORDER_QTY:
+                        add_side = "BUY" if direction == "long" else "SELL"
+                        binance_futures_market_order("ETHUSDT", add_side, add_qty, reduce_only=False)
+                else:
+                    print("⚠️ Binance 無持倉，補倉下單略過（虛擬倉位已更新）")
+
             send_telegram(
                 f"➕ 補倉（{direction}）\n"
                 f"現價: {current_price:.2f} | 加倉: +{int(delta*100)}%\n"
@@ -1193,6 +1312,21 @@ def manage_position_scaling(current_price, atr=None):
             active_trade["size"] = float(new_size)
             active_trade["reduce_count"] = int(active_trade.get("reduce_count", 0)) + 1
             active_trade["last_adjust_ts"] = now_ts
+
+            # ===== 減倉：實際向 Binance 下減倉單（reduceOnly）=====
+            if BINANCE_API_KEY and BINANCE_API_SECRET and current_price > 0:
+                position_amt = abs(binance_get_position("ETHUSDT"))
+                if position_amt > 0:
+                    # 按倉位比例計算本次減倉數量
+                    reduce_qty = position_amt * (delta / max(size, 1e-9))
+                    if reduce_qty >= _MIN_ORDER_QTY:
+                        reduce_side = "SELL" if direction == "long" else "BUY"
+                        ok = binance_futures_market_order("ETHUSDT", reduce_side, reduce_qty, reduce_only=True)
+                        if not ok:
+                            print(f"⚠️ 減倉下單失敗，虛擬倉位仍已更新 size={new_size:.3f}")
+                else:
+                    print("⚠️ Binance 無持倉，減倉下單略過（虛擬倉位已更新）")
+
             send_telegram(
                 f"➖ 減倉（{direction}）\n"
                 f"現價: {current_price:.2f} | 減倉: -{int(delta*100)}%\n"
