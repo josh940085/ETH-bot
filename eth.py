@@ -104,6 +104,7 @@ DISCORD_WEBHOOK = _get_required_env("DISCORD_WEBHOOK", "", mask=True)
 BINANCE_API_KEY = _get_required_env("BINANCE_API_KEY", "", mask=True)
 BINANCE_API_SECRET = _get_required_env("BINANCE_API_SECRET", "", mask=True)
 BINANCE_FAPI_BASE = "https://fapi.binance.com"
+BINANCE_PAPI_BASE = "https://papi.binance.com"
 # ETHUSDT 最小下單數量（Binance 規定 0.001 ETH）
 _MIN_ORDER_QTY = 0.001
 # 預設槓桿倍數（可透過環境變數 BINANCE_LEVERAGE 覆蓋）
@@ -1223,16 +1224,17 @@ def binance_futures_market_order(
         )
         data = res.json()
         if data.get("orderId"):
+            oid = str(data["orderId"])
             print(
                 f"✅ Binance 下單成功 | {side} {qty} {symbol} "
-                f"orderId={data['orderId']}"
+                f"orderId={oid}"
             )
-            return True
+            return oid
         else:
             print(f"⚠️ Binance 下單失敗: {data.get('msg', data)}")
     except Exception as e:
         print(f"⚠️ Binance 下單例外: {e}")
-    return False
+    return ""
 
 
 def binance_set_leverage(symbol: str, leverage: int) -> bool:
@@ -1285,17 +1287,69 @@ def binance_cancel_all_orders(symbol: str) -> bool:
     return False
 
 
+def _binance_papi_conditional_order(
+    symbol: str,
+    side: str,
+    strategy_type: str,
+    stop_price: float,
+    direction: str,
+    quantity: float = 0.0,
+) -> bool:
+    """使用 Binance Portfolio Margin API 掛條件單（止盈/止損）。
+    當標準 FAPI 端點回傳 -4120 時作為備援。
+    strategy_type: 'TAKE_PROFIT' 或 'STOP'
+    回傳 True 表示成功。"""
+    params = {
+        "symbol": symbol,
+        "side": side,
+        "positionSide": "LONG" if direction.lower() == "long" else "SHORT",
+        "strategyType": strategy_type,
+        "stopPrice": f"{stop_price:.2f}",
+        "workingType": "MARK_PRICE",
+        "priceProtect": "TRUE",
+    }
+    qty = round(quantity, 3) if quantity else 0.0
+    if qty >= _MIN_ORDER_QTY:
+        params["quantity"] = f"{qty:.3f}"
+        params["reduceOnly"] = "true"
+    else:
+        params["closePosition"] = "true"
+
+    _binance_sign(params)
+    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
+    try:
+        res = requests.post(
+            f"{BINANCE_PAPI_BASE}/papi/v1/um/conditional/order",
+            params=params,
+            headers=headers,
+            timeout=5,
+        )
+        data = res.json()
+        if data.get("strategyId"):
+            print(
+                f"✅ Binance PAPI {strategy_type} 掛單成功 | "
+                f"stopPrice={stop_price:.2f} strategyId={data['strategyId']}"
+            )
+            return True
+        else:
+            print(f"⚠️ Binance PAPI {strategy_type} 掛單失敗: {data}")
+    except Exception as e:
+        print(f"⚠️ Binance PAPI {strategy_type} 掛單例外: {e}")
+    return False
+
+
 def binance_place_tp_sl_orders(
     symbol: str,
     direction: str,
     tp_price: float,
     sl_price: float,
+    quantity: float = 0.0,
 ) -> bool:
     """在 Binance Futures 掛 TAKE_PROFIT_MARKET（止盈）與 STOP_MARKET（止損）單。
     使用 closePosition=true，由交易所自動平倉整個倉位。
-    回傳 True 表示兩筆掛單均成功。
-    注意：使用 TAKE_PROFIT_MARKET / STOP_MARKET（非 TAKE_PROFIT / STOP），
-    避免 Binance 錯誤 -4120 (Order type not supported for this endpoint)。"""
+    若標準 FAPI 端點回傳 -4120（Portfolio Margin 帳戶），自動改用 PAPI 條件單端點。
+    quantity: 持倉數量，PAPI 備援時優先傳入以提升相容性。
+    回傳 True 表示兩筆掛單均成功。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         print("⚠️ 未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法掛 TP/SL")
         return False
@@ -1339,6 +1393,11 @@ def binance_place_tp_sl_orders(
         if data.get("orderId"):
             print(f"✅ Binance TP 掛單成功 | stopPrice={tp_price:.2f} orderId={data['orderId']}")
             tp_ok = True
+        elif data.get("code") == -4120:
+            print(f"⚠️ Binance TP -4120，改用 PAPI 條件單: {data.get('msg', '')}")
+            tp_ok = _binance_papi_conditional_order(
+                symbol, tp_side, "TAKE_PROFIT", tp_price, direction, quantity
+            )
         else:
             print(f"⚠️ Binance TP 掛單失敗: {data}")
     except Exception as e:
@@ -1366,6 +1425,11 @@ def binance_place_tp_sl_orders(
         if data.get("orderId"):
             print(f"✅ Binance SL 掛單成功 | stopPrice={sl_price:.2f} orderId={data['orderId']}")
             sl_ok = True
+        elif data.get("code") == -4120:
+            print(f"⚠️ Binance SL -4120，改用 PAPI 條件單: {data.get('msg', '')}")
+            sl_ok = _binance_papi_conditional_order(
+                symbol, sl_side, "STOP", sl_price, direction, quantity
+            )
         else:
             print(f"⚠️ Binance SL 掛單失敗: {data}")
     except Exception as e:
@@ -3374,12 +3438,13 @@ def run_bot():
                     if order_ok:
                         send_telegram(
                             f"✅ Binance 已自動開單 | 方向: {direction} | "
-                            f"數量: {order_qty:.3f} ETH | 槓桿: {BINANCE_LEVERAGE}x",
+                            f"數量: {order_qty:.3f} ETH | 槓桿: {BINANCE_LEVERAGE}x | orderId: {order_ok}",
                             priority=True,
                         )
                         if tp is not None and sl is not None:
                             tp_sl_ok = binance_place_tp_sl_orders(
-                                "ETHUSDT", direction, float(tp), float(sl)
+                                "ETHUSDT", direction, float(tp), float(sl),
+                                quantity=order_qty,
                             )
                             if not tp_sl_ok:
                                 send_telegram(
