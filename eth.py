@@ -1345,10 +1345,8 @@ def binance_place_tp_sl_orders(
     sl_price: float,
     quantity: float = 0.0,
 ) -> bool:
-    """在 Binance Futures 掛 TAKE_PROFIT_MARKET（止盈）與 STOP_MARKET（止損）單。
-    使用 closePosition=true，由交易所自動平倉整個倉位。
-    若標準 FAPI 端點回傳 -4120（Portfolio Margin 帳戶），自動改用 PAPI 條件單端點。
-    quantity: 持倉數量，PAPI 備援時優先傳入以提升相容性。
+    """在 Binance 使用 PAPI Algo Order 端點掛止盈（TAKE_PROFIT）與止損（STOP）條件單。
+    quantity: 持倉數量，優先傳入以提升相容性。
     回傳 True 表示兩筆掛單均成功。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         print("⚠️ 未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法掛 TP/SL")
@@ -1367,73 +1365,12 @@ def binance_place_tp_sl_orders(
         tp_side = "BUY"
         sl_side = "BUY"
 
-    tp_ok = False
-    sl_ok = False
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-
-    # --- 止盈單 (TAKE_PROFIT_MARKET) ---
-    tp_params = {
-        "symbol": symbol,
-        "side": tp_side,
-        "type": "TAKE_PROFIT_MARKET",
-        "stopPrice": f"{tp_price:.2f}",
-        "closePosition": "true",
-        "workingType": "MARK_PRICE",
-        "priceProtect": "TRUE",
-    }
-    _binance_sign(tp_params)
-    try:
-        res = requests.post(
-            f"{BINANCE_FAPI_BASE}/fapi/v1/order",
-            params=tp_params,
-            headers=headers,
-            timeout=5,
-        )
-        data = res.json()
-        if data.get("orderId"):
-            print(f"✅ Binance TP 掛單成功 | stopPrice={tp_price:.2f} orderId={data['orderId']}")
-            tp_ok = True
-        elif data.get("code") == -4120:
-            print(f"⚠️ Binance TP -4120，改用 PAPI 條件單: {data.get('msg', '')}")
-            tp_ok = _binance_papi_conditional_order(
-                symbol, tp_side, "TAKE_PROFIT", tp_price, direction, quantity
-            )
-        else:
-            print(f"⚠️ Binance TP 掛單失敗: {data}")
-    except Exception as e:
-        print(f"⚠️ Binance TP 掛單例外: {e}")
-
-    # --- 止損單 (STOP_MARKET) ---
-    sl_params = {
-        "symbol": symbol,
-        "side": sl_side,
-        "type": "STOP_MARKET",
-        "stopPrice": f"{sl_price:.2f}",
-        "closePosition": "true",
-        "workingType": "MARK_PRICE",
-        "priceProtect": "TRUE",
-    }
-    _binance_sign(sl_params)
-    try:
-        res = requests.post(
-            f"{BINANCE_FAPI_BASE}/fapi/v1/order",
-            params=sl_params,
-            headers=headers,
-            timeout=5,
-        )
-        data = res.json()
-        if data.get("orderId"):
-            print(f"✅ Binance SL 掛單成功 | stopPrice={sl_price:.2f} orderId={data['orderId']}")
-            sl_ok = True
-        elif data.get("code") == -4120:
-            print(f"⚠️ Binance SL -4120，改用 PAPI 條件單: {data.get('msg', '')}")
-            sl_ok = _binance_papi_conditional_order(
-                symbol, sl_side, "STOP", sl_price, direction, quantity
-            )
-        else:
-            print(f"⚠️ Binance SL 掛單失敗: {data}")
-    except Exception as e:
-        print(f"⚠️ Binance SL 掛單例外: {e}")
+    tp_ok = _binance_papi_conditional_order(
+        symbol, tp_side, "TAKE_PROFIT", tp_price, direction, quantity
+    )
+    sl_ok = _binance_papi_conditional_order(
+        symbol, sl_side, "STOP", sl_price, direction, quantity
+    )
 
     return tp_ok and sl_ok
 
