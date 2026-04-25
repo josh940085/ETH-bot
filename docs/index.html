@@ -235,7 +235,7 @@
       ? (live - ENTRY) / ENTRY
       : (ENTRY - live) / ENTRY;
     const pct  = raw * LEV * 100;
-    const usdt = raw * ENTRY * (SIZE / 100) * LEV;
+    const usdt = raw * ENTRY * (SIZE / 100);
     return { pct, usdt };
   }
 
