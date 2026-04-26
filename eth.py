@@ -1517,19 +1517,11 @@ def manage_position_scaling(current_price, atr=None):
             if BINANCE_API_KEY and BINANCE_API_SECRET and current_price > 0:
                 position_amt = abs(binance_get_position("ETHUSDT"))
                 if position_amt > 0:
-                    # 先取消現有 TP/SL 掛單，避免 closePosition 衝突
-                    binance_cancel_all_orders("ETHUSDT")
                     # 按倉位比例計算本次加倉數量
                     add_qty = position_amt * (delta / max(size, 1e-9))
                     if add_qty >= _MIN_ORDER_QTY:
                         add_side = "BUY" if direction == "long" else "SELL"
                         binance_futures_market_order("ETHUSDT", add_side, add_qty, reduce_only=False)
-                    # 重新掛 TP/SL（以更新後的實際倉位量）
-                    new_position_amt = abs(binance_get_position("ETHUSDT"))
-                    tp_val = _safe_float(active_trade.get("tp"), 0.0)
-                    sl_val = _safe_float(active_trade.get("sl"), 0.0)
-                    if new_position_amt >= _MIN_ORDER_QTY and tp_val > 0 and sl_val > 0:
-                        binance_place_tp_sl_orders("ETHUSDT", direction, tp_val, sl_val, quantity=new_position_amt)
                 else:
                     print("⚠️ Binance 無持倉，補倉下單略過（虛擬倉位已更新）")
 
@@ -1558,8 +1550,6 @@ def manage_position_scaling(current_price, atr=None):
             if BINANCE_API_KEY and BINANCE_API_SECRET and current_price > 0:
                 position_amt = abs(binance_get_position("ETHUSDT"))
                 if position_amt > 0:
-                    # 先取消現有 TP/SL 掛單，避免 closePosition 衝突
-                    binance_cancel_all_orders("ETHUSDT")
                     # 按倉位比例計算本次減倉數量
                     reduce_qty = position_amt * (delta / max(size, 1e-9))
                     if reduce_qty >= _MIN_ORDER_QTY:
@@ -1567,12 +1557,6 @@ def manage_position_scaling(current_price, atr=None):
                         ok = binance_futures_market_order("ETHUSDT", reduce_side, reduce_qty, reduce_only=True)
                         if not ok:
                             print(f"⚠️ 減倉下單失敗，虛擬倉位仍已更新 size={new_size:.3f}")
-                    # 重新掛 TP/SL（以更新後的實際倉位量）
-                    new_position_amt = abs(binance_get_position("ETHUSDT"))
-                    tp_val = _safe_float(active_trade.get("tp"), 0.0)
-                    sl_val = _safe_float(active_trade.get("sl"), 0.0)
-                    if new_position_amt >= _MIN_ORDER_QTY and tp_val > 0 and sl_val > 0:
-                        binance_place_tp_sl_orders("ETHUSDT", direction, tp_val, sl_val, quantity=new_position_amt)
                 else:
                     print("⚠️ Binance 無持倉，減倉下單略過（虛擬倉位已更新）")
 
@@ -3505,23 +3489,6 @@ def run_bot():
                             f"數量: {order_qty:.3f} ETH | 槓桿: {BINANCE_LEVERAGE}x | orderId: {order_ok}",
                             priority=True,
                         )
-                        if tp is not None and sl is not None:
-                            print(
-                                f"📌 開倉後掛 TP/SL | 方向: {direction} | "
-                                f"tp={float(tp):.2f} sl={float(sl):.2f} qty={order_qty:.3f}"
-                            )
-                            tp_sl_ok = binance_place_tp_sl_orders(
-                                "ETHUSDT", direction, float(tp), float(sl),
-                                quantity=order_qty,
-                            )
-                            if not tp_sl_ok:
-                                send_telegram(
-                                    f"⚠️ TP/SL 掛單部分失敗（tp={float(tp):.2f} sl={float(sl):.2f}）\n"
-                                    "請手動確認交易所掛單狀態",
-                                    priority=True,
-                                )
-                        else:
-                            print(f"⚠️ 開倉後未掛 TP/SL：tp={tp} sl={sl}")
                     else:
                         send_telegram(
                             f"⚠️ Binance 開倉失敗，僅記錄虛擬倉位（{direction}）",
