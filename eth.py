@@ -1189,21 +1189,21 @@ def binance_futures_market_order(
     quantity: float,
     reduce_only: bool = False,
     position_side: str = "",
-) -> bool:
+) -> str:
     """在 Binance Futures 下 MARKET 單。
     side: 'BUY' 或 'SELL'
     quantity: ETH 數量（正數，最小 0.001，精度 3 位小數）
-    reduce_only: True = 減倉單（不會新開倉）；Hedge Mode 下請改用 position_side
-    position_side: 'LONG' 或 'SHORT'；設定後以 positionSide 取代 reduceOnly（Hedge Mode 必要）
+    reduce_only: True = 減倉單（One-Way Mode 用）；與 position_side 互斥，position_side 優先
+    position_side: 'LONG' 或 'SHORT'；Hedge Mode 必要，設定後以 positionSide 取代 reduceOnly
     回傳 orderId 字串表示成功，失敗回傳空字串。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         print("⚠️ 未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法下單")
-        return False
+        return ""
 
     qty = round(quantity, 3)
     if qty < _MIN_ORDER_QTY:
         print(f"⚠️ 下單數量 {qty} 過小，略過")
-        return False
+        return ""
 
     params = {
         "symbol": symbol,
@@ -1213,7 +1213,11 @@ def binance_futures_market_order(
     }
     if position_side:
         # Hedge Mode：必須用 positionSide 指定方向，不可同時使用 reduceOnly（-4120）
-        params["positionSide"] = position_side.upper()
+        ps = position_side.upper()
+        if ps not in ("LONG", "SHORT"):
+            print(f"⚠️ position_side 值無效（{position_side}），略過下單")
+            return ""
+        params["positionSide"] = ps
     elif reduce_only:
         params["reduceOnly"] = "true"
 
