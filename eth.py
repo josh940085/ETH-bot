@@ -1188,12 +1188,14 @@ def binance_futures_market_order(
     side: str,
     quantity: float,
     reduce_only: bool = False,
+    position_side: str = "",
 ) -> bool:
     """在 Binance Futures 下 MARKET 單。
     side: 'BUY' 或 'SELL'
     quantity: ETH 數量（正數，最小 0.001，精度 3 位小數）
-    reduce_only: True = 減倉單（不會新開倉）
-    回傳 True 表示成功。"""
+    reduce_only: True = 減倉單（不會新開倉）；Hedge Mode 下請改用 position_side
+    position_side: 'LONG' 或 'SHORT'；設定後以 positionSide 取代 reduceOnly（Hedge Mode 必要）
+    回傳 orderId 字串表示成功，失敗回傳空字串。"""
     if not BINANCE_API_KEY or not BINANCE_API_SECRET:
         print("⚠️ 未設定 BINANCE_API_KEY / BINANCE_API_SECRET，無法下單")
         return False
@@ -1209,7 +1211,10 @@ def binance_futures_market_order(
         "type": "MARKET",
         "quantity": f"{qty:.3f}",
     }
-    if reduce_only:
+    if position_side:
+        # Hedge Mode：必須用 positionSide 指定方向，不可同時使用 reduceOnly（-4120）
+        params["positionSide"] = position_side.upper()
+    elif reduce_only:
         params["reduceOnly"] = "true"
 
     _binance_sign(params)
@@ -1521,7 +1526,8 @@ def manage_position_scaling(current_price, atr=None):
                     add_qty = position_amt * (delta / max(size, 1e-9))
                     if add_qty >= _MIN_ORDER_QTY:
                         add_side = "BUY" if direction == "long" else "SELL"
-                        binance_futures_market_order("ETHUSDT", add_side, add_qty, reduce_only=False)
+                        _ps = "LONG" if direction == "long" else "SHORT"
+                        binance_futures_market_order("ETHUSDT", add_side, add_qty, position_side=_ps)
                 else:
                     print("⚠️ Binance 無持倉，補倉下單略過（虛擬倉位已更新）")
 
@@ -1546,7 +1552,7 @@ def manage_position_scaling(current_price, atr=None):
             active_trade["reduce_count"] = int(active_trade.get("reduce_count", 0)) + 1
             active_trade["last_adjust_ts"] = now_ts
 
-            # ===== 減倉：實際向 Binance 下減倉單（reduceOnly）=====
+            # ===== 減倉：實際向 Binance 下減倉單（Hedge Mode 用 positionSide）=====
             if BINANCE_API_KEY and BINANCE_API_SECRET and current_price > 0:
                 position_amt = abs(binance_get_position("ETHUSDT"))
                 if position_amt > 0:
@@ -1554,7 +1560,8 @@ def manage_position_scaling(current_price, atr=None):
                     reduce_qty = position_amt * (delta / max(size, 1e-9))
                     if reduce_qty >= _MIN_ORDER_QTY:
                         reduce_side = "SELL" if direction == "long" else "BUY"
-                        ok = binance_futures_market_order("ETHUSDT", reduce_side, reduce_qty, reduce_only=True)
+                        _ps = "LONG" if direction == "long" else "SHORT"
+                        ok = binance_futures_market_order("ETHUSDT", reduce_side, reduce_qty, position_side=_ps)
                         if not ok:
                             print(f"⚠️ 減倉下單失敗，虛擬倉位仍已更新 size={new_size:.3f}")
                 else:
@@ -2677,7 +2684,7 @@ def run_bot():
                         if BINANCE_API_KEY and BINANCE_API_SECRET:
                             _pos = abs(binance_get_position("ETHUSDT"))
                             if _pos >= _MIN_ORDER_QTY:
-                                binance_futures_market_order("ETHUSDT", "SELL", _pos, reduce_only=True)
+                                binance_futures_market_order("ETHUSDT", "SELL", _pos, position_side="LONG")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2713,7 +2720,7 @@ def run_bot():
                         if BINANCE_API_KEY and BINANCE_API_SECRET:
                             _pos = abs(binance_get_position("ETHUSDT"))
                             if _pos >= _MIN_ORDER_QTY:
-                                binance_futures_market_order("ETHUSDT", "SELL", _pos, reduce_only=True)
+                                binance_futures_market_order("ETHUSDT", "SELL", _pos, position_side="LONG")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2747,7 +2754,7 @@ def run_bot():
                         if BINANCE_API_KEY and BINANCE_API_SECRET:
                             _pos = abs(binance_get_position("ETHUSDT"))
                             if _pos >= _MIN_ORDER_QTY:
-                                binance_futures_market_order("ETHUSDT", "BUY", _pos, reduce_only=True)
+                                binance_futures_market_order("ETHUSDT", "BUY", _pos, position_side="SHORT")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -2783,7 +2790,7 @@ def run_bot():
                         if BINANCE_API_KEY and BINANCE_API_SECRET:
                             _pos = abs(binance_get_position("ETHUSDT"))
                             if _pos >= _MIN_ORDER_QTY:
-                                binance_futures_market_order("ETHUSDT", "BUY", _pos, reduce_only=True)
+                                binance_futures_market_order("ETHUSDT", "BUY", _pos, position_side="SHORT")
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["add_count"] = 0
@@ -3481,7 +3488,8 @@ def run_bot():
                             priority=True,
                         )
                     order_ok = binance_futures_market_order(
-                        "ETHUSDT", open_side, order_qty, reduce_only=False
+                        "ETHUSDT", open_side, order_qty,
+                        position_side="LONG" if direction == "long" else "SHORT"
                     )
                     if order_ok:
                         send_telegram(
