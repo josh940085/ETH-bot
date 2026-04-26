@@ -1311,10 +1311,15 @@ def _binance_fapi_tp_sl_order(
     qty = round(quantity, 3) if quantity else 0.0
     if qty >= _MIN_ORDER_QTY:
         params["quantity"] = f"{qty:.3f}"
-        params["reduceOnly"] = "true"
+        # 注意：Hedge Mode 下 positionSide 已設定，不可再加 reduceOnly（會被 API 拒絕）
     else:
         params["closePosition"] = "true"
 
+    print(
+        f"📋 FAPI {order_type} 掛單參數 | symbol={symbol} side={side} "
+        f"positionSide={params['positionSide']} stopPrice={stop_price:.2f} "
+        f"qty={qty:.3f} closePosition={'true' if 'closePosition' in params else 'false'}"
+    )
     _binance_sign(params)
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     try:
@@ -1362,10 +1367,15 @@ def _binance_papi_conditional_order(
     qty = round(quantity, 3) if quantity else 0.0
     if qty >= _MIN_ORDER_QTY:
         params["quantity"] = f"{qty:.3f}"
-        params["reduceOnly"] = "true"
+        # 注意：Hedge Mode 下 positionSide 已設定，不可再加 reduceOnly（會被 API 拒絕）
     else:
         params["closePosition"] = "true"
 
+    print(
+        f"📋 PAPI {strategy_type} 掛單參數 | symbol={symbol} side={side} "
+        f"positionSide={params['positionSide']} stopPrice={stop_price:.2f} "
+        f"qty={qty:.3f} closePosition={'true' if 'closePosition' in params else 'false'}"
+    )
     _binance_sign(params)
     headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
     try:
@@ -1430,6 +1440,11 @@ def binance_place_tp_sl_orders(
     if tp_price <= 0 or sl_price <= 0:
         print(f"⚠️ TP/SL 價格無效（tp={tp_price}, sl={sl_price}），略過掛單")
         return False
+
+    print(
+        f"📌 準備掛 TP/SL | 方向: {direction} | symbol: {symbol} | "
+        f"tp={tp_price:.2f} sl={sl_price:.2f} qty={quantity:.3f}"
+    )
 
     # long: TP 在上（賣），SL 在下（賣）
     # short: TP 在下（買），SL 在上（買）
@@ -3491,6 +3506,10 @@ def run_bot():
                             priority=True,
                         )
                         if tp is not None and sl is not None:
+                            print(
+                                f"📌 開倉後掛 TP/SL | 方向: {direction} | "
+                                f"tp={float(tp):.2f} sl={float(sl):.2f} qty={order_qty:.3f}"
+                            )
                             tp_sl_ok = binance_place_tp_sl_orders(
                                 "ETHUSDT", direction, float(tp), float(sl),
                                 quantity=order_qty,
@@ -3501,6 +3520,8 @@ def run_bot():
                                     "請手動確認交易所掛單狀態",
                                     priority=True,
                                 )
+                        else:
+                            print(f"⚠️ 開倉後未掛 TP/SL：tp={tp} sl={sl}")
                     else:
                         send_telegram(
                             f"⚠️ Binance 開倉失敗，僅記錄虛擬倉位（{direction}）",
