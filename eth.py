@@ -103,6 +103,7 @@ DISCORD_WEBHOOK = _get_required_env("DISCORD_WEBHOOK", "", mask=True)
 # ===== Discord 訊息 24 小時自動刪除 =====
 DISCORD_MSG_LOG_PATH = Path(__file__).resolve().parent / ".discord_messages.json"
 DISCORD_MSG_DELETE_AFTER_SEC = 86400  # 24 小時
+DISCORD_CLEANUP_INTERVAL_SEC = 3600   # 每小時清理一次
 _discord_msg_lock = Lock()
 
 
@@ -111,8 +112,8 @@ def _load_discord_msg_log() -> list:
         if DISCORD_MSG_LOG_PATH.exists():
             data = json.loads(DISCORD_MSG_LOG_PATH.read_text(encoding="utf-8"))
             return data if isinstance(data, list) else []
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ 讀取 discord 訊息記錄失敗: {e}")
     return []
 
 
@@ -142,7 +143,7 @@ def _discord_cleanup_loop():
     """背景執行緒：定期刪除超過 24 小時的 Discord 訊息。"""
     while True:
         try:
-            time.sleep(3600)  # 每小時執行一次
+            time.sleep(DISCORD_CLEANUP_INTERVAL_SEC)
             if not DISCORD_WEBHOOK:
                 continue
             now = int(time.time())
@@ -153,7 +154,7 @@ def _discord_cleanup_loop():
                 for rec in records:
                     msg_id = rec.get("id")
                     ts = rec.get("ts", 0)
-                    if now - ts >= DISCORD_MSG_DELETE_AFTER_SEC:
+                    if now - ts > DISCORD_MSG_DELETE_AFTER_SEC:
                         try:
                             del_url = f"{webhook_base}/messages/{msg_id}"
                             r = requests.delete(del_url, timeout=5)
@@ -2199,8 +2200,8 @@ def send_telegram(msg, priority=False, pin=False):
                         disc_msg_id = str(disc_res.json().get("id", ""))
                         if disc_msg_id:
                             _record_discord_message(disc_msg_id)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"⚠️ Discord 訊息 ID 記錄失敗: {e}")
         except Exception as e:
             print("Discord error:", e)
 
