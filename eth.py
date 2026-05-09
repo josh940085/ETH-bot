@@ -100,6 +100,79 @@ TELEGRAM_PINNED_MESSAGE_ID = None
 # ===== Discord（同步通知） =====
 DISCORD_WEBHOOK = _get_required_env("DISCORD_WEBHOOK", "", mask=True)
 
+# ===== Discord 訊息 24 小時自動刪除 =====
+DISCORD_MSG_LOG_PATH = Path(__file__).resolve().parent / ".discord_messages.json"
+DISCORD_MSG_DELETE_AFTER_SEC = 86400  # 24 小時
+_discord_msg_lock = Lock()
+
+
+def _load_discord_msg_log() -> list:
+    try:
+        if DISCORD_MSG_LOG_PATH.exists():
+            data = json.loads(DISCORD_MSG_LOG_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+
+def _save_discord_msg_log(records: list):
+    try:
+        DISCORD_MSG_LOG_PATH.write_text(
+            json.dumps(records, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as e:
+        print(f"⚠️ 寫入 discord 訊息記錄失敗: {e}")
+
+
+def _record_discord_message(message_id: str):
+    """記錄已發送的 Discord 訊息 ID 及時間戳。"""
+    with _discord_msg_lock:
+        records = _load_discord_msg_log()
+        records.append({"id": message_id, "ts": int(time.time())})
+        _save_discord_msg_log(records)
+
+
+def _parse_webhook_base(webhook_url: str) -> str:
+    """從 webhook URL 取得 base（去除 query string），用於刪除 API。"""
+    return webhook_url.split("?")[0]
+
+
+def _discord_cleanup_loop():
+    """背景執行緒：定期刪除超過 24 小時的 Discord 訊息。"""
+    while True:
+        try:
+            time.sleep(3600)  # 每小時執行一次
+            if not DISCORD_WEBHOOK:
+                continue
+            now = int(time.time())
+            webhook_base = _parse_webhook_base(DISCORD_WEBHOOK)
+            with _discord_msg_lock:
+                records = _load_discord_msg_log()
+                remaining = []
+                for rec in records:
+                    msg_id = rec.get("id")
+                    ts = rec.get("ts", 0)
+                    if now - ts >= DISCORD_MSG_DELETE_AFTER_SEC:
+                        try:
+                            del_url = f"{webhook_base}/messages/{msg_id}"
+                            r = requests.delete(del_url, timeout=5)
+                            if r.status_code in (200, 204):
+                                print(f"🗑️ Discord 訊息已刪除: {msg_id}")
+                            elif r.status_code == 404:
+                                print(f"ℹ️ Discord 訊息不存在（已刪除）: {msg_id}")
+                            else:
+                                print(f"⚠️ Discord 刪除失敗 {msg_id}: {r.status_code}")
+                                remaining.append(rec)
+                        except Exception as e:
+                            print(f"⚠️ Discord 刪除例外 {msg_id}: {e}")
+                            remaining.append(rec)
+                    else:
+                        remaining.append(rec)
+                _save_discord_msg_log(remaining)
+        except Exception as e:
+            print(f"⚠️ Discord 清除執行緒錯誤: {e}")
+
 # ===== Binance Futures 交易 API =====
 BINANCE_API_KEY = _get_required_env("BINANCE_API_KEY", "", mask=True)
 BINANCE_API_SECRET = _get_required_env("BINANCE_API_SECRET", "", mask=True)
@@ -1817,6 +1890,7 @@ def ws_price_stream():
             time.sleep(2)
 
 threading.Thread(target=ws_price_stream, daemon=True).start()
+threading.Thread(target=_discord_cleanup_loop, daemon=True).start()
 
 # =============================
 # Indicators
@@ -2110,10 +2184,23 @@ def send_telegram(msg, priority=False, pin=False):
             except Exception as e:
                 print("❌ retry失敗:", e)
 
-        # Discord只發「進場通知」
+        # Discord只發「進場通知」，並記錄訊息 ID 以供 24 小時後自動刪除
         try:
             if DISCORD_WEBHOOK and "進場" in msg:
-                requests.post(DISCORD_WEBHOOK, json={"content": msg}, timeout=5)
+                webhook_base = _parse_webhook_base(DISCORD_WEBHOOK)
+                disc_res = requests.post(
+                    webhook_base,
+                    params={"wait": "true"},
+                    json={"content": msg},
+                    timeout=5,
+                )
+                if disc_res.status_code in (200, 204):
+                    try:
+                        disc_msg_id = str(disc_res.json().get("id", ""))
+                        if disc_msg_id:
+                            _record_discord_message(disc_msg_id)
+                    except Exception:
+                        pass
         except Exception as e:
             print("Discord error:", e)
 
