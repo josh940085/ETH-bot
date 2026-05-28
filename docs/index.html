@@ -3,6 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <title>倉位面板</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
@@ -55,6 +58,36 @@
       border-radius: 14px;
       padding: 14px 16px;
       margin-bottom: 12px;
+    }
+
+    .asset-hero {
+      background: linear-gradient(135deg, #13314f, #1c4a70);
+      border: 1px solid #2a5f8d;
+      border-radius: 14px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+
+    .asset-hero-title {
+      font-size: 11px;
+      color: #b8dfff;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .asset-hero-value {
+      font-size: 26px;
+      font-weight: 800;
+      line-height: 1.1;
+      color: #ffffff;
+    }
+
+    .asset-hero-sub {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #c5ddf5;
+      line-height: 1.4;
     }
 
     .card-title {
@@ -182,10 +215,251 @@
       margin-top: 8px;
     }
 
+    .close-hit {
+      display: inline-block;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 4px 10px;
+      border-radius: 999px;
+      margin-bottom: 10px;
+      border: 1px solid transparent;
+    }
+    .close-hit.tp {
+      background: #1a3a28;
+      color: #2ecc71;
+      border-color: #2ecc71;
+    }
+    .close-hit.sl {
+      background: #3a1a1a;
+      color: #e74c3c;
+      border-color: #e74c3c;
+    }
+
+    .hit-history {
+      margin-top: 12px;
+      background: #151515;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+    .hit-history-title {
+      font-size: 11px;
+      color: #888;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .hit-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      border-bottom: 1px dashed #2a2a2a;
+    }
+    .hit-item:last-child {
+      border-bottom: none;
+      padding-bottom: 0;
+    }
+    .hit-left {
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .hit-left.tp { color: #2ecc71; }
+    .hit-left.sl { color: #e74c3c; }
+    .hit-right {
+      font-size: 11px;
+      color: #9a9a9a;
+      text-align: right;
+    }
+
+    .action-row {
+      margin-top: 10px;
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+    }
+    .close-btn {
+      border: 1px solid #e74c3c;
+      background: #351818;
+      color: #ffb3ad;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    .close-btn:active {
+      transform: translateY(1px);
+    }
+    .panel-btn {
+      border: 1px solid #3c6d9f;
+      background: #172634;
+      color: #b2dbff;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 700;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+    .panel-btn:active {
+      transform: translateY(1px);
+    }
+
+    .section-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .metric-card {
+      background: #111;
+      border: 1px solid #262626;
+      border-radius: 12px;
+      padding: 10px 12px;
+      min-width: 0;
+    }
+
+    .metric-label {
+      font-size: 10px;
+      color: #777;
+      margin-bottom: 6px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .metric-value {
+      font-size: 15px;
+      font-weight: 700;
+      line-height: 1.2;
+      word-break: break-word;
+    }
+
+    .metric-sub {
+      font-size: 11px;
+      color: #8e8e8e;
+      margin-top: 4px;
+      line-height: 1.35;
+    }
+
+    .section-note {
+      font-size: 11px;
+      color: #8c8c8c;
+      line-height: 1.45;
+      margin-top: 12px;
+    }
+
+    .status-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      border: 1px solid #2b2b2b;
+      background: #141414;
+      color: #d0d0d0;
+    }
+
+    .status-chip.good {
+      background: #102217;
+      border-color: #28573b;
+      color: #8fe4b2;
+    }
+
+    .status-chip.warn {
+      background: #2a2011;
+      border-color: #6a4c1a;
+      color: #f0c777;
+    }
+
+    .status-chip.bad {
+      background: #2c1616;
+      border-color: #6b2b2b;
+      color: #ffb4b0;
+    }
+
+    .status-chip.info {
+      background: #14212f;
+      border-color: #35536f;
+      color: #b9dcff;
+    }
+
+    .size-summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+      margin-top: 10px;
+      font-size: 11px;
+      color: #8a8a8a;
+    }
+
+    .size-summary strong {
+      color: #f3f3f3;
+      font-size: 12px;
+    }
+
+    .range-track {
+      position: relative;
+      height: 10px;
+      border-radius: 999px;
+      background: #232323;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+
+    .range-fill {
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, rgba(46, 204, 113, 0.35), rgba(241, 196, 15, 0.28), rgba(231, 76, 60, 0.35));
+    }
+
+    .range-marker {
+      position: absolute;
+      top: 50%;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid rgba(255, 255, 255, 0.95);
+      background: #fff;
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
+      transform: translate(-50%, -50%);
+    }
+
+    .range-labels {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      margin-top: 6px;
+      font-size: 10px;
+      color: #7a7a7a;
+    }
+
+    .divider {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, #2d2d2d, transparent);
+      margin: 12px 0;
+    }
+
     .loading {
       text-align: center;
       padding: 40px;
       color: #888;
+    }
+
+    @media (max-width: 380px) {
+      .section-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -194,19 +468,58 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  // ── 讀取 URL 參數 ──
-  const p = new URLSearchParams(location.search);
-  const DIR    = p.get("dir")   || "long";
-  const ENTRY  = parseFloat(p.get("entry") || "0");
-  const TP     = parseFloat(p.get("tp")    || "0");
-  const SL     = parseFloat(p.get("sl")    || "0");
-  const SIZE   = parseInt(p.get("size")    || "20", 10);
-  const PAIR   = p.get("pair")  || "ETHUSDT";
-  const LEV    = parseInt(p.get("lev")     || "10", 10);
+  const APP_VERSION = "20260529-1";
 
-  // 調試：確認參數被正確讀取
-  console.log("URL Params:", { DIR, ENTRY, TP, SL, SIZE, PAIR, LEV });
-  console.log("URL:", location.href);
+  // ── 讀取 URL 參數（初始值 / 備用）──
+  const p = new URLSearchParams(location.search);
+  let DIR    = p.get("dir")   || "long";
+  let ENTRY  = parseFloat(p.get("entry") || "0");
+  let TP     = parseFloat(p.get("tp")    || "0");
+  let SL     = parseFloat(p.get("sl")    || "0");
+  let SIZE   = parseFloat(p.get("size")  || "20");
+  let PAIR   = p.get("pair")  || "ETHUSDT";
+  let LEV    = parseInt(p.get("lev")     || "10", 10);
+  const FORCE_RESTART = p.get("restart") === "1";
+  const URL_SNAPSHOT_TS = Number.isFinite(Number(p.get("snapshot_ts"))) ? Number(p.get("snapshot_ts")) : 0;
+  const REMOTE_STATE_URL = p.get("state_url") || "";
+  const REMOTE_WS_URL = p.get("ws_url") || "";
+  const hasUrlPosition = !FORCE_RESTART && ENTRY > 0 && TP > 0 && SL > 0;
+  let POSITION_OPEN = hasUrlPosition;
+  let LAST_CLOSE_REASON = "";
+  let LAST_CLOSE_PRICE = 0;
+  let LAST_CLOSE_TS = 0;
+  let LAST_CLOSE_CANDLE_HIGH = 0;
+  let LAST_CLOSE_CANDLE_LOW = 0;
+  let CLOSE_HITS = [];
+  let POSITION_NOTIONAL_USDT = 0;
+  let POSITION_MARGIN_USDT = 0;
+  let BINANCE_QTY = 0;
+  let BINANCE_ENTRY_PRICE = 0;
+  let BINANCE_MARK_PRICE = 0;
+  let BINANCE_UNREALIZED_PNL_USDT = null;
+  let ACCOUNT_AVAILABLE_BALANCE_USDT = parseFloat(p.get("available_balance_usdt") || "0");
+  let ACCOUNT_WALLET_BALANCE_USDT = parseFloat(p.get("wallet_balance_usdt") || "0");
+  let ACCOUNT_MARGIN_BALANCE_USDT = parseFloat(p.get("margin_balance_usdt") || "0");
+  let BINANCE_SPOT_TOTAL_ASSETS_USDT = parseFloat(p.get("spot_assets_usdt") || "0");
+  let BINANCE_FUTURES_TOTAL_ASSETS_USDT = parseFloat(p.get("futures_assets_usdt") || "0");
+  let BINANCE_TOTAL_ASSETS_USDT = parseFloat(p.get("total_assets_usdt") || "0");
+  let ROUND_TRIP_FEE_RATE = 0;
+  let FUNDING_RATE = 0;
+  let FUNDING_COST_RATE_EST = 0;
+  let COST_EVAL_HOLD_HOURS = 0;
+  let TOTAL_COST_RATE_EST = 0;
+  let OPEN_SINCE_TS = 0;
+  let MAX_SIZE = 1;
+  let MIN_SIZE = 0.1;
+  let ADD_COUNT = 0;
+  let REDUCE_COUNT = 0;
+  let LAST_ADJUST_TS = 0;
+  let TP_SL_ADJUSTED_4H = false;
+  let BINANCE_BREAK_EVEN_PRICE = 0;
+  let FUNDING_NEXT_TS = 0;
+  let BREAK_EVEN_ACTIVE = false;
+  let BREAK_EVEN_TARGET = 0;
+  let BREAK_EVEN_TS = 0;
 
   let livePrice = 0;
 
@@ -216,27 +529,354 @@
     Telegram.WebApp.expand();
   }
 
+  // ── 取得即時倉位資料（position.json）──
+  // 只使用同站來源，避免回退到其他分支或舊快取把最新狀態覆蓋掉。
+  const POSITION_JSON_URLS = [
+    "./position.json",
+    "/ETH-bot/docs/position.json",
+    "/ETH-bot/position.json",
+  ];
+  let LAST_POSITION_SOURCE = "";
+  let LAST_POSITION_TS = 0;
+  const POSITION_FETCH_TIMEOUT_MS = 1200;
+  const PRICE_FETCH_TIMEOUT_MS = 1500;
+  const PANEL_REFRESH_INTERVAL_MS = 1500;
+  const WS_RECONNECT_DELAY_MS = 2500;
+  const EXCHANGE_PNL_FRESH_SEC = 4;
+  let refreshInFlight = false;
+  let refreshQueued = false;
+  let realtimeSocket = null;
+  let realtimeSocketConnected = false;
+  let realtimeReconnectTimer = null;
+
+  async function fetchJsonWithTimeout(url, timeoutMs = POSITION_FETCH_TIMEOUT_MS) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (typeof data !== "object" || data === null) return null;
+      return data;
+    } catch (_) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function applyPositionPayload(data, sourceLabel) {
+    if (typeof data !== "object" || data === null) return false;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const tsNum = Number(data.ts);
+    const ts = Number.isFinite(tsNum) ? tsNum : 0;
+    const dataAge = ts > 0 ? nowSec - ts : Infinity;
+
+    if (URL_SNAPSHOT_TS > 0) {
+      if (ts <= 0) return false;
+      if (ts < URL_SNAPSHOT_TS) return false;
+    }
+
+    if (ts > 0 && ts < LAST_POSITION_TS) return false;
+    if (ts > 0) {
+      LAST_POSITION_TS = ts;
+    }
+
+    if (typeof data.pair === "string" && data.pair) PAIR = data.pair;
+    const levNum = parseInt(data.lev, 10);
+    if (Number.isFinite(levNum) && levNum > 0) LEV = levNum;
+    if (typeof data.direction === "string" && data.direction) DIR = data.direction;
+
+    const STALE_CLOSE_SEC = 900;
+    const STALE_OPEN_SEC = 900;
+
+    if (data.open && dataAge < STALE_OPEN_SEC) {
+      POSITION_OPEN = true;
+      const be = Number(data.binance_entry_price);
+      if (Number.isFinite(be) && be > 0) {
+        BINANCE_ENTRY_PRICE = be;
+        ENTRY = be;
+      } else if (Number.isFinite(Number(data.entry))) {
+        ENTRY = parseFloat(data.entry);
+      }
+      if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
+      if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
+      if (Number.isFinite(Number(data.capital_usage_ratio))) {
+        SIZE = Number(data.capital_usage_ratio) * 100;
+      } else if (Number.isFinite(Number(data.size))) {
+        SIZE = Number(data.size) * 100;
+      }
+      POSITION_NOTIONAL_USDT = Number.isFinite(Number(data.position_notional_usdt)) ? Number(data.position_notional_usdt) : 0;
+      POSITION_MARGIN_USDT = Number.isFinite(Number(data.position_margin_usdt)) ? Number(data.position_margin_usdt) : 0;
+      BINANCE_QTY = Number.isFinite(Number(data.binance_qty)) ? Number(data.binance_qty) : 0;
+    } else if (dataAge < STALE_CLOSE_SEC) {
+      POSITION_OPEN = false;
+      LAST_CLOSE_REASON = String(data.last_close_reason || "").toUpperCase();
+      LAST_CLOSE_PRICE = Number.isFinite(Number(data.last_close_price)) ? parseFloat(data.last_close_price) : 0;
+      LAST_CLOSE_TS = Number.isFinite(Number(data.last_close_ts)) ? Number(data.last_close_ts) : 0;
+      LAST_CLOSE_CANDLE_HIGH = Number.isFinite(Number(data.last_close_candle_high)) ? parseFloat(data.last_close_candle_high) : 0;
+      LAST_CLOSE_CANDLE_LOW = Number.isFinite(Number(data.last_close_candle_low)) ? parseFloat(data.last_close_candle_low) : 0;
+      POSITION_NOTIONAL_USDT = Number.isFinite(Number(data.position_notional_usdt)) ? Number(data.position_notional_usdt) : 0;
+      POSITION_MARGIN_USDT = Number.isFinite(Number(data.position_margin_usdt)) ? Number(data.position_margin_usdt) : 0;
+      BINANCE_QTY = Number.isFinite(Number(data.binance_qty)) ? Number(data.binance_qty) : 0;
+      if (Number.isFinite(Number(data.entry))) ENTRY = parseFloat(data.entry);
+      if (Number.isFinite(Number(data.tp))) TP = parseFloat(data.tp);
+      if (Number.isFinite(Number(data.sl))) SL = parseFloat(data.sl);
+      if (Number.isFinite(Number(data.capital_usage_ratio))) {
+        SIZE = Number(data.capital_usage_ratio) * 100;
+      } else if (Number.isFinite(Number(data.size))) {
+        SIZE = Number(data.size) * 100;
+      }
+    } else {
+      return false;
+    }
+
+    ROUND_TRIP_FEE_RATE = Number.isFinite(Number(data.fee_round_trip_rate)) ? Number(data.fee_round_trip_rate) : ROUND_TRIP_FEE_RATE;
+    FUNDING_RATE = Number.isFinite(Number(data.funding_rate)) ? Number(data.funding_rate) : FUNDING_RATE;
+    FUNDING_COST_RATE_EST = Number.isFinite(Number(data.funding_cost_rate_est)) ? Number(data.funding_cost_rate_est) : FUNDING_COST_RATE_EST;
+    COST_EVAL_HOLD_HOURS = Number.isFinite(Number(data.cost_eval_hold_hours)) ? Number(data.cost_eval_hold_hours) : COST_EVAL_HOLD_HOURS;
+    TOTAL_COST_RATE_EST = Number.isFinite(Number(data.total_cost_rate_est)) ? Number(data.total_cost_rate_est) : TOTAL_COST_RATE_EST;
+    BINANCE_MARK_PRICE = Number.isFinite(Number(data.binance_mark_price)) ? Number(data.binance_mark_price) : BINANCE_MARK_PRICE;
+    BINANCE_BREAK_EVEN_PRICE = Number.isFinite(Number(data.binance_break_even_price)) ? Number(data.binance_break_even_price) : BINANCE_BREAK_EVEN_PRICE;
+    BINANCE_UNREALIZED_PNL_USDT = Number.isFinite(Number(data.binance_unrealized_pnl_usdt)) ? Number(data.binance_unrealized_pnl_usdt) : null;
+    ACCOUNT_AVAILABLE_BALANCE_USDT = Number.isFinite(Number(data.account_available_balance_usdt)) ? Number(data.account_available_balance_usdt) : ACCOUNT_AVAILABLE_BALANCE_USDT;
+    ACCOUNT_WALLET_BALANCE_USDT = Number.isFinite(Number(data.account_wallet_balance_usdt)) ? Number(data.account_wallet_balance_usdt) : ACCOUNT_WALLET_BALANCE_USDT;
+    ACCOUNT_MARGIN_BALANCE_USDT = Number.isFinite(Number(data.account_margin_balance_usdt)) ? Number(data.account_margin_balance_usdt) : ACCOUNT_MARGIN_BALANCE_USDT;
+    BINANCE_SPOT_TOTAL_ASSETS_USDT = Number.isFinite(Number(data.binance_spot_total_assets_usdt)) ? Number(data.binance_spot_total_assets_usdt) : BINANCE_SPOT_TOTAL_ASSETS_USDT;
+    BINANCE_FUTURES_TOTAL_ASSETS_USDT = Number.isFinite(Number(data.binance_futures_total_assets_usdt)) ? Number(data.binance_futures_total_assets_usdt) : BINANCE_FUTURES_TOTAL_ASSETS_USDT;
+    BINANCE_TOTAL_ASSETS_USDT = Number.isFinite(Number(data.binance_total_assets_usdt)) ? Number(data.binance_total_assets_usdt) : BINANCE_TOTAL_ASSETS_USDT;
+    OPEN_SINCE_TS = Number.isFinite(Number(data.open_since_ts)) ? Number(data.open_since_ts) : OPEN_SINCE_TS;
+    MAX_SIZE = Number.isFinite(Number(data.max_size)) ? Number(data.max_size) : MAX_SIZE;
+    MIN_SIZE = Number.isFinite(Number(data.min_size)) ? Number(data.min_size) : MIN_SIZE;
+    ADD_COUNT = Number.isFinite(Number(data.add_count)) ? Number(data.add_count) : ADD_COUNT;
+    REDUCE_COUNT = Number.isFinite(Number(data.reduce_count)) ? Number(data.reduce_count) : REDUCE_COUNT;
+    LAST_ADJUST_TS = Number.isFinite(Number(data.last_adjust_ts)) ? Number(data.last_adjust_ts) : LAST_ADJUST_TS;
+    TP_SL_ADJUSTED_4H = Boolean(data.tp_sl_adjusted_4h);
+    FUNDING_NEXT_TS = Number.isFinite(Number(data.funding_next_ts)) ? Number(data.funding_next_ts) : FUNDING_NEXT_TS;
+    BREAK_EVEN_ACTIVE = Boolean(data.break_even_active);
+    BREAK_EVEN_TARGET = Number.isFinite(Number(data.break_even_target)) ? Number(data.break_even_target) : BREAK_EVEN_TARGET;
+    BREAK_EVEN_TS = Number.isFinite(Number(data.break_even_ts)) ? Number(data.break_even_ts) : BREAK_EVEN_TS;
+    if (Array.isArray(data.close_hits)) {
+      CLOSE_HITS = data.close_hits
+        .map((h) => ({
+          reason: String((h && h.reason) || "").toUpperCase(),
+          price: Number.isFinite(Number(h && h.price)) ? Number(h.price) : 0,
+          ts: Number.isFinite(Number(h && h.ts)) ? Number(h.ts) : 0,
+        }))
+        .filter((h) => h.reason === "TP" || h.reason === "SL")
+        .sort((a, b) => b.ts - a.ts)
+        .slice(0, 10);
+    }
+
+    const ageMin = dataAge > 60 ? ` (${Math.floor(dataAge / 60)}m前)` : "";
+    LAST_POSITION_SOURCE = `${sourceLabel || "URL 參數"}${ageMin}`;
+    return true;
+  }
+
+  function scheduleRealtimeReconnect() {
+    if (!REMOTE_WS_URL || realtimeReconnectTimer) return;
+    realtimeReconnectTimer = setTimeout(() => {
+      realtimeReconnectTimer = null;
+      connectRealtimeSocket();
+    }, WS_RECONNECT_DELAY_MS);
+  }
+
+  function connectRealtimeSocket() {
+    if (!REMOTE_WS_URL || typeof WebSocket !== "function") return;
+    if (realtimeSocket && (realtimeSocket.readyState === WebSocket.OPEN || realtimeSocket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    const wsUrl = REMOTE_WS_URL + (REMOTE_WS_URL.includes("?") ? "&" : "?") + "v=" + encodeURIComponent(APP_VERSION);
+    realtimeSocket = new WebSocket(wsUrl);
+
+    realtimeSocket.onopen = () => {
+      realtimeSocketConnected = true;
+      LAST_POSITION_SOURCE = "Realtime WS";
+    };
+
+    realtimeSocket.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data);
+        if (!payload || typeof payload !== "object") return;
+        if (payload.type === "ping") return;
+        const data = payload.type === "position" ? payload.data : payload;
+        if (applyPositionPayload(data, "Realtime WS")) {
+          render();
+        }
+      } catch (_) {}
+    };
+
+    realtimeSocket.onerror = () => {};
+
+    realtimeSocket.onclose = () => {
+      realtimeSocketConnected = false;
+      realtimeSocket = null;
+      scheduleRealtimeReconnect();
+    };
+  }
+
+  async function fetchPositionData() {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const freshWsState = realtimeSocketConnected && LAST_POSITION_TS > 0 && (nowSec - LAST_POSITION_TS) <= EXCHANGE_PNL_FRESH_SEC;
+
+    if (REMOTE_STATE_URL && !freshWsState) {
+      const remoteUrl = REMOTE_STATE_URL + (REMOTE_STATE_URL.includes("?") ? "&" : "?") + "t=" + Date.now();
+      const remoteData = await fetchJsonWithTimeout(remoteUrl, POSITION_FETCH_TIMEOUT_MS);
+      if (remoteData && applyPositionPayload(remoteData, "Realtime API")) {
+        return;
+      }
+    }
+
+    const fetchTasks = POSITION_JSON_URLS.map((base) => {
+      const url = base + (base.includes("?") ? "&" : "?") + "t=" + Date.now();
+      return fetchJsonWithTimeout(url, POSITION_FETCH_TIMEOUT_MS)
+        .then((data) => {
+          if (!data) return null;
+          const tsNum = Number(data.ts);
+          const ts = Number.isFinite(tsNum) ? tsNum : 0;
+          return { base, data, ts };
+        })
+        .catch(() => null);
+    });
+    const candidates = (await Promise.all(fetchTasks)).filter((x) => x && x.data);
+
+    if (!candidates.length) {
+      // 全部失敗：保留原本 URL 參數作為最後備援
+      return;
+    }
+
+    // 選擇時間戳最新的那份，避免先命中舊快取就鎖死資料。
+    candidates.sort((a, b) => b.ts - a.ts);
+    const picked = candidates[0];
+    const data = picked.data;
+
+    applyPositionPayload(data, picked.base);
+  }
+
   // ── 取得即時價格 ──
   async function fetchPrice() {
+    const data = await fetchJsonWithTimeout(
+      `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${PAIR}`,
+      PRICE_FETCH_TIMEOUT_MS
+    );
+    if (!data) return;
+    const px = parseFloat(data.price || 0);
+    if (Number.isFinite(px) && px > 0) {
+      livePrice = px;
+    }
+  }
+
+  // ── 同時更新倉位資料與即時價格 ──
+  async function refresh() {
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return;
+    }
+    refreshInFlight = true;
     try {
-      const res = await fetch(
-        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${PAIR}`
-      );
-      const data = await res.json();
-      livePrice = parseFloat(data.price || 0);
-    } catch (_) {}
-    render();
+      await Promise.all([fetchPositionData(), fetchPrice()]);
+      render();
+    } finally {
+      refreshInFlight = false;
+      if (refreshQueued) {
+        refreshQueued = false;
+        void refresh();
+      }
+    }
   }
 
   // ── 計算未實現盈虧 ──
   function calcPnl(live) {
-    if (!live || !ENTRY) return { pct: 0, usdt: 0 };
+    const livePx = (Number.isFinite(Number(live)) && Number(live) > 0)
+      ? Number(live)
+      : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : 0);
+    if (!livePx || !ENTRY) {
+      return {
+        gross_pct: 0,
+        gross_usdt: 0,
+        shown_pct: 0,
+        shown_usdt: 0,
+        net_pct: 0,
+        net_usdt: 0,
+        cost_usdt: 0,
+        total_cost_rate: 0,
+        source: "estimate",
+      };
+    }
     const raw = DIR === "long"
-      ? (live - ENTRY) / ENTRY
-      : (ENTRY - live) / ENTRY;
-    const pct  = raw * LEV * 100;
-    const usdt = raw * ENTRY * (SIZE / 100);
-    return { pct, usdt };
+      ? (livePx - ENTRY) / ENTRY
+      : (ENTRY - livePx) / ENTRY;
+    const notional = POSITION_NOTIONAL_USDT > 0
+      ? POSITION_NOTIONAL_USDT
+      : (BINANCE_QTY > 0
+        ? Math.max(0, BINANCE_QTY * livePx)
+        : (POSITION_MARGIN_USDT > 0
+          ? Math.max(0, POSITION_MARGIN_USDT * Math.max(1, LEV))
+          : Math.max(0, ENTRY * (SIZE / 100))));
+    const margin = POSITION_MARGIN_USDT > 0 ? POSITION_MARGIN_USDT : (notional > 0 ? notional / Math.max(1, LEV) : 0);
+    const gross_usdt = raw * notional;
+    const gross_pct = margin > 0 ? (gross_usdt / margin) * 100 : raw * LEV * 100;
+    const hasExchangePnl = Number.isFinite(BINANCE_UNREALIZED_PNL_USDT);
+    const useExchangePnl = hasExchangePnl;
+    const shown_usdt = useExchangePnl ? BINANCE_UNREALIZED_PNL_USDT : gross_usdt;
+    const shown_pct = margin > 0 ? (shown_usdt / margin) * 100 : gross_pct;
+
+    const total_cost_rate = Math.max(0, ROUND_TRIP_FEE_RATE) + Math.max(0, FUNDING_COST_RATE_EST);
+    const cost_usdt = notional * total_cost_rate;
+    const net_usdt = shown_usdt - cost_usdt;
+    const net_pct = margin > 0 ? (net_usdt / margin) * 100 : shown_pct;
+    return {
+      gross_pct,
+      gross_usdt,
+      shown_pct,
+      shown_usdt,
+      net_pct,
+      net_usdt,
+      cost_usdt,
+      total_cost_rate,
+      source: useExchangePnl ? "binance" : "estimate_live",
+    };
+  }
+
+  function fmt_size(n) {
+    const v = Number(n);
+    if (!Number.isFinite(v)) return "0.0";
+    return v.toFixed(1);
+  }
+
+  function triggerManualClose() {
+    if (!(window.Telegram && window.Telegram.WebApp && Telegram.WebApp.sendData)) {
+      if (window.alert) alert("請在 Telegram 內開啟此面板，才能使用手動平倉。");
+      return;
+    }
+    const payload = {
+      action: "manual_close",
+      source: "mini_app",
+      ts: Date.now(),
+    };
+    try {
+      Telegram.WebApp.sendData(JSON.stringify(payload));
+      if (Telegram.WebApp.showAlert) {
+        Telegram.WebApp.showAlert("已送出手動平倉請求，請稍候 Bot 回覆。");
+      }
+    } catch (_) {
+      if (window.alert) alert("手動平倉請求送出失敗，請稍後再試。");
+    }
+  }
+
+  function closePanel() {
+    if (window.Telegram && window.Telegram.WebApp && Telegram.WebApp.close) {
+      Telegram.WebApp.close();
+      return;
+    }
+    if (window.history && history.length > 1) {
+      history.back();
+    }
   }
 
   // ── 判斷 SL 是否已觸發 ──
@@ -257,6 +897,41 @@
     return (n >= 0 ? "+" : "") + n.toFixed(2);
   }
 
+  function fmt_rate(rate, dec = 3) {
+    const v = Number(rate);
+    if (!Number.isFinite(v)) return "-";
+    return `${(v * 100).toFixed(dec)}%`;
+  }
+
+  function calcTotalAssetsUsdt() {
+    const candidates = [
+      Number(BINANCE_TOTAL_ASSETS_USDT),
+      Number(BINANCE_SPOT_TOTAL_ASSETS_USDT) + Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT),
+      Number(ACCOUNT_MARGIN_BALANCE_USDT),
+      Number(ACCOUNT_WALLET_BALANCE_USDT),
+      Number(ACCOUNT_AVAILABLE_BALANCE_USDT),
+    ];
+    for (const value of candidates) {
+      if (Number.isFinite(value) && value > 0) return value;
+    }
+    return 0;
+  }
+
+  function buildAssetSubtext() {
+    const spotAssets = Number.isFinite(Number(BINANCE_SPOT_TOTAL_ASSETS_USDT)) ? Number(BINANCE_SPOT_TOTAL_ASSETS_USDT) : 0;
+    const futuresAssets = Number.isFinite(Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT)) && Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT) > 0
+      ? Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT)
+      : (Number.isFinite(Number(ACCOUNT_MARGIN_BALANCE_USDT)) ? Number(ACCOUNT_MARGIN_BALANCE_USDT) : 0);
+    if (spotAssets > 0 || futuresAssets > 0) {
+      return `現貨 ${fmt(spotAssets)} ｜ 合約 ${fmt(futuresAssets)}`;
+    }
+    return `錢包 ${fmt(ACCOUNT_WALLET_BALANCE_USDT)} ｜ 可用 ${fmt(ACCOUNT_AVAILABLE_BALANCE_USDT)}`;
+  }
+
+  function clamp(v, min, max) {
+    return Math.min(Math.max(v, min), max);
+  }
+
   function now_str() {
     const d = new Date();
     const hh = String(d.getHours()).padStart(2, "0");
@@ -265,9 +940,201 @@
     return `${hh}:${mm}:${ss}`;
   }
 
+  function ts_str(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    const d = new Date(n * 1000);
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const ss = String(d.getSeconds()).padStart(2, "0");
+    return `${hh}:${mm}:${ss}`;
+  }
+
+  function ts_full_str(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    const d = new Date(n * 1000);
+    const mon = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${mon}/${day} ${hh}:${mm}`;
+  }
+
+  function fmt_elapsed(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    const diff = Math.max(0, Math.floor(Date.now() / 1000) - n);
+    const days = Math.floor(diff / 86400);
+    const hours = Math.floor((diff % 86400) / 3600);
+    const mins = Math.floor((diff % 3600) / 60);
+    if (days > 0) return `${days}d ${hours}h`;
+    if (hours > 0) return `${hours}h ${mins}m`;
+    return `${mins}m`;
+  }
+
+  function fmt_countdown(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return "-";
+    const diff = Math.floor(n - Date.now() / 1000);
+    if (diff <= 0) return "已到期";
+    const hours = Math.floor(diff / 3600);
+    const mins = Math.floor((diff % 3600) / 60);
+    if (hours > 0) return `${hours}h ${mins}m`;
+    return `${mins}m`;
+  }
+
+  function calcTradePlanStats(live) {
+    if (!ENTRY || !TP || !SL) {
+      return {
+        rr: 0,
+        riskRate: 0,
+        rewardRate: 0,
+        roomToTpRate: 0,
+        bufferToSlRate: 0,
+        planProgress: 0,
+      };
+    }
+
+    const isLong = DIR === "long";
+    const livePx = (Number.isFinite(Number(live)) && Number(live) > 0)
+      ? Number(live)
+      : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : ENTRY);
+    const riskRate = isLong
+      ? Math.max((ENTRY - SL) / ENTRY, 0)
+      : Math.max((SL - ENTRY) / ENTRY, 0);
+    const rewardRate = isLong
+      ? Math.max((TP - ENTRY) / ENTRY, 0)
+      : Math.max((ENTRY - TP) / ENTRY, 0);
+    const roomToTpRate = livePx > 0
+      ? (isLong ? Math.max((TP - livePx) / livePx, 0) : Math.max((livePx - TP) / livePx, 0))
+      : 0;
+    const bufferToSlRate = livePx > 0
+      ? (isLong ? Math.max((livePx - SL) / livePx, 0) : Math.max((SL - livePx) / livePx, 0))
+      : 0;
+    const rr = rewardRate / Math.max(riskRate, 1e-9);
+
+    let planProgress = 0.5;
+    if (isLong && TP > SL) {
+      planProgress = clamp((livePx - SL) / (TP - SL), 0, 1);
+    } else if (!isLong && SL > TP) {
+      planProgress = clamp((SL - livePx) / (SL - TP), 0, 1);
+    }
+
+    return {
+      rr,
+      riskRate,
+      rewardRate,
+      roomToTpRate,
+      bufferToSlRate,
+      planProgress,
+    };
+  }
+
+  function renderMetricCard(label, value, sub = "") {
+    return `
+      <div class="metric-card">
+        <div class="metric-label">${label}</div>
+        <div class="metric-value">${value}</div>
+        ${sub ? `<div class="metric-sub">${sub}</div>` : ""}
+      </div>`;
+  }
+
+  function renderCloseHits() {
+    if (!Array.isArray(CLOSE_HITS) || CLOSE_HITS.length === 0) {
+      return `
+  <div class="hit-history">
+    <div class="hit-history-title">最近 TP / SL 命中</div>
+    <div style="font-size:12px;color:#777;">目前尚無歷史命中紀錄</div>
+  </div>`;
+    }
+
+    const rows = CLOSE_HITS.map((h) => {
+      const cls = h.reason === "TP" ? "tp" : "sl";
+      const label = h.reason === "TP" ? "TP 命中" : "SL 命中";
+      const priceText = h.price > 0 ? fmt(h.price) : "-";
+      return `
+    <div class="hit-item">
+      <div class="hit-left ${cls}">${label}</div>
+      <div class="hit-right">${ts_str(h.ts)} ｜ ${priceText}</div>
+    </div>`;
+    }).join("");
+
+    return `
+  <div class="hit-history">
+    <div class="hit-history-title">最近 TP / SL 命中</div>
+    ${rows}
+  </div>`;
+  }
+
+  function renderTotalAssetsHero(totalAssetsUsdt) {
+    const spotAssets = Number.isFinite(Number(BINANCE_SPOT_TOTAL_ASSETS_USDT)) ? Number(BINANCE_SPOT_TOTAL_ASSETS_USDT) : 0;
+    const futuresAssets = Number.isFinite(Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT))
+      ? Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT)
+      : (Number.isFinite(Number(ACCOUNT_MARGIN_BALANCE_USDT)) ? Number(ACCOUNT_MARGIN_BALANCE_USDT) : 0);
+    const walletAssets = Number.isFinite(Number(ACCOUNT_WALLET_BALANCE_USDT)) ? Number(ACCOUNT_WALLET_BALANCE_USDT) : 0;
+    return `
+  <div class="asset-hero">
+    <div class="asset-hero-title">Binance 總資產</div>
+    <div class="asset-hero-value">${fmt(totalAssetsUsdt)} USDT</div>
+    <div class="asset-hero-sub">現貨 ${fmt(spotAssets)} ｜ 合約 ${fmt(futuresAssets)} ｜ 錢包 ${fmt(walletAssets)} ｜ 可用 ${fmt(ACCOUNT_AVAILABLE_BALANCE_USDT)}</div>
+  </div>`;
+  }
+
   // ── 渲染 UI ──
   function render() {
-    const live = livePrice;
+    const totalAssetsUsdt = calcTotalAssetsUsdt();
+    const assetSubtext = buildAssetSubtext();
+
+    // 已平倉：顯示簡單的已平倉面板
+    if (!POSITION_OPEN) {
+      const lastDir = DIR === "long" ? "多單" : "空單";
+      const hitClass = LAST_CLOSE_REASON === "TP" ? "tp" : (LAST_CLOSE_REASON === "SL" ? "sl" : "");
+      const hitText = LAST_CLOSE_REASON === "TP"
+        ? "✅ 止盈命中"
+        : (LAST_CLOSE_REASON === "SL" ? "❌ 止損命中" : "📋 已平倉");
+      const closePriceText = LAST_CLOSE_PRICE > 0 ? fmt(LAST_CLOSE_PRICE) : "-";
+      const closeCandleText = (LAST_CLOSE_CANDLE_HIGH > 0 && LAST_CLOSE_CANDLE_LOW > 0)
+        ? `${fmt(LAST_CLOSE_CANDLE_HIGH)} / ${fmt(LAST_CLOSE_CANDLE_LOW)}`
+        : "-";
+      document.getElementById("app").outerHTML = `
+<div id="app">
+  <div class="header">
+    <div class="pair-info">
+      <div class="eth-icon">◆</div>
+      <div>
+        <div class="pair-name">${PAIR}</div>
+        <div class="pair-sub">永續合約 · ${LEV}x · Binance 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
+      </div>
+    </div>
+    <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
+  </div>
+  ${renderTotalAssetsHero(totalAssetsUsdt)}
+  <div class="card" style="text-align:center;padding:32px 16px;">
+    <div class="close-hit ${hitClass}">${hitText}</div>
+    <div style="font-size:32px;margin-bottom:12px;">📋</div>
+    <div style="font-size:16px;font-weight:700;margin-bottom:6px;">目前無持倉</div>
+    <div style="font-size:13px;color:#888;">平倉價：${closePriceText}</div>
+    <div style="font-size:12px;color:#777;margin-top:4px;">1m 高/低：${closeCandleText}</div>
+    <div style="font-size:12px;color:#777;margin-top:4px;">命中時間：${ts_str(LAST_CLOSE_TS)}</div>
+  </div>
+  <div class="card">
+    <div class="card-title">上一筆設定</div>
+    <div class="section-grid">
+      ${renderMetricCard("Binance 總資產", `${fmt(totalAssetsUsdt)} USDT`, assetSubtext)}
+      ${renderMetricCard("方向", lastDir, `槓桿 ${LEV}x`)}
+      ${renderMetricCard("進場 / BE", `${ENTRY > 0 ? fmt(ENTRY) : "-"} / ${BINANCE_BREAK_EVEN_PRICE > 0 ? fmt(BINANCE_BREAK_EVEN_PRICE) : "-"}`)}
+      ${renderMetricCard("TP / SL", `${TP > 0 ? fmt(TP) : "-"} / ${SL > 0 ? fmt(SL) : "-"}`)}
+      ${renderMetricCard("成本估算", `${fmt_rate(TOTAL_COST_RATE_EST || (ROUND_TRIP_FEE_RATE + FUNDING_COST_RATE_EST), 3)}`, `手續費 ${fmt_rate(ROUND_TRIP_FEE_RATE, 3)} ｜ 資金費 ${fmt_rate(FUNDING_COST_RATE_EST, 3)}`)}
+    </div>
+  </div>
+  ${renderCloseHits()}
+  <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
+</div>`;
+      return;
+    }
+
+    const live = livePrice > 0 ? livePrice : BINANCE_MARK_PRICE;
     const pnl  = calcPnl(live);
     const sl_off = slTriggered(live);
     const isLong  = DIR === "long";
@@ -275,10 +1142,28 @@
     const dirLabel = isLong ? "多單 ↑" : "空單 ↓";
     const dirClass = isLong ? "long" : "short";
 
-    const pnlClass  = pnl.pct >= 0 ? "profit" : "loss";
+    const pnlClass  = pnl.shown_pct >= 0 ? "profit" : "loss";
 
     const liveDiff  = live ? live - ENTRY : 0;
     const liveDiffStr = `${liveDiff >= 0 ? "↑" : "↓"} ${Math.abs(liveDiff).toFixed(2)} (${(liveDiff / ENTRY * 100).toFixed(2)}%)`;
+    const plan = calcTradePlanStats(live);
+    const capitalUsagePct = Number.isFinite(Number(SIZE)) ? Number(SIZE) : 0;
+    const maxSizePct = Math.max(0, Number(MAX_SIZE) * 100);
+    const minSizePct = Math.max(0, Number(MIN_SIZE) * 100);
+    const sizeBarBase = Math.max(maxSizePct, capitalUsagePct, 1);
+    const sizeBarWidth = clamp((capitalUsagePct / sizeBarBase) * 100, 0, 100);
+    const qtyEstimate = BINANCE_QTY > 0
+      ? BINANCE_QTY
+      : (live > 0 && POSITION_NOTIONAL_USDT > 0 ? POSITION_NOTIONAL_USDT / live : 0);
+    const sizePressure = maxSizePct > 0 ? capitalUsagePct / maxSizePct : 0;
+    const scaleTone = sizePressure > 1.02 ? "bad" : (sizePressure > 0.85 ? "warn" : "good");
+    const planTone = plan.rr >= 1.5 ? "good" : (plan.rr >= 1.1 ? "warn" : "bad");
+    const adjustText = LAST_ADJUST_TS > 0 ? `${ts_full_str(LAST_ADJUST_TS)} (${fmt_elapsed(LAST_ADJUST_TS)}前)` : "尚未調倉";
+    const totalCostRate = TOTAL_COST_RATE_EST || (ROUND_TRIP_FEE_RATE + FUNDING_COST_RATE_EST);
+    const fundingText = FUNDING_NEXT_TS > 0 ? `${ts_full_str(FUNDING_NEXT_TS)} ｜ ${fmt_countdown(FUNDING_NEXT_TS)}` : "-";
+    const breakEvenText = BREAK_EVEN_ACTIVE
+      ? `${BREAK_EVEN_TARGET > 0 ? fmt(BREAK_EVEN_TARGET) : fmt(SL)}${BREAK_EVEN_TS > 0 ? ` ｜ ${ts_full_str(BREAK_EVEN_TS)}` : ""}`
+      : "待命";
 
     document.getElementById("app").outerHTML = `
 <div id="app">
@@ -288,11 +1173,13 @@
       <div class="eth-icon">◆</div>
       <div>
         <div class="pair-name">${PAIR}</div>
-        <div class="pair-sub">永續合約 · ${LEV}x</div>
+        <div class="pair-sub">永續合約 · ${LEV}x · Binance 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
       </div>
     </div>
     <div class="badge-open">● 持倉中</div>
   </div>
+
+  ${renderTotalAssetsHero(totalAssetsUsdt)}
 
   <!-- Direction + Size -->
   <div class="card">
@@ -303,11 +1190,25 @@
       </div>
       <div style="text-align:right">
         <div class="label">目前倉位</div>
-        <div class="size-val">${SIZE}.00%</div>
+        <div class="size-val">${fmt_size(SIZE)}%</div>
       </div>
     </div>
     <div class="progress-wrap">
-      <div class="progress-bar" style="width:${Math.min(SIZE, 100)}%"></div>
+      <div class="progress-bar" style="width:${sizeBarWidth}%"></div>
+    </div>
+    <div class="size-summary">
+      <span>資金使用 <strong>${fmt_size(capitalUsagePct)}%</strong></span>
+      <span>調倉區間 <strong>${fmt_size(minSizePct)}% - ${fmt_size(maxSizePct)}%</strong></span>
+    </div>
+    <div class="section-grid">
+      ${renderMetricCard("持倉名義價值", POSITION_NOTIONAL_USDT > 0 ? `${fmt(POSITION_NOTIONAL_USDT)} USDT` : "-", POSITION_MARGIN_USDT > 0 ? `保證金 ${fmt(POSITION_MARGIN_USDT)} USDT` : "")}
+      ${renderMetricCard("Binance 總資產", `${fmt(totalAssetsUsdt)} USDT`, assetSubtext)}
+      ${renderMetricCard(BINANCE_QTY > 0 ? "實際持倉數量" : "推估持倉數量", qtyEstimate > 0 ? `${qtyEstimate.toFixed(4)} ETH` : "-", `開倉 ${fmt_elapsed(OPEN_SINCE_TS)} ｜ 槓桿 ${LEV}x`)}
+    </div>
+    <div class="status-row">
+      <span class="status-chip ${scaleTone}">倉位壓力 ${maxSizePct > 0 ? `${(sizePressure * 100).toFixed(0)}% of max` : "-"}</span>
+      <span class="status-chip ${TP_SL_ADJUSTED_4H ? "warn" : "info"}">${TP_SL_ADJUSTED_4H ? "已縮 TP" : "原始 TP"}</span>
+      <span class="status-chip info">最近調倉 ${adjustText}</span>
     </div>
   </div>
 
@@ -319,6 +1220,15 @@
         <div class="price-entry">${fmt(ENTRY)}</div>
       </div>
       <div class="price-block">
+        <div class="label">Break-even</div>
+        <div class="price-entry" style="font-size:16px;">${BINANCE_BREAK_EVEN_PRICE > 0 ? fmt(BINANCE_BREAK_EVEN_PRICE) : "─"}</div>
+        <div style="font-size:11px;color:#888;margin-top:2px">
+          ${live && BINANCE_BREAK_EVEN_PRICE > 0 ? (isLong
+            ? `距 BE ${(Math.abs((live - BINANCE_BREAK_EVEN_PRICE) / BINANCE_BREAK_EVEN_PRICE) * 100).toFixed(2)}%`
+            : `距 BE ${(Math.abs((BINANCE_BREAK_EVEN_PRICE - live) / BINANCE_BREAK_EVEN_PRICE) * 100).toFixed(2)}%`) : ""}
+        </div>
+      </div>
+      <div class="price-block">
         <div class="label">現價</div>
         <div class="live-wrap">
           <span class="live-badge">LIVE</span>
@@ -328,30 +1238,75 @@
       </div>
       <div class="pnl-block">
         <div class="label">未實現盈虧</div>
-        <div class="pnl-pct ${pnlClass}">${live ? fmt_signed(pnl.pct) + "%" : "─"}</div>
-        <div class="pnl-usdt ${pnlClass}">${live ? fmt_signed(pnl.usdt) + " USDT" : ""}</div>
+        <div class="pnl-pct ${pnlClass}">${live ? fmt_signed(pnl.shown_pct) + "%" : "─"}</div>
+        <div class="pnl-usdt ${pnlClass}">${live ? fmt_signed(pnl.shown_usdt) + " USDT" : ""}</div>
+        <div style="font-size:11px;color:#888;margin-top:2px">
+          ${live ? (pnl.source === "binance"
+            ? `交易所盈虧 ${fmt_signed(pnl.shown_usdt)} | 成本後 ${fmt_signed(pnl.net_usdt)}`
+            : `即時估算 ${fmt_signed(pnl.gross_usdt)} | 成本後 ${fmt_signed(pnl.net_usdt)}`) : ""}
+        </div>
       </div>
+    </div>
+    <div class="divider"></div>
+    <div class="section-grid">
+      ${renderMetricCard("毛盈虧", `${fmt_signed(pnl.shown_pct)}%`, `${fmt_signed(pnl.shown_usdt)} USDT ｜ ${pnl.source === "binance" ? "交易所回報" : "前端估算"}`)}
+      ${renderMetricCard("成本後盈虧", `${fmt_signed(pnl.net_pct)}%`, `${fmt_signed(pnl.net_usdt)} USDT ｜ 成本 -${pnl.cost_usdt.toFixed(2)} USDT`)}
     </div>
   </div>
 
   <!-- TP / SL -->
-  <div class="tp-sl-row">
-    <div class="tp-box">
-      <div class="tp-header">
-        <span class="tp-icon">🎯</span>
-        <span class="tp-label">止盈 (TP)</span>
+  <div class="card">
+    <div class="card-title">交易計畫</div>
+    <div class="tp-sl-row">
+      <div class="tp-box">
+        <div class="tp-header">
+          <span class="tp-icon">🎯</span>
+          <span class="tp-label">止盈 (TP)</span>
+        </div>
+        <div class="tp-val">${fmt(TP)}</div>
+        <div style="font-size:11px;color:#888;">剩餘空間 ${fmt_rate(plan.roomToTpRate, 2)}</div>
       </div>
-      <div class="tp-val">${fmt(TP)}</div>
+      <div class="sl-box">
+        <div class="tp-header">
+          <span class="tp-icon">🛑</span>
+          <span class="tp-label">止損 (SL)</span>
+        </div>
+        <div class="tp-val">${fmt(SL)}</div>
+        <div class="sl-status ${sl_off ? "sl-triggered" : "sl-active"}">
+          ${sl_off ? "⚠️ 已觸發" : `✅ 緩衝 ${fmt_rate(plan.bufferToSlRate, 2)}`}
+        </div>
+      </div>
     </div>
-    <div class="sl-box">
-      <div class="tp-header">
-        <span class="tp-icon">🛑</span>
-        <span class="tp-label">止損 (SL)</span>
-      </div>
-      <div class="tp-val">${fmt(SL)}</div>
-      <div class="sl-status ${sl_off ? "sl-triggered" : "sl-active"}">
-        ${sl_off ? "⚠️ 已觸發" : "✅ 監控中"}
-      </div>
+    <div class="section-grid">
+      ${renderMetricCard("計畫 RR", `${plan.rr ? plan.rr.toFixed(2) : "-"}`, `風險 ${fmt_rate(plan.riskRate, 2)} ｜ 報酬 ${fmt_rate(plan.rewardRate, 2)}`)}
+      ${renderMetricCard("BE / 即時價差", BINANCE_BREAK_EVEN_PRICE > 0 ? `${fmt(BINANCE_BREAK_EVEN_PRICE)}` : "-", live ? liveDiffStr : "")}
+    </div>
+    <div class="range-track">
+      <div class="range-fill"></div>
+      <div class="range-marker" style="left:${(plan.planProgress * 100).toFixed(2)}%"></div>
+    </div>
+    <div class="range-labels">
+      <span>SL ${fmt(SL)}</span>
+      <span>進場 ${fmt(ENTRY)}</span>
+      <span>TP ${fmt(TP)}</span>
+    </div>
+    <div class="status-row">
+      <span class="status-chip ${planTone}">計畫品質 RR ${plan.rr ? plan.rr.toFixed(2) : "-"}</span>
+      <span class="status-chip ${sl_off ? "bad" : "good"}">${sl_off ? "止損區已碰觸" : "止損仍有緩衝"}</span>
+      <span class="status-chip ${BREAK_EVEN_ACTIVE ? "good" : "info"}">自動保本 ${breakEvenText}</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">調倉與成本</div>
+    <div class="section-grid">
+      ${renderMetricCard("補倉 / 減倉次數", `${ADD_COUNT} / ${REDUCE_COUNT}`, `下限 ${fmt_size(minSizePct)}% ｜ 上限 ${fmt_size(maxSizePct)}%`)}
+      ${renderMetricCard("最近調整", LAST_ADJUST_TS > 0 ? ts_full_str(LAST_ADJUST_TS) : "-", LAST_ADJUST_TS > 0 ? `${fmt_elapsed(LAST_ADJUST_TS)}前` : "尚未補/減倉")}
+      ${renderMetricCard("手續費 / 資金費", `${fmt_rate(ROUND_TRIP_FEE_RATE, 3)} / ${fmt_rate(FUNDING_COST_RATE_EST, 3)}`, `Funding ${fmt_rate(FUNDING_RATE, 4)} ｜ 評估 ${COST_EVAL_HOLD_HOURS.toFixed(1)}h`)}
+      ${renderMetricCard("總成本估算", fmt_rate(totalCostRate, 3), `Next funding ${fundingText}`)}
+    </div>
+    <div class="section-note">
+      成本後盈虧已把手續費與持倉期間資金費估算納入。若交易所未回傳最新盈虧，前端會退回即時估算。
     </div>
   </div>
 
@@ -360,13 +1315,29 @@
     <span>盈利增加 → 紅色</span>｜<span>觸發止損 → 綠色</span>
   </div>
 
-  <div class="update-time">最後更新：${now_str()}</div>
+  <div class="action-row">
+    <button class="close-btn" onclick="triggerManualClose()">手動平倉</button>
+    <button class="panel-btn" onclick="closePanel()">關閉面板</button>
+  </div>
+
+  ${renderCloseHits()}
+
+  <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
   }
 
   // ── 啟動 ──
-  fetchPrice();
-  setInterval(fetchPrice, 3000);
+  connectRealtimeSocket();
+  refresh();
+  setInterval(refresh, PANEL_REFRESH_INTERVAL_MS);
+
+  // 頁面重新可見時（從背景切回）立刻刷新
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      LAST_POSITION_TS = 0;  // 重置以強制重取最新資料
+      refresh();
+    }
+  });
 </script>
 </body>
 </html>
