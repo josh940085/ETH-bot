@@ -1,0 +1,10 @@
+.git
+.gitignore
+.DS_Store
+.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.tmp
+news_predictions.jsonl.1

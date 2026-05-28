@@ -5,4 +5,7 @@ __pycache__/
 *.pyc
 *.pkl
 *.jsonl
-.telegram_state.json
+program.log
+supervisord.log
+supervisord.pid
+.supervisor.sock

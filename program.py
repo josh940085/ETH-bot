@@ -1,180 +1,341 @@
 #!/usr/bin/env python3
+import atexit
+import datetime
+import json
 import os
 import signal
 import subprocess
 import sys
 import time
-import json
-import requests
-from pathlib import Path
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+from telegram import (
+    REPO_DIR,
+    ai_data_path,
+    configure_token,
+    consume_restart_request,
+    data_path,
+    load_local_env,
+    poll_telegram_commands,
+)
 
-REPO_DIR = Path(__file__).resolve().parent
 ETH_FILE = REPO_DIR / "eth.py"
-TELEGRAM_STATE_FILE = REPO_DIR / ".telegram_state.json"
+BACKTEST_FILE = REPO_DIR / "backtest.py"
+MAINTENANCE_FILE = REPO_DIR / "maintenance.py"
 RESTART_DELAY_SEC = 2
 SUPERVISOR_RESTART_EXIT_CODE = 75
-TELEGRAM_TOKEN = ""
+SUPERVISOR_STOP_EXIT_CODE = 76
 POLL_INTERVAL_SEC = 1
+BACKTEST_SUMMARY_PATH = data_path("backtest_latest_summary.json")
+BACKTEST_TRADES_PATH = data_path("backtest_latest_trades.csv")
+BACKTEST_LEARN_PATH = ai_data_path("backtest_ai_data.csv")
+MAINTENANCE_REPORT_PATH = data_path("maintenance_latest_report.json")
+SUPERVISOR_LOCK_PATH = data_path(".program_supervisor.lock")
+SUPERVISOR_LOCK_FH = None
 
 
-def load_local_env():
-    """Load .env without extra dependency."""
-    env_path = REPO_DIR / ".env"
-    if not env_path.exists():
-        return
-
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
-
-
-def _load_telegram_state() -> dict:
-    if not TELEGRAM_STATE_FILE.exists():
-        return {}
-
-    try:
-        payload = json.loads(TELEGRAM_STATE_FILE.read_text(encoding="utf-8"))
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
-
-
-def _save_telegram_state(payload: dict):
-    try:
-        TELEGRAM_STATE_FILE.write_text(
-            json.dumps(payload, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception as e:
-        print(f"⚠️ 寫入 telegram state 失敗: {e}")
-
-
-def _append_pending_command(chat_id, text, update_id):
-    payload = _load_telegram_state()
-    queue = payload.get("pending_commands")
-    if not isinstance(queue, list):
-        queue = []
-
-    queue.append(
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "update_id": int(update_id),
-            "ts": int(time.time()),
-        }
+def _run_git_command(args, timeout=60):
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(REPO_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout,
+        check=False,
     )
-    payload["pending_commands"] = queue[-50:]
-    payload["last_update_id"] = int(update_id)
-    _save_telegram_state(payload)
 
 
-def _set_restart_requested(update_id):
-    payload = _load_telegram_state()
-    payload["restart_requested"] = True
-    payload["restart_requested_at"] = int(time.time())
-    payload["last_update_id"] = int(update_id)
-    _save_telegram_state(payload)
+def _get_sync_target():
+    upstream = _run_git_command(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        timeout=10,
+    )
+    ref = (upstream.stdout or "").strip()
+    if upstream.returncode == 0 and "/" in ref:
+        remote, branch = ref.split("/", 1)
+        return remote, branch
 
+    branch_result = _run_git_command(["branch", "--show-current"], timeout=10)
+    branch = (branch_result.stdout or "").strip()
+    if branch:
+        return "origin", branch
 
-def _telegram_send_message(chat_id, text):
-    if not TELEGRAM_TOKEN or chat_id is None:
-        return
-
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            data={"chat_id": chat_id, "text": text},
-            timeout=5,
-        )
-    except Exception:
-        pass
-
-
-def poll_telegram_commands():
-    if not TELEGRAM_TOKEN:
-        return
-
-    payload = _load_telegram_state()
-    last_update_id = payload.get("last_update_id")
-
-    params = {"timeout": 1}
-    if last_update_id is not None:
-        try:
-            params["offset"] = int(last_update_id) + 1
-        except Exception:
-            pass
-
-    try:
-        res = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
-            params=params,
-            timeout=5,
-        )
-        updates = res.json().get("result", [])
-    except Exception:
-        updates = []
-
-    for u in updates:
-        update_id = u.get("update_id")
-        msg = u.get("message", {})
-        text = msg.get("text", "")
-        chat_id = msg.get("chat", {}).get("id")
-
-        if update_id is None:
-            continue
-
-        if not text:
-            payload = _load_telegram_state()
-            payload["last_update_id"] = int(update_id)
-            _save_telegram_state(payload)
-            continue
-
-        if text.startswith("/restart"):
-            _set_restart_requested(update_id)
-            _telegram_send_message(chat_id, "♻️ 已收到 /restart，將由啟動器同步並重啟。")
-            continue
-
-        _append_pending_command(chat_id, text, update_id)
-
-
-def consume_restart_request() -> bool:
-    payload = _load_telegram_state()
-    if not payload.get("restart_requested"):
-        return False
-
-    payload["restart_requested"] = False
-    payload["restart_requested_at"] = int(time.time())
-    _save_telegram_state(payload)
-    return True
+    return None
 
 
 def sync_repo() -> bool:
     try:
-        result = subprocess.run(
-            ["git", "pull", "--ff-only", "origin", "main"],
-            cwd=str(REPO_DIR),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=60,
-            check=False,
-        )
+        target = _get_sync_target()
+        if not target:
+            print("⚠️ 無法判斷目前分支的同步目標，略過 git pull")
+            return False
+
+        remote, branch = target
+        dirty = _run_git_command(["status", "--porcelain"], timeout=10)
+        if dirty.returncode == 0 and (dirty.stdout or "").strip():
+            print("⚠️ 工作樹有未提交變更，git pull 可能失敗")
+
+        result = _run_git_command(["pull", "--ff-only", remote, branch], timeout=60)
+        print(f"📥 同步目標: {remote}/{branch}")
         print("📥 同步結果:")
         print((result.stdout or "").strip() or "(no output)")
+        if result.returncode != 0:
+            print("⚠️ 同步失敗，將使用本機目前的 eth.py 重新啟動")
         return result.returncode == 0
     except Exception as e:
         print(f"⚠️ 同步失敗: {e}")
         return False
 
 
+def _release_supervisor_lock():
+    global SUPERVISOR_LOCK_FH
+    if SUPERVISOR_LOCK_FH is None:
+        return
+
+    try:
+        if fcntl is not None:
+            fcntl.flock(SUPERVISOR_LOCK_FH.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+    try:
+        SUPERVISOR_LOCK_FH.close()
+    except Exception:
+        pass
+
+    SUPERVISOR_LOCK_FH = None
+
+
+def _acquire_supervisor_lock():
+    global SUPERVISOR_LOCK_FH
+    if SUPERVISOR_LOCK_FH is not None:
+        return True
+
+    lock_path = SUPERVISOR_LOCK_PATH
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    fh = open(lock_path, "a+", encoding="utf-8")
+
+    if fcntl is None:
+        SUPERVISOR_LOCK_FH = fh
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(os.getpid()))
+        fh.flush()
+        return True
+
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.seek(0)
+        owner = fh.read().strip()
+        try:
+            fh.close()
+        except Exception:
+            pass
+        owner_text = f" PID={owner}" if owner else ""
+        print(f"⚠️ 已有另一個 program.py supervisor 在執行，略過啟動{owner_text}")
+        return False
+
+    SUPERVISOR_LOCK_FH = fh
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
+    atexit.register(_release_supervisor_lock)
+    return True
+
+
+def _get_backtest_settings():
+    enabled = str(os.getenv("BACKTEST_AUTO_ENABLED", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    interval_sec = max(900.0, float(os.getenv("BACKTEST_INTERVAL_SEC", 6 * 3600)))
+    startup_delay_sec = max(15.0, float(os.getenv("BACKTEST_STARTUP_DELAY_SEC", 90)))
+    lookback_days = max(1, int(os.getenv("BACKTEST_LOOKBACK_DAYS", 14)))
+    warmup_bars = max(200, int(os.getenv("BACKTEST_WARMUP_BARS", 1500)))
+    return {
+        "enabled": enabled,
+        "interval_sec": interval_sec,
+        "startup_delay_sec": startup_delay_sec,
+        "lookback_days": lookback_days,
+        "warmup_bars": warmup_bars,
+    }
+
+
+def _parse_daily_schedule(raw_value, default_hour=4, default_minute=30):
+    raw = str(raw_value or "").strip()
+    if ":" not in raw:
+        return default_hour, default_minute
+
+    try:
+        hour_text, minute_text = raw.split(":", 1)
+        hour = min(23, max(0, int(hour_text)))
+        minute = min(59, max(0, int(minute_text)))
+        return hour, minute
+    except Exception:
+        return default_hour, default_minute
+
+
+def _read_latest_maintenance_report():
+    if not MAINTENANCE_REPORT_PATH.exists():
+        return {}
+
+    try:
+        payload = json.loads(MAINTENANCE_REPORT_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _read_latest_maintenance_finished_at():
+    payload = _read_latest_maintenance_report()
+    raw_value = str(payload.get("finished_at", "") or "").strip()
+    if not raw_value:
+        return None
+
+    try:
+        return datetime.datetime.fromisoformat(raw_value).astimezone()
+    except Exception:
+        return None
+
+
+def _compute_next_daily_run_ts(hour, minute, now_ts=None):
+    now_dt = datetime.datetime.fromtimestamp(now_ts or time.time()).astimezone()
+    target_dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target_dt <= now_dt:
+        target_dt += datetime.timedelta(days=1)
+    return target_dt.timestamp()
+
+
+def _get_maintenance_settings():
+    enabled = str(os.getenv("MAINTENANCE_AUTO_ENABLED", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    startup_delay_sec = max(30.0, float(os.getenv("MAINTENANCE_STARTUP_DELAY_SEC", 120)))
+    daily_hour, daily_minute = _parse_daily_schedule(os.getenv("MAINTENANCE_TIME", "04:30"))
+    smoke_backtest_days = max(1, int(os.getenv("MAINTENANCE_BACKTEST_DAYS", 3)))
+    smoke_backtest_warmup_bars = max(200, int(os.getenv("MAINTENANCE_BACKTEST_WARMUP_BARS", 600)))
+    notify = str(os.getenv("MAINTENANCE_NOTIFY", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    return {
+        "enabled": enabled,
+        "startup_delay_sec": startup_delay_sec,
+        "daily_hour": daily_hour,
+        "daily_minute": daily_minute,
+        "smoke_backtest_days": smoke_backtest_days,
+        "smoke_backtest_warmup_bars": smoke_backtest_warmup_bars,
+        "notify": notify,
+    }
+
+
+def _compute_initial_maintenance_ts(settings):
+    now_ts = time.time()
+    now_dt = datetime.datetime.fromtimestamp(now_ts).astimezone()
+    scheduled_dt = now_dt.replace(
+        hour=settings["daily_hour"],
+        minute=settings["daily_minute"],
+        second=0,
+        microsecond=0,
+    )
+    last_finished_at = _read_latest_maintenance_finished_at()
+
+    if last_finished_at is not None and last_finished_at.date() == now_dt.date():
+        return _compute_next_daily_run_ts(settings["daily_hour"], settings["daily_minute"], now_ts)
+
+    if now_dt >= scheduled_dt:
+        return now_ts + settings["startup_delay_sec"]
+
+    return scheduled_dt.timestamp()
+
+
+def _start_backtest_process(env, settings):
+    if not BACKTEST_FILE.exists():
+        return None
+
+    cmd = [
+        sys.executable,
+        str(BACKTEST_FILE),
+        "--days",
+        str(settings["lookback_days"]),
+        "--warmup-bars",
+        str(settings["warmup_bars"]),
+        "--summary-out",
+        str(BACKTEST_SUMMARY_PATH),
+        "--trades-out",
+        str(BACKTEST_TRADES_PATH),
+        "--learn-out",
+        str(BACKTEST_LEARN_PATH),
+    ]
+    print(f"🧪 啟動定時回測: {' '.join(cmd)}")
+    return subprocess.Popen(
+        cmd,
+        cwd=str(REPO_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def _start_maintenance_process(env, settings):
+    if not MAINTENANCE_FILE.exists():
+        return None
+
+    cmd = [
+        sys.executable,
+        str(MAINTENANCE_FILE),
+        "--report-out",
+        str(MAINTENANCE_REPORT_PATH),
+        "--smoke-backtest-days",
+        str(settings["smoke_backtest_days"]),
+        "--smoke-backtest-warmup-bars",
+        str(settings["smoke_backtest_warmup_bars"]),
+    ]
+    if not settings["notify"]:
+        cmd.append("--no-notify")
+
+    print(f"🛠️ 啟動每日巡檢: {' '.join(cmd)}")
+    return subprocess.Popen(
+        cmd,
+        cwd=str(REPO_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
+def _terminate_process(proc, timeout=10):
+    if proc is None or proc.poll() is not None:
+        return
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
 def run_once() -> int:
+    load_local_env()
+    configure_token(os.getenv("TELEGRAM_TOKEN", ""))
+    backtest_settings = _get_backtest_settings()
+    maintenance_settings = _get_maintenance_settings()
+
     env = os.environ.copy()
     env["BOT_SUPERVISOR"] = "1"
 
@@ -182,10 +343,21 @@ def run_once() -> int:
     print(f"🚀 啟動策略: {' '.join(cmd)}")
 
     proc = subprocess.Popen(cmd, cwd=str(REPO_DIR), env=env)
+    backtest_proc = None
+    maintenance_proc = None
+    next_backtest_ts = time.time() + backtest_settings["startup_delay_sec"]
+    next_maintenance_ts = _compute_initial_maintenance_ts(maintenance_settings)
+    shutdown_requested = {"value": False, "signal": None}
 
     def _forward_signal(sig, _frame):
+        shutdown_requested["value"] = True
+        shutdown_requested["signal"] = sig
         if proc.poll() is None:
             proc.send_signal(sig)
+        if backtest_proc is not None and backtest_proc.poll() is None:
+            backtest_proc.send_signal(sig)
+        if maintenance_proc is not None and maintenance_proc.poll() is None:
+            maintenance_proc.send_signal(sig)
 
     signal.signal(signal.SIGTERM, _forward_signal)
     signal.signal(signal.SIGINT, _forward_signal)
@@ -193,37 +365,83 @@ def run_once() -> int:
     while True:
         code = proc.poll()
         if code is not None:
+            _terminate_process(backtest_proc)
+            _terminate_process(maintenance_proc)
+            if shutdown_requested["value"]:
+                return SUPERVISOR_STOP_EXIT_CODE
             return code
+
+        if backtest_proc is not None:
+            backtest_code = backtest_proc.poll()
+            if backtest_code is not None:
+                output = ""
+                try:
+                    stdout, _ = backtest_proc.communicate(timeout=2)
+                    output = (stdout or "").strip()
+                except Exception:
+                    output = ""
+                print(f"🧪 定時回測結束，exit_code={backtest_code}")
+                if output:
+                    print(output)
+                next_backtest_ts = time.time() + backtest_settings["interval_sec"]
+                backtest_proc = None
+        elif backtest_settings["enabled"] and time.time() >= next_backtest_ts:
+            backtest_proc = _start_backtest_process(env, backtest_settings)
+            next_backtest_ts = time.time() + backtest_settings["interval_sec"]
+
+        if maintenance_proc is not None:
+            maintenance_code = maintenance_proc.poll()
+            if maintenance_code is not None:
+                output = ""
+                try:
+                    stdout, _ = maintenance_proc.communicate(timeout=2)
+                    output = (stdout or "").strip()
+                except Exception:
+                    output = ""
+                print(f"🛠️ 每日巡檢結束，exit_code={maintenance_code}")
+                if output:
+                    print(output)
+                next_maintenance_ts = _compute_next_daily_run_ts(
+                    maintenance_settings["daily_hour"],
+                    maintenance_settings["daily_minute"],
+                )
+                maintenance_proc = None
+        elif (
+            maintenance_settings["enabled"]
+            and backtest_proc is None
+            and time.time() >= next_maintenance_ts
+        ):
+            maintenance_proc = _start_maintenance_process(env, maintenance_settings)
 
         poll_telegram_commands()
 
         if consume_restart_request():
             print("♻️ 收到 Telegram /restart 請求，停止子程序並重啟")
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=5)
+            _terminate_process(proc)
+            _terminate_process(backtest_proc)
+            _terminate_process(maintenance_proc)
             return SUPERVISOR_RESTART_EXIT_CODE
 
         time.sleep(POLL_INTERVAL_SEC)
 
 
 def main():
-    global TELEGRAM_TOKEN
-
     if not ETH_FILE.exists():
         print("❌ 找不到 eth.py，請確認檔案存在")
         raise SystemExit(1)
 
+    if not _acquire_supervisor_lock():
+        raise SystemExit(0)
+
     load_local_env()
-    TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
+    configure_token(os.getenv("TELEGRAM_TOKEN", ""))
 
     while True:
         try:
             exit_code = run_once()
+            if exit_code == SUPERVISOR_STOP_EXIT_CODE:
+                print("🛑 收到停止訊號，結束啟動器")
+                break
             if exit_code == SUPERVISOR_RESTART_EXIT_CODE:
                 sync_repo()
             print(f"ℹ️ eth.py 已結束，exit_code={exit_code}，{RESTART_DELAY_SEC} 秒後重啟")
