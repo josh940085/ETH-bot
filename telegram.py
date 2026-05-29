@@ -35,6 +35,8 @@ TELEGRAM_HTTP_CONNECT_TIMEOUT_SEC = 4
 TELEGRAM_HTTP_READ_TIMEOUT_SEC = TELEGRAM_GET_UPDATES_TIMEOUT_SEC + 4
 TELEGRAM_POLL_LAST_ERROR_KEY = ""
 TELEGRAM_POLL_LAST_LOG_TS = 0.0
+TELEGRAM_HEALTH_EVENT_LIMIT = 400
+TELEGRAM_HEALTH_RETENTION_SEC = 7 * 86400
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "ETH-bot-telegram/1.0"})
@@ -248,6 +250,141 @@ def get_notification_chat_ids():
 	return targets
 
 
+def _truncate_telegram_health_text(value, limit=220):
+	text = str(value or "").strip()
+	if len(text) <= limit:
+		return text
+	return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _parse_telegram_error_payload(body):
+	description = ""
+	retry_after = 0
+	try:
+		payload = json.loads(str(body or "").strip())
+		if isinstance(payload, dict):
+			description = str(payload.get("description", "") or "").strip()
+			parameters = payload.get("parameters")
+			if isinstance(parameters, dict):
+				try:
+					retry_after = max(0, int(parameters.get("retry_after", 0) or 0))
+				except Exception:
+					retry_after = 0
+	except Exception:
+		description = ""
+
+	if not description:
+		description = _truncate_telegram_health_text(body)
+
+	return {
+		"description": description,
+		"retry_after": retry_after,
+	}
+
+
+def inspect_telegram_delivery(status_code=None, body="", error=None):
+	status_text = str(status_code or "").strip()
+	try:
+		status_num = int(status_text)
+	except Exception:
+		status_num = None
+
+	payload = _parse_telegram_error_payload(body)
+	description = str(payload.get("description", "") or "").strip()
+	retry_after = int(payload.get("retry_after", 0) or 0)
+	if error is not None and not description:
+		description = _truncate_telegram_health_text(error)
+
+	lower = description.lower()
+	category = "unknown_error"
+	ok = status_num == 200 and error is None
+
+	if ok:
+		category = "ok"
+	elif status_num == 429 or "too many requests" in lower:
+		category = "rate_limited"
+	elif "bot was blocked by the user" in lower:
+		category = "blocked_by_user"
+	elif "user is deactivated" in lower:
+		category = "user_deactivated"
+	elif "chat not found" in lower:
+		category = "chat_not_found"
+	elif status_num == 401 or "unauthorized" in lower:
+		category = "unauthorized"
+	elif status_num == 403:
+		category = "forbidden"
+	elif status_num == 400:
+		category = "bad_request"
+	elif status_num is not None and status_num >= 500:
+		category = "server_error"
+	elif isinstance(error, requests.exceptions.Timeout) or "timeout" in str(error or "").lower():
+		category = "timeout"
+	elif error is not None:
+		category = "network_error"
+
+	return {
+		"ok": ok,
+		"status_code": status_num if status_num is not None else status_text,
+		"category": category,
+		"description": description,
+		"retry_after": retry_after,
+		"remove_chat": category in {"blocked_by_user", "user_deactivated", "chat_not_found"},
+	}
+
+
+def note_telegram_delivery_event(chat_id=None, ok=False, status_code=None, body="", error=None, context=""):
+	info = inspect_telegram_delivery(status_code=status_code, body=body, error=error)
+	now_ts = int(time.time())
+	chat_text = normalize_chat_id(chat_id)
+	event = {
+		"ts": now_ts,
+		"ok": bool(ok and info.get("ok")),
+		"chat_id": chat_text or "",
+		"status_code": info.get("status_code"),
+		"category": str(info.get("category", "") or ""),
+		"description": _truncate_telegram_health_text(info.get("description", "")),
+		"retry_after": int(info.get("retry_after", 0) or 0),
+		"context": str(context or "").strip(),
+	}
+
+	def _mutate(payload):
+		events = payload.get("telegram_delivery_events")
+		if not isinstance(events, list):
+			events = []
+
+		cutoff_ts = now_ts - TELEGRAM_HEALTH_RETENTION_SEC
+		cleaned = []
+		for item in events:
+			if not isinstance(item, dict):
+				continue
+			try:
+				item_ts = int(item.get("ts", 0) or 0)
+			except Exception:
+				continue
+			if item_ts < cutoff_ts:
+				continue
+			cleaned.append(item)
+
+		cleaned.append(event)
+		payload["telegram_delivery_events"] = cleaned[-TELEGRAM_HEALTH_EVENT_LIMIT:]
+
+		summary = payload.get("telegram_delivery_summary")
+		if not isinstance(summary, dict):
+			summary = {}
+		summary["last_event_ts"] = now_ts
+		if event["ok"]:
+			summary["last_ok_ts"] = now_ts
+		else:
+			summary["last_error_ts"] = now_ts
+			summary["last_error_category"] = event["category"]
+			summary["last_error_description"] = event["description"]
+			summary["last_error_chat_id"] = event["chat_id"]
+		payload["telegram_delivery_summary"] = summary
+
+	update_telegram_state(_mutate)
+	return info
+
+
 def get_follow_mode_enabled() -> bool:
 	payload = read_telegram_state_locked()
 	return bool(payload.get("follow_mode_enabled", False))
@@ -379,13 +516,30 @@ def send_message(chat_id, text, timeout=5, token=None):
 		return
 
 	try:
-		HTTP_SESSION.post(
+		response = HTTP_SESSION.post(
 			f"https://api.telegram.org/bot{resolved_token}/sendMessage",
 			data={"chat_id": chat_id, "text": text},
 			timeout=timeout,
 		)
-	except Exception:
-		pass
+		info = note_telegram_delivery_event(
+			chat_id=chat_id,
+			ok=response.status_code == 200,
+			status_code=response.status_code,
+			body=response.text,
+			context="telegram.send_message",
+		)
+		if info.get("remove_chat"):
+			remove_notification_chat(chat_id)
+		return response
+	except Exception as e:
+		note_telegram_delivery_event(
+			chat_id=chat_id,
+			ok=False,
+			status_code="no-response",
+			error=e,
+			context="telegram.send_message",
+		)
+		return None
 
 
 def _is_telegram_poll_conflict_error(err) -> bool:

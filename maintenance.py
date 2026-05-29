@@ -39,6 +39,7 @@ JSON_AUTO_FIX_DEFAULTS = {
 TELEGRAM_BOT_COMMANDS = [
     {"command": "start", "description": "開始使用與顯示控制面板"},
     {"command": "help", "description": "顯示可用指令與說明"},
+    {"command": "whoami", "description": "顯示你的 Telegram user id"},
     {"command": "settings", "description": "顯示跟單與控制面板設定"},
     {"command": "panel", "description": "開啟倉位面板與控制面板"},
     {"command": "menu", "description": "顯示控制面板"},
@@ -231,6 +232,184 @@ def _check_telegram_policy_and_repair():
         "repaired": repaired,
         "repair_details": repair_details,
         "bot_username": bot_info.get("username"),
+    }
+
+
+def _collect_recent_telegram_delivery_events(state_payload, window_sec=86400):
+    if not isinstance(state_payload, dict):
+        return []
+
+    raw_events = state_payload.get("telegram_delivery_events")
+    if not isinstance(raw_events, list):
+        return []
+
+    now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    cutoff_ts = now_ts - max(60, int(window_sec))
+    events = []
+    for item in raw_events:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ts = int(item.get("ts", 0) or 0)
+        except Exception:
+            continue
+        if ts < cutoff_ts:
+            continue
+        event = dict(item)
+        event["ts"] = ts
+        event["chat_id"] = str(event.get("chat_id", "") or "").strip()
+        event["category"] = str(event.get("category", "") or "").strip()
+        event["context"] = str(event.get("context", "") or "").strip()
+        event["ok"] = bool(event.get("ok"))
+        events.append(event)
+
+    events.sort(key=lambda item: item.get("ts", 0))
+    return events
+
+
+def _count_peak_delivery_rate(events):
+    total_counts = {}
+    chat_counts = {}
+    peak_total_per_sec = 0
+    peak_per_chat_per_sec = 0
+
+    for item in events:
+        ts = int(item.get("ts", 0) or 0)
+        total_counts[ts] = int(total_counts.get(ts, 0)) + 1
+        peak_total_per_sec = max(peak_total_per_sec, total_counts[ts])
+
+        chat_id = str(item.get("chat_id", "") or "").strip()
+        if chat_id:
+            key = (chat_id, ts)
+            chat_counts[key] = int(chat_counts.get(key, 0)) + 1
+            peak_per_chat_per_sec = max(peak_per_chat_per_sec, chat_counts[key])
+
+    return peak_total_per_sec, peak_per_chat_per_sec
+
+
+def _check_telegram_watch_risk():
+    state_path = data_path(".telegram_state.json")
+    state_payload = _read_json(state_path) or {}
+    events = _collect_recent_telegram_delivery_events(state_payload, window_sec=86400)
+
+    counts = {}
+    for item in events:
+        category = str(item.get("category", "") or "").strip() or "unknown"
+        counts[category] = int(counts.get(category, 0)) + 1
+
+    peak_total_per_sec, peak_per_chat_per_sec = _count_peak_delivery_rate(events)
+    repaired = []
+    repair_details = []
+
+    removable_chat_ids = {
+        str(item.get("chat_id", "") or "").strip()
+        for item in events
+        if str(item.get("category", "") or "").strip() in {"blocked_by_user", "chat_not_found", "user_deactivated"}
+        and str(item.get("chat_id", "") or "").strip()
+    }
+
+    if removable_chat_ids and isinstance(state_payload, dict):
+        updated_state = dict(state_payload)
+        notify_ids = _normalize_private_chat_list(updated_state.get("notify_chat_ids", []))
+        filtered_notify = [item for item in notify_ids if item not in removable_chat_ids]
+        changed = notify_ids != filtered_notify
+        if changed:
+            updated_state["notify_chat_ids"] = filtered_notify
+
+        last_private = str(updated_state.get("last_private_chat_id", "") or "").strip()
+        if last_private in removable_chat_ids:
+            updated_state["last_private_chat_id"] = ""
+            changed = True
+
+        if changed:
+            _write_json_atomic(state_path, updated_state)
+            repaired.append("stale_chat_targets")
+            repair_details.append(
+                {
+                    "target": state_path.name,
+                    "action": "remove_blocked_or_invalid_chat_targets",
+                    "content": json.dumps(sorted(removable_chat_ids), ensure_ascii=False),
+                }
+            )
+
+    risk_level = "low"
+    likely_causes = []
+    recommendations = []
+    status = "fixed" if repaired else "ok"
+
+    rate_limited = int(counts.get("rate_limited", 0))
+    unauthorized = int(counts.get("unauthorized", 0))
+    forbidden = int(counts.get("forbidden", 0))
+    blocked = int(counts.get("blocked_by_user", 0))
+    invalid_targets = int(counts.get("chat_not_found", 0) + counts.get("user_deactivated", 0))
+    total_errors = sum(count for key, count in counts.items() if key != "ok")
+
+    if unauthorized > 0:
+        status = "error"
+        risk_level = "high"
+        likely_causes.append("Bot token invalid, revoked, or permissions changed.")
+        recommendations.append("重新檢查 TELEGRAM_TOKEN，並用 BotFather 確認 bot 狀態。")
+    if rate_limited > 0:
+        status = "error"
+        risk_level = "high"
+        likely_causes.append("Recent sends hit Telegram Bot API rate limits (429).")
+        recommendations.append("降低短時間批量推播與重試頻率，依 retry_after 退避。")
+    if peak_total_per_sec > 25 and risk_level != "high":
+        risk_level = "medium"
+        likely_causes.append("Peak broadcast rate approached Telegram bulk-send limits.")
+        recommendations.append("把大量通知分散到更長時間窗，避免逼近 30 msg/sec。")
+    if peak_per_chat_per_sec > 1 and risk_level == "low":
+        risk_level = "medium"
+        likely_causes.append("Some chats received bursts faster than Telegram's 1 msg/sec guidance.")
+        recommendations.append("避免對同一 chat 連續瞬發多則訊息。")
+    if blocked > 0:
+        if risk_level == "low":
+            risk_level = "medium"
+        likely_causes.append("Some recipients blocked the bot or stopped accepting messages.")
+        recommendations.append("減少非必要推播，避免讓使用者主動封鎖或回報 spam。")
+    if invalid_targets > 0:
+        likely_causes.append("Some saved chat targets are no longer valid.")
+    if forbidden > 0 and risk_level != "high":
+        status = "error"
+        risk_level = "medium"
+        likely_causes.append("Telegram rejected some sends with 403; check chat rights or user block state.")
+        recommendations.append("檢查是否對無權限或已封鎖 bot 的 chat 發送。")
+
+    if not events:
+        likely_causes.append("No Telegram delivery events were recorded in the last 24 hours.")
+        recommendations.append("這不代表官方沒有觀察；只是最近沒有可分析的送訊樣本。")
+
+    detail = (
+        "official_watchlist=not_exposed_by_bot_api "
+        f"risk={risk_level} "
+        f"last24h_events={len(events)} "
+        f"errors={total_errors} "
+        f"rate_limits={rate_limited} "
+        f"blocked={blocked} "
+        f"invalid_targets={invalid_targets} "
+        f"peak_total_per_sec={peak_total_per_sec} "
+        f"peak_per_chat_per_sec={peak_per_chat_per_sec}"
+    )
+
+    if not repair_details and recommendations and status == "fixed":
+        repair_details = [f"recommendation: {item}" for item in recommendations]
+
+    return {
+        "status": status,
+        "detail": detail,
+        "repaired": repaired,
+        "repair_details": repair_details,
+        "official_watchlist_check": "not_exposed_by_bot_api",
+        "risk_level": risk_level,
+        "last24h_events": len(events),
+        "error_count": total_errors,
+        "rate_limit_count": rate_limited,
+        "blocked_count": blocked,
+        "invalid_target_count": invalid_targets,
+        "peak_total_per_sec": peak_total_per_sec,
+        "peak_per_chat_per_sec": peak_per_chat_per_sec,
+        "likely_causes": likely_causes,
+        "recommendations": recommendations,
     }
 
 
@@ -570,19 +749,34 @@ def _build_fix_detail_texts(report):
     finished_at = str(report.get("finished_at", "") or "").strip()
 
     for check in report.get("checks", []):
-        if str(check.get("status", "") or "") != "fixed":
+        check_status = str(check.get("status", "") or "")
+        if check_status not in {"fixed", "error"}:
             continue
 
         repair_details = check.get("repair_details")
         if not isinstance(repair_details, list) or not repair_details:
             repaired = check.get("repaired") if isinstance(check.get("repaired"), list) else []
+            likely_causes = check.get("likely_causes") if isinstance(check.get("likely_causes"), list) else []
+            recommendations = check.get("recommendations") if isinstance(check.get("recommendations"), list) else []
+
             if repaired:
                 repair_details = [f"repaired: {', '.join(str(item) for item in repaired)}"]
+            elif likely_causes or recommendations:
+                repair_details = []
+                for item in likely_causes:
+                    text = str(item or "").strip()
+                    if text:
+                        repair_details.append(f"likely_cause: {text}")
+                for item in recommendations:
+                    text = str(item or "").strip()
+                    if text:
+                        repair_details.append(f"recommendation: {text}")
             else:
                 repair_details = [str(check.get("detail", "") or "").strip()]
 
+        title = "🛠️ 修正內容" if check_status == "fixed" else "⚠️ 關注項目"
         lines = [
-            f"🛠️ 修正內容 | {check.get('name')}",
+            f"{title} | {check.get('name')}",
             f"time: {finished_at}",
         ]
 
@@ -646,6 +840,7 @@ def main():
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
         ("telegram_policy", _check_telegram_policy_and_repair),
+        ("telegram_watch_risk", _check_telegram_watch_risk),
         ("model_health", _check_models_and_repair),
     ]
     if not args.skip_smoke_backtest:

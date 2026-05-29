@@ -51,7 +51,9 @@ from telegram import (
     fetch_telegram_commands as tg_fetch_telegram_commands,
     get_follow_mode_enabled as tg_get_follow_mode_enabled,
     get_notification_chat_ids as tg_get_notification_chat_ids,
+    inspect_telegram_delivery as tg_inspect_telegram_delivery,
     is_private_chat_id as tg_is_private_chat_id,
+    note_telegram_delivery_event as tg_note_telegram_delivery_event,
     normalize_chat_id as tg_normalize_chat_id,
     read_telegram_state_locked as tg_read_telegram_state_locked,
     remove_notification_chat as tg_remove_notification_chat,
@@ -356,6 +358,21 @@ def _remember_notification_chat(chat_id):
 
 def _remove_notification_chat(chat_id):
     tg_remove_notification_chat(chat_id)
+
+
+def _inspect_telegram_delivery(status_code=None, body="", error=None):
+    return tg_inspect_telegram_delivery(status_code=status_code, body=body, error=error)
+
+
+def _note_telegram_delivery_event(chat_id=None, ok=False, status_code=None, body="", error=None, context=""):
+    return tg_note_telegram_delivery_event(
+        chat_id=chat_id,
+        ok=ok,
+        status_code=status_code,
+        body=body,
+        error=error,
+        context=context,
+    )
 
 
 def _is_telegram_chat_not_found(status, body) -> bool:
@@ -6870,22 +6887,56 @@ def send_telegram(msg, priority=False, include_private=True):
             if res is None or res.status_code != 200:
                 status = getattr(res, "status_code", "no-response")
                 body = getattr(res, "text", "")
+                delivery = _note_telegram_delivery_event(
+                    chat_id=chat_id,
+                    ok=False,
+                    status_code=status,
+                    body=body,
+                    error="sendMessage returned no response" if res is None else None,
+                    context="eth.send_telegram.broadcast",
+                )
                 print(f"❌ Telegram 發送失敗 [{chat_id}]:", status, body)
 
-                if _is_telegram_chat_not_found(status, body):
+                if delivery.get("remove_chat") or _is_telegram_chat_not_found(status, body):
                     _remove_notification_chat(chat_id)
                     continue
 
                 try:
-                    time.sleep(1)
+                    retry_after = max(1, int(delivery.get("retry_after", 0) or 0))
+                    time.sleep(min(30, retry_after))
                     res2 = _send_telegram_message(chat_id, msg, include_control_panel=True)
                     retry_status = getattr(res2, "status_code", "no-response")
+                    retry_body = getattr(res2, "text", "")
+                    retry_delivery = _note_telegram_delivery_event(
+                        chat_id=chat_id,
+                        ok=res2 is not None and res2.status_code == 200,
+                        status_code=retry_status,
+                        body=retry_body,
+                        error="retry sendMessage returned no response" if res2 is None else None,
+                        context="eth.send_telegram.broadcast_retry",
+                    )
                     print(f"🔁 retry [{chat_id}]:", retry_status)
                     if res2 is not None and res2.status_code == 200:
                         sent_count += 1
+                    elif retry_delivery.get("remove_chat"):
+                        _remove_notification_chat(chat_id)
                 except Exception as e:
+                    _note_telegram_delivery_event(
+                        chat_id=chat_id,
+                        ok=False,
+                        status_code="exception",
+                        error=e,
+                        context="eth.send_telegram.broadcast_retry",
+                    )
                     print(f"❌ retry失敗 [{chat_id}]:", e)
             else:
+                _note_telegram_delivery_event(
+                    chat_id=chat_id,
+                    ok=True,
+                    status_code=res.status_code,
+                    body=getattr(res, "text", ""),
+                    context="eth.send_telegram.broadcast",
+                )
                 sent_count += 1
 
         if sent_count > 0:
@@ -6925,17 +6976,39 @@ def send_private_telegram(msg, priority=False):
         if res is None or res.status_code != 200:
             status = getattr(res, "status_code", "no-response")
             body = getattr(res, "text", "")
+            delivery = _note_telegram_delivery_event(
+                chat_id=target,
+                ok=False,
+                status_code=status,
+                body=body,
+                error="sendMessage returned no response" if res is None else None,
+                context="eth.send_private_telegram",
+            )
             print(f"❌ 私聊發送失敗 [{target}]", status, body)
 
-            if _is_telegram_chat_not_found(status, body):
+            if delivery.get("remove_chat") or _is_telegram_chat_not_found(status, body):
                 _remove_notification_chat(target)
 
             return False
 
+        _note_telegram_delivery_event(
+            chat_id=target,
+            ok=True,
+            status_code=res.status_code,
+            body=getattr(res, "text", ""),
+            context="eth.send_private_telegram",
+        )
         LAST_TELEGRAM_TS = now
         print("✅ 私聊通知已送出")
         return True
     except Exception as e:
+        _note_telegram_delivery_event(
+            chat_id=target,
+            ok=False,
+            status_code="exception",
+            error=e,
+            context="eth.send_private_telegram",
+        )
         print("❌ 私聊通知錯誤:", e)
         return False
 
