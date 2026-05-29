@@ -254,11 +254,6 @@ def _build_panel_realtime_urls(base_url: str, token: str = ""):
         ws_scheme = parsed.scheme or "wss"
     ws_url = urlunparse((ws_scheme, parsed.netloc, "/ws/panel", "", "", ""))
 
-    if token:
-        encoded = urlencode({"token": token})
-        state_url = f"{state_url}?{encoded}"
-        ws_url = f"{ws_url}?{encoded}"
-
     return state_url, ws_url, publish_url
 
 
@@ -358,23 +353,26 @@ def _build_control_panel_keyboard():
         "snapshot_ts": int(_safe_int(POSITION_PANEL_STATE.get("ts"), 0)),
         "pair": str(POSITION_PANEL_STATE.get("pair") or DEFAULT_PAIR),
         "lev": int(_safe_int(POSITION_PANEL_STATE.get("lev"), DEFAULT_LEV) or DEFAULT_LEV),
-        "total_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_total_assets_usdt"), 0.0), 4),
-        "spot_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_spot_total_assets_usdt"), 0.0), 4),
-        "futures_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_futures_total_assets_usdt"), 0.0), 4),
-        "wallet_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_wallet_balance_usdt"), 0.0), 4),
-        "available_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_available_balance_usdt"), 0.0), 4),
-        "margin_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_margin_balance_usdt"), 0.0), 4),
     }
     if PANEL_REALTIME_STATE_URL:
         snapshot["state_url"] = PANEL_REALTIME_STATE_URL
     if PANEL_REALTIME_WS_URL:
         snapshot["ws_url"] = PANEL_REALTIME_WS_URL
 
-    if active_trade.get("open"):
+    if PANEL_REALTIME_STATE_URL or PANEL_REALTIME_WS_URL:
+        if not active_trade.get("open"):
+            snapshot["restart"] = 1
+    elif active_trade.get("open"):
         entry_price = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
         fee_round_trip_rate = _safe_float(POSITION_PANEL_STATE.get("fee_round_trip_rate"), 0.001)
         snapshot.update(
             {
+                "total_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_total_assets_usdt"), 0.0), 4),
+                "spot_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_spot_total_assets_usdt"), 0.0), 4),
+                "futures_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_futures_total_assets_usdt"), 0.0), 4),
+                "wallet_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_wallet_balance_usdt"), 0.0), 4),
+                "available_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_available_balance_usdt"), 0.0), 4),
+                "margin_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_margin_balance_usdt"), 0.0), 4),
                 "dir": str(active_trade.get("direction") or "long"),
                 "entry": round(entry_price, 4),
                 "tp": round(_safe_float(active_trade.get("tp"), 0.0), 4),

@@ -16,6 +16,13 @@ Mini App 如果要在 Telegram 手機端即時更新，不能只靠 `docs/positi
 - `GET /api/panel/state`：Mini App 取得最新快照
 - `WS /ws/panel`：Mini App 即時接收更新
 
+這版預設會用 Telegram WebApp `initData` 驗證讀取端。
+也就是說：
+
+- Bot 推送仍用 `POSITION_PANEL_REALTIME_TOKEN`
+- Mini App 讀取則要求合法 Telegram 身分
+- 可再用 `POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS` 限制只允許特定帳號
+
 ### 啟動 server
 
 ```bash
@@ -28,6 +35,7 @@ python3 panel_realtime_server.py
 ```bash
 POSITION_PANEL_REALTIME_BASE_URL=https://your-public-domain
 POSITION_PANEL_REALTIME_TOKEN=change-me
+POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS=123456789
 DISCORD_WEBHOOK=https://discord.com/api/webhooks/xxx/yyy
 DISCORD_NEWS=https://discord.com/api/webhooks/xxx/yyy
 DISCORD_AUTO_DELETE_HOURS=24
@@ -38,7 +46,8 @@ DISCORD_AUTO_DELETE_HOURS=24
 ### Telegram Mini App
 
 `eth.py` 會自動把 `state_url` / `ws_url` 塞進 Mini App URL。
-前端會優先用 Realtime API / WebSocket，失敗時才退回 `position.json` 輪詢。
+前端會優先用 Realtime API / WebSocket。
+公開部署時不再回退到 `position.json`，避免敏感倉位被 GitHub Pages 直接公開。
 
 ## 雲端部署建議
 
@@ -144,6 +153,8 @@ POSITION_PANEL_REALTIME_TOKEN=change-me
 
 ```bash
 POSITION_PANEL_REALTIME_TOKEN=change-me
+TELEGRAM_TOKEN=123456:ABCDEF
+POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS=123456789
 POSITION_PANEL_ALLOWED_ORIGINS=https://your-mini-app-domain
 POSITION_PANEL_REALTIME_HOST=0.0.0.0
 POSITION_PANEL_REALTIME_PORT=8787
@@ -157,7 +168,8 @@ POSITION_PANEL_REALTIME_PORT=8787
 
 ## 前端面板
 
-`docs/index.html` 會優先連線 Realtime API / WebSocket；失敗時才退回 `position.json` 輪詢。
+`docs/index.html` 會優先連線 Realtime API / WebSocket。
+如果不是從 Telegram Mini App 打開，或沒有通過伺服器端驗證，頁面只會顯示鎖定提示。
 
 因此雲端部署後建議使用：
 

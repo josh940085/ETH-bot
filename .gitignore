@@ -9,3 +9,4 @@ program.log
 supervisord.log
 supervisord.pid
 .supervisor.sock
+docs/position.json

@@ -468,7 +468,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260529-3";
+  const APP_VERSION = "20260529-4";
 
   // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
@@ -538,20 +538,24 @@
 
   let livePrice = 0;
   let liveMarkPrice = 0;
+  const TELEGRAM_WEBAPP = (window.Telegram && window.Telegram.WebApp) ? Telegram.WebApp : null;
+  const TELEGRAM_INIT_DATA = TELEGRAM_WEBAPP ? String(TELEGRAM_WEBAPP.initData || "").trim() : "";
+  const HAS_TELEGRAM_AUTH = TELEGRAM_INIT_DATA.length > 0;
+  const IS_LOCAL_PREVIEW = location.protocol === "file:" || location.hostname === "localhost" || location.hostname === "127.0.0.1";
 
   // ── Telegram Web App 初始化 ──
-  if (window.Telegram && window.Telegram.WebApp) {
-    Telegram.WebApp.ready();
-    Telegram.WebApp.expand();
+  if (TELEGRAM_WEBAPP) {
+    TELEGRAM_WEBAPP.ready();
+    TELEGRAM_WEBAPP.expand();
   }
 
   // ── 取得即時倉位資料（position.json）──
-  // 只使用同站來源，避免回退到其他分支或舊快取把最新狀態覆蓋掉。
-  const POSITION_JSON_URLS = [
+  // 公開部署不再回退到靜態 position.json，避免敏感倉位被 GitHub Pages 直接暴露。
+  const POSITION_JSON_URLS = IS_LOCAL_PREVIEW ? [
     "./position.json",
     "/ETH-bot/docs/position.json",
     "/ETH-bot/position.json",
-  ];
+  ] : [];
   let LAST_POSITION_SOURCE = URL_SNAPSHOT_TS > 0 ? "URL 參數" : "";
   let LAST_POSITION_TS = URL_SNAPSHOT_TS > 0 ? URL_SNAPSHOT_TS : 0;
   const POSITION_FETCH_TIMEOUT_MS = 1200;
@@ -564,15 +568,30 @@
   let realtimeSocket = null;
   let realtimeSocketConnected = false;
   let realtimeReconnectTimer = null;
+  let HAS_POSITION_PAYLOAD = hasUrlPosition;
+  let PANEL_ACCESS_STATE = (REMOTE_STATE_URL || REMOTE_WS_URL)
+    ? (HAS_TELEGRAM_AUTH ? "connecting" : "needs_telegram")
+    : (POSITION_JSON_URLS.length ? "local_snapshot" : "needs_realtime");
+  let PANEL_ACCESS_MESSAGE = "";
 
-  async function fetchJsonWithTimeout(url, timeoutMs = POSITION_FETCH_TIMEOUT_MS) {
+  function buildTelegramAuthHeaders() {
+    return HAS_TELEGRAM_AUTH ? { "X-Telegram-Init-Data": TELEGRAM_INIT_DATA } : {};
+  }
+
+  async function fetchJsonWithTimeout(url, timeoutMs = POSITION_FETCH_TIMEOUT_MS, options = {}) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
+      const headers = Object.assign({}, options.headers || {});
       const res = await fetch(url, {
         cache: "no-store",
         signal: ctrl.signal,
+        ...options,
+        headers,
       });
+      if (res.status === 401 || res.status === 403) {
+        return { __auth_error: true, __status: res.status };
+      }
       if (!res.ok) return null;
       const data = await res.json();
       if (typeof data !== "object" || data === null) return null;
@@ -601,6 +620,7 @@
     if (ts > 0) {
       LAST_POSITION_TS = ts;
     }
+    HAS_POSITION_PAYLOAD = true;
 
     if (typeof data.pair === "string" && data.pair) PAIR = data.pair;
     const levNum = parseInt(data.lev, 10);
@@ -706,16 +726,27 @@
 
   function connectRealtimeSocket() {
     if (!REMOTE_WS_URL || typeof WebSocket !== "function") return;
+    if (!HAS_TELEGRAM_AUTH) {
+      PANEL_ACCESS_STATE = "needs_telegram";
+      return;
+    }
     if (realtimeSocket && (realtimeSocket.readyState === WebSocket.OPEN || realtimeSocket.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
-    const wsUrl = REMOTE_WS_URL + (REMOTE_WS_URL.includes("?") ? "&" : "?") + "v=" + encodeURIComponent(APP_VERSION);
+    const wsParams = new URLSearchParams({
+      v: APP_VERSION,
+      tg_init_data: TELEGRAM_INIT_DATA,
+    });
+    const wsUrl = REMOTE_WS_URL + (REMOTE_WS_URL.includes("?") ? "&" : "?") + wsParams.toString();
     realtimeSocket = new WebSocket(wsUrl);
 
     realtimeSocket.onopen = () => {
       realtimeSocketConnected = true;
+      PANEL_ACCESS_STATE = "ready";
+      PANEL_ACCESS_MESSAGE = "";
       LAST_POSITION_SOURCE = "Realtime WS";
+      render();
     };
 
     realtimeSocket.onmessage = (event) => {
@@ -732,9 +763,15 @@
 
     realtimeSocket.onerror = () => {};
 
-    realtimeSocket.onclose = () => {
+    realtimeSocket.onclose = (event) => {
       realtimeSocketConnected = false;
       realtimeSocket = null;
+      if (event && event.code === 4401) {
+        PANEL_ACCESS_STATE = "unauthorized";
+        PANEL_ACCESS_MESSAGE = "只有指定的 Telegram 帳號可以查看即時面板。";
+        render();
+        return;
+      }
       scheduleRealtimeReconnect();
     };
   }
@@ -745,8 +782,21 @@
 
     if (REMOTE_STATE_URL && !freshWsState) {
       const remoteUrl = REMOTE_STATE_URL + (REMOTE_STATE_URL.includes("?") ? "&" : "?") + "t=" + Date.now();
-      const remoteData = await fetchJsonWithTimeout(remoteUrl, POSITION_FETCH_TIMEOUT_MS);
+      if (!HAS_TELEGRAM_AUTH) {
+        PANEL_ACCESS_STATE = "needs_telegram";
+        return;
+      }
+      const remoteData = await fetchJsonWithTimeout(remoteUrl, POSITION_FETCH_TIMEOUT_MS, {
+        headers: buildTelegramAuthHeaders(),
+      });
+      if (remoteData && remoteData.__auth_error) {
+        PANEL_ACCESS_STATE = "unauthorized";
+        PANEL_ACCESS_MESSAGE = "只有指定的 Telegram 帳號可以查看即時面板。";
+        return;
+      }
       if (remoteData && applyPositionPayload(remoteData, "Realtime API")) {
+        PANEL_ACCESS_STATE = "ready";
+        PANEL_ACCESS_MESSAGE = "";
         return;
       }
     }
@@ -1080,6 +1130,19 @@
       </div>`;
   }
 
+  function renderAccessState(title, message) {
+    const node = document.getElementById("app");
+    if (!node) return;
+    node.outerHTML = `
+<div id="app">
+  <div class="card" style="text-align:center;padding:40px 18px;">
+    <div style="font-size:32px;margin-bottom:14px;">🔒</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:8px;">${title}</div>
+    <div style="font-size:13px;color:#888;line-height:1.7;">${message}</div>
+  </div>
+</div>`;
+  }
+
   function renderCloseHits() {
     if (!Array.isArray(CLOSE_HITS) || CLOSE_HITS.length === 0) {
       return `
@@ -1123,6 +1186,23 @@
 
   // ── 渲染 UI ──
   function render() {
+    if ((REMOTE_STATE_URL || REMOTE_WS_URL) && !HAS_TELEGRAM_AUTH) {
+      renderAccessState("請從 Telegram 開啟", "這個 Mini App 已改成使用 Telegram 驗證與即時面板服務，直接從外部瀏覽器打開不會顯示敏感倉位資料。");
+      return;
+    }
+    if (!REMOTE_STATE_URL && !REMOTE_WS_URL && !POSITION_JSON_URLS.length) {
+      renderAccessState("即時服務未設定", "目前頁面已停用公開靜態倉位快照。請從 Telegram 重新打開，或先設定 POSITION_PANEL_REALTIME_BASE_URL。");
+      return;
+    }
+    if (PANEL_ACCESS_STATE === "unauthorized") {
+      renderAccessState("未授權", PANEL_ACCESS_MESSAGE || "只有指定的 Telegram 帳號可以查看這個面板。");
+      return;
+    }
+    if ((REMOTE_STATE_URL || REMOTE_WS_URL) && !HAS_POSITION_PAYLOAD) {
+      renderAccessState("正在連線", PANEL_ACCESS_MESSAGE || "正在驗證 Telegram 身分並同步即時倉位資料…");
+      return;
+    }
+
     const totalAssetsUsdt = calcTotalAssetsUsdt();
     const assetSubtext = buildAssetSubtext();
 
