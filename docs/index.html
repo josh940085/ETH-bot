@@ -468,7 +468,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260529-1";
+  const APP_VERSION = "20260529-2";
 
   // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
@@ -496,7 +496,10 @@
   let BINANCE_QTY = 0;
   let BINANCE_ENTRY_PRICE = 0;
   let BINANCE_MARK_PRICE = 0;
+  let BINANCE_MARK_PRICE_TS = 0;
   let BINANCE_UNREALIZED_PNL_USDT = null;
+  let BINANCE_UNREALIZED_PNL_TS = 0;
+  let ESTIMATED_UNREALIZED_PNL_USDT = 0;
   let ACCOUNT_AVAILABLE_BALANCE_USDT = parseFloat(p.get("available_balance_usdt") || "0");
   let ACCOUNT_WALLET_BALANCE_USDT = parseFloat(p.get("wallet_balance_usdt") || "0");
   let ACCOUNT_MARGIN_BALANCE_USDT = parseFloat(p.get("margin_balance_usdt") || "0");
@@ -522,6 +525,7 @@
   let BREAK_EVEN_TS = 0;
 
   let livePrice = 0;
+  let liveMarkPrice = 0;
 
   // ── Telegram Web App 初始化 ──
   if (window.Telegram && window.Telegram.WebApp) {
@@ -641,8 +645,11 @@
     COST_EVAL_HOLD_HOURS = Number.isFinite(Number(data.cost_eval_hold_hours)) ? Number(data.cost_eval_hold_hours) : COST_EVAL_HOLD_HOURS;
     TOTAL_COST_RATE_EST = Number.isFinite(Number(data.total_cost_rate_est)) ? Number(data.total_cost_rate_est) : TOTAL_COST_RATE_EST;
     BINANCE_MARK_PRICE = Number.isFinite(Number(data.binance_mark_price)) ? Number(data.binance_mark_price) : BINANCE_MARK_PRICE;
+    BINANCE_MARK_PRICE_TS = Number.isFinite(Number(data.binance_mark_price_ts)) ? Number(data.binance_mark_price_ts) : BINANCE_MARK_PRICE_TS;
     BINANCE_BREAK_EVEN_PRICE = Number.isFinite(Number(data.binance_break_even_price)) ? Number(data.binance_break_even_price) : BINANCE_BREAK_EVEN_PRICE;
     BINANCE_UNREALIZED_PNL_USDT = Number.isFinite(Number(data.binance_unrealized_pnl_usdt)) ? Number(data.binance_unrealized_pnl_usdt) : null;
+    BINANCE_UNREALIZED_PNL_TS = Number.isFinite(Number(data.binance_unrealized_pnl_ts)) ? Number(data.binance_unrealized_pnl_ts) : BINANCE_UNREALIZED_PNL_TS;
+    ESTIMATED_UNREALIZED_PNL_USDT = Number.isFinite(Number(data.estimated_unrealized_pnl_usdt)) ? Number(data.estimated_unrealized_pnl_usdt) : ESTIMATED_UNREALIZED_PNL_USDT;
     ACCOUNT_AVAILABLE_BALANCE_USDT = Number.isFinite(Number(data.account_available_balance_usdt)) ? Number(data.account_available_balance_usdt) : ACCOUNT_AVAILABLE_BALANCE_USDT;
     ACCOUNT_WALLET_BALANCE_USDT = Number.isFinite(Number(data.account_wallet_balance_usdt)) ? Number(data.account_wallet_balance_usdt) : ACCOUNT_WALLET_BALANCE_USDT;
     ACCOUNT_MARGIN_BALANCE_USDT = Number.isFinite(Number(data.account_margin_balance_usdt)) ? Number(data.account_margin_balance_usdt) : ACCOUNT_MARGIN_BALANCE_USDT;
@@ -760,14 +767,23 @@
 
   // ── 取得即時價格 ──
   async function fetchPrice() {
-    const data = await fetchJsonWithTimeout(
-      `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${PAIR}`,
-      PRICE_FETCH_TIMEOUT_MS
-    );
-    if (!data) return;
-    const px = parseFloat(data.price || 0);
+    const [lastTrade, premiumIndex] = await Promise.all([
+      fetchJsonWithTimeout(
+        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${PAIR}`,
+        PRICE_FETCH_TIMEOUT_MS
+      ),
+      fetchJsonWithTimeout(
+        `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${PAIR}`,
+        PRICE_FETCH_TIMEOUT_MS
+      ),
+    ]);
+    const px = parseFloat((lastTrade && lastTrade.price) || 0);
     if (Number.isFinite(px) && px > 0) {
       livePrice = px;
+    }
+    const markPx = parseFloat((premiumIndex && premiumIndex.markPrice) || 0);
+    if (Number.isFinite(markPx) && markPx > 0) {
+      liveMarkPrice = markPx;
     }
   }
 
@@ -794,7 +810,12 @@
   function calcPnl(live) {
     const livePx = (Number.isFinite(Number(live)) && Number(live) > 0)
       ? Number(live)
-      : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : 0);
+      : ((Number.isFinite(Number(liveMarkPrice)) && Number(liveMarkPrice) > 0)
+        ? Number(liveMarkPrice)
+        : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : 0));
+    const markPx = (Number.isFinite(Number(liveMarkPrice)) && Number(liveMarkPrice) > 0)
+      ? Number(liveMarkPrice)
+      : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : livePx);
     if (!livePx || !ENTRY) {
       return {
         gross_pct: 0,
@@ -809,19 +830,24 @@
       };
     }
     const raw = DIR === "long"
-      ? (livePx - ENTRY) / ENTRY
-      : (ENTRY - livePx) / ENTRY;
+      ? (markPx - ENTRY) / ENTRY
+      : (ENTRY - markPx) / ENTRY;
     const notional = POSITION_NOTIONAL_USDT > 0
       ? POSITION_NOTIONAL_USDT
-      : (BINANCE_QTY > 0
-        ? Math.max(0, BINANCE_QTY * livePx)
+      : (BINANCE_QTY > 0 && markPx > 0
+        ? Math.max(0, BINANCE_QTY * markPx)
         : (POSITION_MARGIN_USDT > 0
           ? Math.max(0, POSITION_MARGIN_USDT * Math.max(1, LEV))
           : Math.max(0, ENTRY * (SIZE / 100))));
     const margin = POSITION_MARGIN_USDT > 0 ? POSITION_MARGIN_USDT : (notional > 0 ? notional / Math.max(1, LEV) : 0);
-    const gross_usdt = raw * notional;
+    const gross_usdt = BINANCE_QTY > 0
+      ? (DIR === "long" ? (markPx - ENTRY) : (ENTRY - markPx)) * BINANCE_QTY
+      : raw * notional;
     const gross_pct = margin > 0 ? (gross_usdt / margin) * 100 : raw * LEV * 100;
-    const hasExchangePnl = Number.isFinite(BINANCE_UNREALIZED_PNL_USDT);
+    const pnlSyncAgeSec = BINANCE_UNREALIZED_PNL_TS > 0
+      ? Math.max(0, Math.floor(Date.now() / 1000) - BINANCE_UNREALIZED_PNL_TS)
+      : Infinity;
+    const hasExchangePnl = Number.isFinite(BINANCE_UNREALIZED_PNL_USDT) && pnlSyncAgeSec <= 20;
     const useExchangePnl = hasExchangePnl;
     const shown_usdt = useExchangePnl ? BINANCE_UNREALIZED_PNL_USDT : gross_usdt;
     const shown_pct = margin > 0 ? (shown_usdt / margin) * 100 : gross_pct;
@@ -839,7 +865,9 @@
       net_usdt,
       cost_usdt,
       total_cost_rate,
-      source: useExchangePnl ? "binance" : "estimate_live",
+      mark_px: markPx,
+      pnl_sync_age_sec: pnlSyncAgeSec,
+      source: useExchangePnl ? "binance_sync" : "mark_price_estimate",
     };
   }
 
@@ -1241,15 +1269,15 @@
         <div class="pnl-pct ${pnlClass}">${live ? fmt_signed(pnl.shown_pct) + "%" : "─"}</div>
         <div class="pnl-usdt ${pnlClass}">${live ? fmt_signed(pnl.shown_usdt) + " USDT" : ""}</div>
         <div style="font-size:11px;color:#888;margin-top:2px">
-          ${live ? (pnl.source === "binance"
-            ? `交易所盈虧 ${fmt_signed(pnl.shown_usdt)} | 成本後 ${fmt_signed(pnl.net_usdt)}`
-            : `即時估算 ${fmt_signed(pnl.gross_usdt)} | 成本後 ${fmt_signed(pnl.net_usdt)}`) : ""}
+          ${live ? (pnl.source === "binance_sync"
+            ? `Binance 同步 ${fmt_signed(pnl.shown_usdt)} | 成本後 ${fmt_signed(pnl.net_usdt)}`
+            : `Mark Price 估算 ${fmt_signed(pnl.gross_usdt)} | 成本後 ${fmt_signed(pnl.net_usdt)}`) : ""}
         </div>
       </div>
     </div>
     <div class="divider"></div>
     <div class="section-grid">
-      ${renderMetricCard("毛盈虧", `${fmt_signed(pnl.shown_pct)}%`, `${fmt_signed(pnl.shown_usdt)} USDT ｜ ${pnl.source === "binance" ? "交易所回報" : "前端估算"}`)}
+      ${renderMetricCard("毛盈虧", `${fmt_signed(pnl.shown_pct)}%`, `${fmt_signed(pnl.shown_usdt)} USDT ｜ ${pnl.source === "binance_sync" ? "Binance 同步" : "Mark Price 估算"}`)}
       ${renderMetricCard("成本後盈虧", `${fmt_signed(pnl.net_pct)}%`, `${fmt_signed(pnl.net_usdt)} USDT ｜ 成本 -${pnl.cost_usdt.toFixed(2)} USDT`)}
     </div>
   </div>

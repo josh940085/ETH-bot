@@ -687,7 +687,11 @@ def _load_position_panel_state():
             "position_notional_usdt": 0.0,
             "position_margin_usdt": 0.0,
             "binance_qty": 0.0,
+            "binance_mark_price": 0.0,
+            "binance_mark_price_ts": 0,
             "binance_unrealized_pnl_usdt": 0.0,
+            "binance_unrealized_pnl_ts": 0,
+            "estimated_unrealized_pnl_usdt": 0.0,
             "account_available_balance_usdt": 0.0,
             "account_wallet_balance_usdt": 0.0,
             "account_margin_balance_usdt": 0.0,
@@ -720,7 +724,11 @@ def _load_position_panel_state():
             "position_notional_usdt": 0.0,
             "position_margin_usdt": 0.0,
             "binance_qty": 0.0,
+            "binance_mark_price": 0.0,
+            "binance_mark_price_ts": 0,
             "binance_unrealized_pnl_usdt": 0.0,
+            "binance_unrealized_pnl_ts": 0,
+            "estimated_unrealized_pnl_usdt": 0.0,
             "account_available_balance_usdt": 0.0,
             "account_wallet_balance_usdt": 0.0,
             "account_margin_balance_usdt": 0.0,
@@ -752,7 +760,11 @@ def _load_position_panel_state():
         "position_notional_usdt": float(raw.get("position_notional_usdt", 0.0) or 0.0),
         "position_margin_usdt": float(raw.get("position_margin_usdt", 0.0) or 0.0),
         "binance_qty": float(raw.get("binance_qty", 0.0) or 0.0),
+        "binance_mark_price": float(raw.get("binance_mark_price", 0.0) or 0.0),
+        "binance_mark_price_ts": int(raw.get("binance_mark_price_ts", raw.get("ts", 0)) or 0),
         "binance_unrealized_pnl_usdt": float(raw.get("binance_unrealized_pnl_usdt", 0.0) or 0.0),
+        "binance_unrealized_pnl_ts": int(raw.get("binance_unrealized_pnl_ts", raw.get("ts", 0)) or 0),
+        "estimated_unrealized_pnl_usdt": float(raw.get("estimated_unrealized_pnl_usdt", 0.0) or 0.0),
         "account_available_balance_usdt": float(raw.get("account_available_balance_usdt", 0.0) or 0.0),
         "account_wallet_balance_usdt": float(raw.get("account_wallet_balance_usdt", 0.0) or 0.0),
         "account_margin_balance_usdt": float(raw.get("account_margin_balance_usdt", 0.0) or 0.0),
@@ -3460,6 +3472,7 @@ def sync_active_trade_from_binance(send_notice=False):
     leverage = max(1, _safe_int(row.get("leverage"), DEFAULT_LEV))
     position_margin = notional / leverage if leverage > 0 else 0.0
     unrealized_pnl_usdt = _safe_float(row.get("unRealizedProfit"), 0.0)
+    snapshot_ts = int(time.time())
     direction = "long" if position_amt > 0 else "short"
     preserve_local_state = (
         bool(active_trade.get("open"))
@@ -3551,9 +3564,12 @@ def sync_active_trade_from_binance(send_notice=False):
     POSITION_PANEL_STATE["size_ratio"] = size_ratio
     POSITION_PANEL_STATE["capital_usage_ratio"] = capital_usage_ratio
     POSITION_PANEL_STATE["binance_qty"] = actual_qty
+    POSITION_PANEL_STATE["binance_mark_price"] = mark_price
+    POSITION_PANEL_STATE["binance_mark_price_ts"] = snapshot_ts
     POSITION_PANEL_STATE["position_notional_usdt"] = notional
     POSITION_PANEL_STATE["position_margin_usdt"] = position_margin
     POSITION_PANEL_STATE["binance_unrealized_pnl_usdt"] = unrealized_pnl_usdt
+    POSITION_PANEL_STATE["binance_unrealized_pnl_ts"] = snapshot_ts
 
     sync_position_panel(mark_price)
 
@@ -3784,7 +3800,7 @@ def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0
 def sync_position_panel(current_price=None):
     _refresh_position_panel_account_state(force=False, log_on_error=False)
     entry_price = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
-    mark_price = _safe_float(current_price if current_price is not None else WS_PRICE, 0.0)
+    last_price = _safe_float(current_price if current_price is not None else WS_PRICE, 0.0)
     direction = str(active_trade.get("direction") or "")
     lev = _safe_int(POSITION_PANEL_STATE.get("lev"), DEFAULT_LEV) or DEFAULT_LEV
     pair = str(POSITION_PANEL_STATE.get("pair") or DEFAULT_PAIR)
@@ -3797,11 +3813,15 @@ def sync_position_panel(current_price=None):
     capital_usage_ratio = max(0.0, _safe_float(POSITION_PANEL_STATE.get("capital_usage_ratio"), 0.0)) if active_trade.get("open") else 0.0
 
     if active_trade.get("open"):
-        if not mark_price:
-            mark_price = entry_price
+        if not last_price:
+            last_price = entry_price
 
-        if position_qty > 0 and mark_price > 0:
-            position_notional_usdt = position_qty * mark_price
+        binance_mark_price = _safe_float(POSITION_PANEL_STATE.get("binance_mark_price"), 0.0)
+        if binance_mark_price <= 0:
+            binance_mark_price = last_price
+
+        if position_qty > 0 and binance_mark_price > 0:
+            position_notional_usdt = position_qty * binance_mark_price
             position_margin_usdt = position_notional_usdt / lev if lev > 0 else 0.0
         else:
             position_notional_usdt, position_margin_usdt = _estimate_panel_financials(entry_price, size_ratio, lev)
@@ -3819,12 +3839,20 @@ def sync_position_panel(current_price=None):
             capital_usage_ratio = min(1.0, size_ratio)
 
         if entry_price > 0 and position_qty > 0:
-            unrealized = (mark_price - entry_price) * position_qty if direction == "long" else (entry_price - mark_price) * position_qty
+            estimated_unrealized = (
+                (last_price - entry_price) * position_qty
+                if direction == "long"
+                else (entry_price - last_price) * position_qty
+            )
         elif entry_price > 0 and position_notional_usdt > 0:
-            raw_move = (mark_price - entry_price) / entry_price if direction == "long" else (entry_price - mark_price) / entry_price
-            unrealized = raw_move * position_notional_usdt
+            raw_move = (
+                (last_price - entry_price) / entry_price
+                if direction == "long"
+                else (entry_price - last_price) / entry_price
+            )
+            estimated_unrealized = raw_move * position_notional_usdt
         else:
-            unrealized = 0.0
+            estimated_unrealized = 0.0
 
         POSITION_PANEL_STATE["size"] = capital_usage_ratio
         POSITION_PANEL_STATE["size_ratio"] = size_ratio
@@ -3832,7 +3860,7 @@ def sync_position_panel(current_price=None):
         POSITION_PANEL_STATE["binance_qty"] = position_qty
         POSITION_PANEL_STATE["position_notional_usdt"] = position_notional_usdt
         POSITION_PANEL_STATE["position_margin_usdt"] = position_margin_usdt
-        POSITION_PANEL_STATE["binance_unrealized_pnl_usdt"] = unrealized
+        POSITION_PANEL_STATE["estimated_unrealized_pnl_usdt"] = estimated_unrealized
 
         payload = {
             "open": True,
@@ -3863,9 +3891,12 @@ def sync_position_panel(current_price=None):
             "position_notional_usdt": round(position_notional_usdt, 4),
             "position_margin_usdt": round(position_margin_usdt, 4),
             "binance_entry_price": round(entry_price, 4),
-            "binance_mark_price": round(mark_price, 4),
+            "binance_mark_price": round(binance_mark_price, 4),
+            "binance_mark_price_ts": _safe_int(POSITION_PANEL_STATE.get("binance_mark_price_ts"), 0),
             "binance_break_even_price": round(entry_price * (1 + fee_round_trip_rate / 2), 4) if direction == "long" else round(entry_price * (1 - fee_round_trip_rate / 2), 4),
-            "binance_unrealized_pnl_usdt": round(unrealized, 4),
+            "binance_unrealized_pnl_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_unrealized_pnl_usdt"), estimated_unrealized), 4),
+            "binance_unrealized_pnl_ts": _safe_int(POSITION_PANEL_STATE.get("binance_unrealized_pnl_ts"), 0),
+            "estimated_unrealized_pnl_usdt": round(estimated_unrealized, 4),
             "account_available_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_available_balance_usdt"), 0.0), 4),
             "account_wallet_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_wallet_balance_usdt"), 0.0), 4),
             "account_margin_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_margin_balance_usdt"), 0.0), 4),
@@ -3912,9 +3943,12 @@ def sync_position_panel(current_price=None):
             "position_notional_usdt": 0.0,
             "position_margin_usdt": 0.0,
             "binance_entry_price": 0.0,
-            "binance_mark_price": round(mark_price, 4),
+            "binance_mark_price": round(_safe_float(POSITION_PANEL_STATE.get("binance_mark_price"), last_price), 4),
+            "binance_mark_price_ts": _safe_int(POSITION_PANEL_STATE.get("binance_mark_price_ts"), 0),
             "binance_break_even_price": 0.0,
             "binance_unrealized_pnl_usdt": 0.0,
+            "binance_unrealized_pnl_ts": 0,
+            "estimated_unrealized_pnl_usdt": 0.0,
             "account_available_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_available_balance_usdt"), 0.0), 4),
             "account_wallet_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_wallet_balance_usdt"), 0.0), 4),
             "account_margin_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_margin_balance_usdt"), 0.0), 4),
