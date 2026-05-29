@@ -371,13 +371,31 @@ def _build_control_panel_keyboard():
         snapshot["ws_url"] = PANEL_REALTIME_WS_URL
 
     if active_trade.get("open"):
+        entry_price = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+        fee_round_trip_rate = _safe_float(POSITION_PANEL_STATE.get("fee_round_trip_rate"), 0.001)
         snapshot.update(
             {
                 "dir": str(active_trade.get("direction") or "long"),
-                "entry": round(_safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0), 4),
+                "entry": round(entry_price, 4),
                 "tp": round(_safe_float(active_trade.get("tp"), 0.0), 4),
                 "sl": round(_safe_float(active_trade.get("sl"), 0.0), 4),
                 "size": round(max(0.0, _safe_float(active_trade.get("size"), 0.0)) * 100.0, 2),
+                "capital_usage_ratio": round(max(0.0, _safe_float(POSITION_PANEL_STATE.get("capital_usage_ratio"), 0.0)), 4),
+                "binance_qty": round(_safe_float(POSITION_PANEL_STATE.get("binance_qty"), _get_active_trade_position_qty()), 6),
+                "position_notional_usdt": round(_safe_float(POSITION_PANEL_STATE.get("position_notional_usdt"), 0.0), 4),
+                "position_margin_usdt": round(_safe_float(POSITION_PANEL_STATE.get("position_margin_usdt"), 0.0), 4),
+                "binance_entry_price": round(entry_price, 4),
+                "binance_mark_price": round(_safe_float(POSITION_PANEL_STATE.get("binance_mark_price"), 0.0), 4),
+                "binance_mark_price_ts": int(_safe_int(POSITION_PANEL_STATE.get("binance_mark_price_ts"), snapshot["snapshot_ts"])),
+                "binance_break_even_price": round(
+                    entry_price * (1 + fee_round_trip_rate / 2),
+                    4,
+                )
+                if str(active_trade.get("direction") or "long") == "long"
+                else round(entry_price * (1 - fee_round_trip_rate / 2), 4),
+                "binance_unrealized_pnl_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_unrealized_pnl_usdt"), 0.0), 4),
+                "binance_unrealized_pnl_ts": int(_safe_int(POSITION_PANEL_STATE.get("binance_unrealized_pnl_ts"), snapshot["snapshot_ts"])),
+                "estimated_unrealized_pnl_usdt": round(_safe_float(POSITION_PANEL_STATE.get("estimated_unrealized_pnl_usdt"), 0.0), 4),
             }
         )
     else:

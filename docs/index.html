@@ -468,10 +468,22 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260529-2";
+  const APP_VERSION = "20260529-3";
 
   // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
+  const readNumberParam = (name, fallback = 0) => {
+    const raw = p.get(name);
+    if (raw === null || raw === "") return fallback;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : fallback;
+  };
+  const readNullableNumberParam = (name) => {
+    const raw = p.get(name);
+    if (raw === null || raw === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  };
   let DIR    = p.get("dir")   || "long";
   let ENTRY  = parseFloat(p.get("entry") || "0");
   let TP     = parseFloat(p.get("tp")    || "0");
@@ -491,15 +503,15 @@
   let LAST_CLOSE_CANDLE_HIGH = 0;
   let LAST_CLOSE_CANDLE_LOW = 0;
   let CLOSE_HITS = [];
-  let POSITION_NOTIONAL_USDT = 0;
-  let POSITION_MARGIN_USDT = 0;
-  let BINANCE_QTY = 0;
-  let BINANCE_ENTRY_PRICE = 0;
-  let BINANCE_MARK_PRICE = 0;
-  let BINANCE_MARK_PRICE_TS = 0;
-  let BINANCE_UNREALIZED_PNL_USDT = null;
-  let BINANCE_UNREALIZED_PNL_TS = 0;
-  let ESTIMATED_UNREALIZED_PNL_USDT = 0;
+  let POSITION_NOTIONAL_USDT = readNumberParam("position_notional_usdt", 0);
+  let POSITION_MARGIN_USDT = readNumberParam("position_margin_usdt", 0);
+  let BINANCE_QTY = readNumberParam("binance_qty", 0);
+  let BINANCE_ENTRY_PRICE = readNumberParam("binance_entry_price", ENTRY);
+  let BINANCE_MARK_PRICE = readNumberParam("binance_mark_price", 0);
+  let BINANCE_MARK_PRICE_TS = readNumberParam("binance_mark_price_ts", URL_SNAPSHOT_TS);
+  let BINANCE_UNREALIZED_PNL_USDT = readNullableNumberParam("binance_unrealized_pnl_usdt");
+  let BINANCE_UNREALIZED_PNL_TS = readNumberParam("binance_unrealized_pnl_ts", URL_SNAPSHOT_TS);
+  let ESTIMATED_UNREALIZED_PNL_USDT = readNumberParam("estimated_unrealized_pnl_usdt", 0);
   let ACCOUNT_AVAILABLE_BALANCE_USDT = parseFloat(p.get("available_balance_usdt") || "0");
   let ACCOUNT_WALLET_BALANCE_USDT = parseFloat(p.get("wallet_balance_usdt") || "0");
   let ACCOUNT_MARGIN_BALANCE_USDT = parseFloat(p.get("margin_balance_usdt") || "0");
@@ -518,7 +530,7 @@
   let REDUCE_COUNT = 0;
   let LAST_ADJUST_TS = 0;
   let TP_SL_ADJUSTED_4H = false;
-  let BINANCE_BREAK_EVEN_PRICE = 0;
+  let BINANCE_BREAK_EVEN_PRICE = readNumberParam("binance_break_even_price", 0);
   let FUNDING_NEXT_TS = 0;
   let BREAK_EVEN_ACTIVE = false;
   let BREAK_EVEN_TARGET = 0;
@@ -540,8 +552,8 @@
     "/ETH-bot/docs/position.json",
     "/ETH-bot/position.json",
   ];
-  let LAST_POSITION_SOURCE = "";
-  let LAST_POSITION_TS = 0;
+  let LAST_POSITION_SOURCE = URL_SNAPSHOT_TS > 0 ? "URL 參數" : "";
+  let LAST_POSITION_TS = URL_SNAPSHOT_TS > 0 ? URL_SNAPSHOT_TS : 0;
   const POSITION_FETCH_TIMEOUT_MS = 1200;
   const PRICE_FETCH_TIMEOUT_MS = 1500;
   const PANEL_REFRESH_INTERVAL_MS = 1500;
@@ -838,7 +850,7 @@
         ? Math.max(0, BINANCE_QTY * markPx)
         : (POSITION_MARGIN_USDT > 0
           ? Math.max(0, POSITION_MARGIN_USDT * Math.max(1, LEV))
-          : Math.max(0, ENTRY * (SIZE / 100))));
+          : 0));
     const margin = POSITION_MARGIN_USDT > 0 ? POSITION_MARGIN_USDT : (notional > 0 ? notional / Math.max(1, LEV) : 0);
     const gross_usdt = BINANCE_QTY > 0
       ? (DIR === "long" ? (markPx - ENTRY) : (ENTRY - markPx)) * BINANCE_QTY
