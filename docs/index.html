@@ -312,6 +312,14 @@
       margin-top: 12px;
     }
 
+    .section-grid-compact {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .section-grid-compact .metric-card {
+      min-height: 100%;
+    }
+
     .metric-card {
       background: #111;
       border: 1px solid #262626;
@@ -456,8 +464,18 @@
       color: #888;
     }
 
+    @media (max-width: 520px) {
+      .section-grid-compact {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
     @media (max-width: 380px) {
       .section-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .section-grid-compact {
         grid-template-columns: 1fr;
       }
     }
@@ -468,7 +486,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260529-5";
+  const APP_VERSION = "20260529-6";
 
   // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
@@ -1250,7 +1268,7 @@
   </div>
   <div class="card">
     <div class="card-title">上一筆設定</div>
-    <div class="section-grid">
+    <div class="section-grid section-grid-compact">
       ${renderMetricCard("Binance 總資產", `${fmt(totalAssetsUsdt)} USDT`, assetSubtext)}
       ${renderMetricCard("方向", lastDir, `槓桿 ${LEV}x`)}
       ${renderMetricCard("進場 / BE", `${ENTRY > 0 ? fmt(ENTRY) : "-"} / ${BINANCE_BREAK_EVEN_PRICE > 0 ? fmt(BINANCE_BREAK_EVEN_PRICE) : "-"}`)}
