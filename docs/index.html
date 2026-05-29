@@ -468,7 +468,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260529-4";
+  const APP_VERSION = "20260529-5";
 
   // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
@@ -495,6 +495,7 @@
   const URL_SNAPSHOT_TS = Number.isFinite(Number(p.get("snapshot_ts"))) ? Number(p.get("snapshot_ts")) : 0;
   const REMOTE_STATE_URL = p.get("state_url") || "";
   const REMOTE_WS_URL = p.get("ws_url") || "";
+  const PANEL_SESSION = p.get("panel_session") || "";
   const hasUrlPosition = !FORCE_RESTART && ENTRY > 0 && TP > 0 && SL > 0;
   let POSITION_OPEN = hasUrlPosition;
   let LAST_CLOSE_REASON = "";
@@ -541,6 +542,8 @@
   const TELEGRAM_WEBAPP = (window.Telegram && window.Telegram.WebApp) ? Telegram.WebApp : null;
   const TELEGRAM_INIT_DATA = TELEGRAM_WEBAPP ? String(TELEGRAM_WEBAPP.initData || "").trim() : "";
   const HAS_TELEGRAM_AUTH = TELEGRAM_INIT_DATA.length > 0;
+  const HAS_PANEL_SESSION = PANEL_SESSION.length > 0;
+  const HAS_VIEWER_AUTH = HAS_TELEGRAM_AUTH || HAS_PANEL_SESSION;
   const IS_LOCAL_PREVIEW = location.protocol === "file:" || location.hostname === "localhost" || location.hostname === "127.0.0.1";
 
   // ── Telegram Web App 初始化 ──
@@ -570,12 +573,22 @@
   let realtimeReconnectTimer = null;
   let HAS_POSITION_PAYLOAD = hasUrlPosition;
   let PANEL_ACCESS_STATE = (REMOTE_STATE_URL || REMOTE_WS_URL)
-    ? (HAS_TELEGRAM_AUTH ? "connecting" : "needs_telegram")
+    ? (HAS_VIEWER_AUTH ? "connecting" : "needs_telegram")
     : (POSITION_JSON_URLS.length ? "local_snapshot" : "needs_realtime");
   let PANEL_ACCESS_MESSAGE = "";
 
-  function buildTelegramAuthHeaders() {
-    return HAS_TELEGRAM_AUTH ? { "X-Telegram-Init-Data": TELEGRAM_INIT_DATA } : {};
+  function buildViewerAuthHeaders() {
+    const headers = {};
+    if (HAS_TELEGRAM_AUTH) headers["X-Telegram-Init-Data"] = TELEGRAM_INIT_DATA;
+    if (HAS_PANEL_SESSION) headers["X-Panel-Session"] = PANEL_SESSION;
+    return headers;
+  }
+
+  function buildViewerAuthQuery() {
+    const params = new URLSearchParams({ v: APP_VERSION });
+    if (HAS_TELEGRAM_AUTH) params.set("tg_init_data", TELEGRAM_INIT_DATA);
+    if (HAS_PANEL_SESSION) params.set("panel_session", PANEL_SESSION);
+    return params;
   }
 
   async function fetchJsonWithTimeout(url, timeoutMs = POSITION_FETCH_TIMEOUT_MS, options = {}) {
@@ -726,7 +739,7 @@
 
   function connectRealtimeSocket() {
     if (!REMOTE_WS_URL || typeof WebSocket !== "function") return;
-    if (!HAS_TELEGRAM_AUTH) {
+    if (!HAS_VIEWER_AUTH) {
       PANEL_ACCESS_STATE = "needs_telegram";
       return;
     }
@@ -734,10 +747,7 @@
       return;
     }
 
-    const wsParams = new URLSearchParams({
-      v: APP_VERSION,
-      tg_init_data: TELEGRAM_INIT_DATA,
-    });
+    const wsParams = buildViewerAuthQuery();
     const wsUrl = REMOTE_WS_URL + (REMOTE_WS_URL.includes("?") ? "&" : "?") + wsParams.toString();
     realtimeSocket = new WebSocket(wsUrl);
 
@@ -782,12 +792,12 @@
 
     if (REMOTE_STATE_URL && !freshWsState) {
       const remoteUrl = REMOTE_STATE_URL + (REMOTE_STATE_URL.includes("?") ? "&" : "?") + "t=" + Date.now();
-      if (!HAS_TELEGRAM_AUTH) {
+      if (!HAS_VIEWER_AUTH) {
         PANEL_ACCESS_STATE = "needs_telegram";
         return;
       }
       const remoteData = await fetchJsonWithTimeout(remoteUrl, POSITION_FETCH_TIMEOUT_MS, {
-        headers: buildTelegramAuthHeaders(),
+        headers: buildViewerAuthHeaders(),
       });
       if (remoteData && remoteData.__auth_error) {
         PANEL_ACCESS_STATE = "unauthorized";
@@ -1186,8 +1196,8 @@
 
   // ── 渲染 UI ──
   function render() {
-    if ((REMOTE_STATE_URL || REMOTE_WS_URL) && !HAS_TELEGRAM_AUTH) {
-      renderAccessState("請從 Telegram 開啟", "這個 Mini App 已改成使用 Telegram 驗證與即時面板服務，直接從外部瀏覽器打開不會顯示敏感倉位資料。");
+    if ((REMOTE_STATE_URL || REMOTE_WS_URL) && !HAS_VIEWER_AUTH) {
+      renderAccessState("請從 Telegram 開啟", "請從和 bot 的聊天面板按鈕重新打開這個 Mini App。直接貼公開網址，或從外部瀏覽器開啟，都不會附帶可用的面板授權。");
       return;
     }
     if (!REMOTE_STATE_URL && !REMOTE_WS_URL && !POSITION_JSON_URLS.length) {

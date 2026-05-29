@@ -290,7 +290,7 @@ def resolve_private_chat_id_for_controls(chat_id=None):
 	return None
 
 
-def _append_pending_command(chat_id, text, update_id):
+def _append_pending_command(chat_id, text, update_id, user_id=None, username="", first_name="", chat_type=""):
 	def _mutate(payload):
 		queue = payload.get("pending_commands")
 		if not isinstance(queue, list):
@@ -301,6 +301,10 @@ def _append_pending_command(chat_id, text, update_id):
 			{
 				"chat_id": chat_id,
 				"text": text,
+				"user_id": user_id,
+				"username": str(username or ""),
+				"first_name": str(first_name or ""),
+				"chat_type": str(chat_type or ""),
 				"update_id": int(update_id),
 				"ts": int(time.time()),
 			}
@@ -311,7 +315,7 @@ def _append_pending_command(chat_id, text, update_id):
 	update_telegram_state(_mutate)
 
 
-def _append_pending_callback(chat_id, callback_data, callback_id, message_id, update_id):
+def _append_pending_callback(chat_id, callback_data, callback_id, message_id, update_id, user_id=None, username="", first_name="", chat_type=""):
 	def _mutate(payload):
 		queue = payload.get("pending_commands")
 		if not isinstance(queue, list):
@@ -322,6 +326,10 @@ def _append_pending_callback(chat_id, callback_data, callback_id, message_id, up
 			{
 				"chat_id": chat_id,
 				"text": f"__callback__:{callback_data}:{callback_id}:{message_id}",
+				"user_id": user_id,
+				"username": str(username or ""),
+				"first_name": str(first_name or ""),
+				"chat_type": str(chat_type or ""),
 				"update_id": int(update_id),
 				"ts": int(time.time()),
 			}
@@ -474,6 +482,11 @@ def poll_telegram_commands(token=None):
 		msg = u.get("message", {})
 		text = msg.get("text", "")
 		chat_id = msg.get("chat", {}).get("id")
+		chat_type = str(msg.get("chat", {}).get("type", "") or "")
+		from_user = msg.get("from", {}) if isinstance(msg.get("from"), dict) else {}
+		user_id = from_user.get("id")
+		username = str(from_user.get("username", "") or "")
+		first_name = str(from_user.get("first_name", "") or "")
 
 		if update_id is None:
 			continue
@@ -492,6 +505,10 @@ def poll_telegram_commands(token=None):
 				cq_id,
 				cq_msg_id,
 				update_id,
+				user_id=cq.get("from", {}).get("id"),
+				username=str(cq.get("from", {}).get("username", "") or ""),
+				first_name=str(cq.get("from", {}).get("first_name", "") or ""),
+				chat_type=str(cq_msg.get("chat", {}).get("type", "") or ""),
 			)
 			continue
 
@@ -508,7 +525,15 @@ def poll_telegram_commands(token=None):
 					action = raw_web_app_data
 
 			if action:
-				_append_pending_command(chat_id, f"__webapp__:{action}", update_id)
+				_append_pending_command(
+					chat_id,
+					f"__webapp__:{action}",
+					update_id,
+					user_id=user_id,
+					username=username,
+					first_name=first_name,
+					chat_type=chat_type,
+				)
 				continue
 
 		if not text:
@@ -524,7 +549,15 @@ def poll_telegram_commands(token=None):
 			send_message(chat_id, "♻️ 已收到 /restart，將由啟動器同步並重啟。", token=resolved_token)
 			continue
 
-		_append_pending_command(chat_id, text, update_id)
+		_append_pending_command(
+			chat_id,
+			text,
+			update_id,
+			user_id=user_id,
+			username=username,
+			first_name=first_name,
+			chat_type=chat_type,
+		)
 
 
 def fetch_telegram_commands(
@@ -559,6 +592,10 @@ def fetch_telegram_commands(
 					"update_id": update_id,
 					"text": str(item.get("text", "") or ""),
 					"chat_id": item.get("chat_id"),
+					"user_id": item.get("user_id"),
+					"username": str(item.get("username", "") or ""),
+					"first_name": str(item.get("first_name", "") or ""),
+					"chat_type": str(item.get("chat_type", "") or ""),
 				}
 			)
 
@@ -602,11 +639,20 @@ def fetch_telegram_commands(
 					"update_id": update_id,
 					"text": f"__callback__:{str(cq.get('data', '') or '')}:{str(cq.get('id', '') or '')}:{cq.get('message', {}).get('message_id')}",
 					"chat_id": cq.get("message", {}).get("chat", {}).get("id"),
+					"user_id": cq.get("from", {}).get("id"),
+					"username": str(cq.get("from", {}).get("username", "") or ""),
+					"first_name": str(cq.get("from", {}).get("first_name", "") or ""),
+					"chat_type": str(cq.get("message", {}).get("chat", {}).get("type", "") or ""),
 				}
 			)
 			continue
 
 		message = u.get("message", {})
+		chat_type = str(message.get("chat", {}).get("type", "") or "")
+		from_user = message.get("from", {}) if isinstance(message.get("from"), dict) else {}
+		user_id = from_user.get("id")
+		username = str(from_user.get("username", "") or "")
+		first_name = str(from_user.get("first_name", "") or "")
 		web_app_data = message.get("web_app_data") if isinstance(message, dict) else None
 		if isinstance(web_app_data, dict):
 			raw_web_app_data = str(web_app_data.get("data", "") or "").strip()
@@ -624,6 +670,10 @@ def fetch_telegram_commands(
 						"update_id": update_id,
 						"text": f"{webapp_command_prefix}{action}",
 						"chat_id": message.get("chat", {}).get("id"),
+						"user_id": user_id,
+						"username": username,
+						"first_name": first_name,
+						"chat_type": chat_type,
 					}
 				)
 				continue
@@ -633,6 +683,10 @@ def fetch_telegram_commands(
 				"update_id": update_id,
 				"text": str(message.get("text", "") or ""),
 				"chat_id": message.get("chat", {}).get("id"),
+				"user_id": user_id,
+				"username": username,
+				"first_name": first_name,
+				"chat_type": chat_type,
 			}
 		)
 

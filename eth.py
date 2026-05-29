@@ -14,6 +14,7 @@ if NotOpenSSLWarning is not None:
 import requests
 import datetime
 import time
+import base64
 import hashlib
 import hmac
 import math
@@ -199,6 +200,13 @@ def _safe_float_env(name: str, default: float) -> float:
         return float(default)
 
 
+def _safe_int_env(name: str, default: int) -> int:
+    try:
+        return int(str(os.getenv(name, default)).strip())
+    except Exception:
+        return int(default)
+
+
 def _safe_float_env_names(names, default: float) -> float:
     if isinstance(names, str):
         names = (names,)
@@ -235,6 +243,7 @@ POSITION_PANEL_REALTIME_BASE_URL = str(os.getenv("POSITION_PANEL_REALTIME_BASE_U
 POSITION_PANEL_REALTIME_TOKEN = str(os.getenv("POSITION_PANEL_REALTIME_TOKEN", "") or "").strip()
 POSITION_PANEL_REALTIME_HEARTBEAT_SEC = max(3.0, _safe_float_env("POSITION_PANEL_REALTIME_HEARTBEAT_SEC", 5.0))
 POSITION_PANEL_REALTIME_TIMEOUT_SEC = max(0.5, _safe_float_env("POSITION_PANEL_REALTIME_TIMEOUT_SEC", 2.5))
+POSITION_PANEL_SESSION_TTL_SEC = max(300, _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 43200))
 
 
 def _build_panel_realtime_urls(base_url: str, token: str = ""):
@@ -255,6 +264,44 @@ def _build_panel_realtime_urls(base_url: str, token: str = ""):
     ws_url = urlunparse((ws_scheme, parsed.netloc, "/ws/panel", "", "", ""))
 
     return state_url, ws_url, publish_url
+
+
+def _panel_session_secret() -> str:
+    secret = str(POSITION_PANEL_REALTIME_TOKEN or TELEGRAM_TOKEN or "").strip()
+    return secret
+
+
+def _urlsafe_b64encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _create_panel_session(chat_id) -> str:
+    if not _is_private_chat_id(chat_id):
+        return ""
+
+    secret = _panel_session_secret()
+    if not secret:
+        return ""
+
+    try:
+        user_id = int(str(chat_id).strip())
+    except Exception:
+        return ""
+
+    now_ts = int(time.time())
+    payload = {
+        "v": 1,
+        "uid": user_id,
+        "iat": now_ts,
+        "exp": now_ts + POSITION_PANEL_SESSION_TTL_SEC,
+    }
+    body = _urlsafe_b64encode(
+        json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    signature = _urlsafe_b64encode(
+        hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
+    )
+    return f"{body}.{signature}"
 
 
 PANEL_REALTIME_STATE_URL, PANEL_REALTIME_WS_URL, PANEL_REALTIME_PUBLISH_URL = _build_panel_realtime_urls(
@@ -344,9 +391,10 @@ def _get_follow_button_text() -> str:
     return FOLLOW_BUTTON_TEXT_ENABLED if _get_follow_mode_enabled() else FOLLOW_BUTTON_TEXT_DISABLED
 
 
-def _build_control_panel_keyboard():
+def _build_control_panel_keyboard(chat_id=None):
     follow_text = _get_follow_button_text()
     panel_url = MINI_APP_URL
+    panel_session = _create_panel_session(chat_id) if (PANEL_REALTIME_STATE_URL or PANEL_REALTIME_WS_URL) else ""
 
     snapshot = {
         "t": int(time.time()),
@@ -358,6 +406,8 @@ def _build_control_panel_keyboard():
         snapshot["state_url"] = PANEL_REALTIME_STATE_URL
     if PANEL_REALTIME_WS_URL:
         snapshot["ws_url"] = PANEL_REALTIME_WS_URL
+    if panel_session:
+        snapshot["panel_session"] = panel_session
 
     if PANEL_REALTIME_STATE_URL or PANEL_REALTIME_WS_URL:
         if not active_trade.get("open"):
@@ -502,7 +552,7 @@ def _edit_control_panel_markup(chat_id, message_id):
             json={
                 "chat_id": chat_id,
                 "message_id": int(message_id),
-                "reply_markup": _build_control_panel_keyboard(),
+                "reply_markup": _build_control_panel_keyboard(chat_id),
             },
             timeout=5,
         )
@@ -3713,7 +3763,7 @@ def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
 
 def _send_telegram_message(chat_id, msg, include_control_panel=False, timeout=5):
     safe_text, fallback_text = _sanitize_telegram_text(msg)
-    reply_markup = _build_control_panel_keyboard() if include_control_panel and _is_private_chat_id(chat_id) else None
+    reply_markup = _build_control_panel_keyboard(chat_id) if include_control_panel and _is_private_chat_id(chat_id) else None
 
     res = _post_telegram_message(chat_id, safe_text, reply_markup=reply_markup, timeout=timeout)
     if res is not None and res.status_code == 400 and fallback_text != safe_text:
@@ -6932,6 +6982,7 @@ def _build_bot_help_text():
         "可用指令：\n"
         "/start - 開始使用並顯示控制面板\n"
         "/help - 顯示這份說明\n"
+        "/whoami - 顯示你的 Telegram user id\n"
         "/settings - 顯示跟單與控制面板設定\n"
         "/panel 或 /menu - 開啟倉位面板\n"
         "/follow - 開關跟單\n"
@@ -6951,9 +7002,52 @@ def _build_bot_settings_text():
         "- 用 /panel 或 /menu 開啟控制面板\n"
         "- 用 /follow 切換跟單開關\n"
         "- 用 /sync 同步幣安倉位\n"
+        "- 用 /whoami 查自己的 Telegram user id\n"
         "- 用 /tp、/sl、/tpsl 調整持倉保護\n"
         "- 若要手動平倉，請使用控制面板上的「⛔ 一鍵平倉」"
     )
+
+
+def _build_whoami_text(context=None):
+    context = context if isinstance(context, dict) else {}
+    chat_id = context.get("chat_id")
+    user_id = context.get("user_id")
+    username = str(context.get("username", "") or "").strip()
+    first_name = str(context.get("first_name", "") or "").strip()
+    chat_type = str(context.get("chat_type", "") or "").strip()
+
+    whitelist_user_id = user_id
+    if whitelist_user_id in (None, "") and _is_private_chat_id(chat_id):
+        whitelist_user_id = chat_id
+
+    lines = ["你的 Telegram 資訊"]
+    if whitelist_user_id not in (None, ""):
+        lines.append(f"user_id: {whitelist_user_id}")
+    else:
+        lines.append("user_id: 取得失敗")
+
+    if chat_id not in (None, ""):
+        lines.append(f"chat_id: {chat_id}")
+
+    if chat_type:
+        lines.append(f"chat_type: {chat_type}")
+
+    if username:
+        lines.append(f"username: @{username}")
+
+    if first_name:
+        lines.append(f"first_name: {first_name}")
+
+    if whitelist_user_id not in (None, ""):
+        lines.append("")
+        lines.append("白名單範例：")
+        lines.append(f"POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS={whitelist_user_id}")
+        lines.append("白名單要填 user_id，不是 @username。")
+    else:
+        lines.append("")
+        lines.append("建議在和 bot 的私聊視窗內重新送一次 /whoami。")
+
+    return "\n".join(lines)
 
 
 # ===== Telegram 指令（AI分析） =====
@@ -6970,6 +7064,9 @@ def handle_ai_command(text, context=None):
 
     if text.startswith("/help"):
         return _build_bot_help_text()
+
+    if text.startswith("/whoami"):
+        return _build_whoami_text(context)
 
     if text.startswith("/settings"):
         if is_private_chat:
@@ -7234,6 +7331,10 @@ def run_bot():
                         "macro": macro_bias if 'macro_bias' in locals() else None,
                         "volume_spike": volume_spike if 'volume_spike' in locals() else None,
                         "chat_id": chat_id,
+                        "user_id": command.get("user_id"),
+                        "username": command.get("username"),
+                        "first_name": command.get("first_name"),
+                        "chat_type": command.get("chat_type"),
                     }
 
                     reply = handle_ai_command(text, context)

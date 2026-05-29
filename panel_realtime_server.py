@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import base64
 import hashlib
 import hmac
 import json
@@ -13,7 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 
-def _load_local_env():
+def _read_local_env_values():
+    values = {}
     for name in (".env", "token.env"):
         path = Path(name)
         if not path.exists():
@@ -26,10 +28,17 @@ def _load_local_env():
                 key, value = line.split("=", 1)
                 key = key.strip()
                 value = value.strip().strip('"').strip("'")
-                if key and key not in os.environ:
-                    os.environ[key] = value
+                if key:
+                    values[key] = value
         except Exception:
             continue
+    return values
+
+
+def _load_local_env():
+    for key, value in _read_local_env_values().items():
+        if key not in os.environ:
+            os.environ[key] = value
 
 
 _load_local_env()
@@ -56,14 +65,16 @@ def _safe_int_env(name: str, default: int) -> int:
         return int(default)
 
 
-def _load_allowed_user_ids():
-    raw = str(
-        os.getenv("POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS")
-        or os.getenv("TELEGRAM_CHAT_ID")
-        or ""
-    ).strip()
+def _runtime_env_value(name: str, default=""):
+    local_values = _read_local_env_values()
+    if name in local_values:
+        return local_values[name]
+    return os.getenv(name, default)
+
+
+def _load_allowed_user_ids(raw: str):
     values = set()
-    for item in raw.split(","):
+    for item in str(raw or "").strip().split(","):
         text = str(item or "").strip()
         if not text:
             continue
@@ -75,8 +86,8 @@ def _load_allowed_user_ids():
 
 def _resolve_panel_port(default: int = 8787) -> int:
     raw = (
-        str(os.getenv("POSITION_PANEL_REALTIME_PORT", "") or "").strip()
-        or str(os.getenv("PORT", "") or "").strip()
+        str(_runtime_env_value("POSITION_PANEL_REALTIME_PORT", "") or "").strip()
+        or str(_runtime_env_value("PORT", "") or "").strip()
     )
     if not raw:
         return int(default)
@@ -86,10 +97,6 @@ def _resolve_panel_port(default: int = 8787) -> int:
         return int(default)
 
 
-PANEL_TOKEN = str(os.getenv("POSITION_PANEL_REALTIME_TOKEN", "") or "").strip()
-TELEGRAM_TOKEN = str(os.getenv("TELEGRAM_TOKEN", "") or "").strip()
-TELEGRAM_INIT_DATA_MAX_AGE_SEC = max(60, _safe_int_env("POSITION_PANEL_TELEGRAM_AUTH_MAX_AGE_SEC", 86400))
-ALLOWED_TELEGRAM_USER_IDS = _load_allowed_user_ids()
 WS_PING_INTERVAL_SEC = max(10.0, _safe_float_env("POSITION_PANEL_WS_PING_INTERVAL_SEC", 20.0))
 
 app = FastAPI(title="ETH Bot Panel Realtime", version="1.0.0")
@@ -107,10 +114,37 @@ CLIENTS = set()
 CLIENTS_LOCK = asyncio.Lock()
 
 
+def _viewer_auth_settings():
+    telegram_token = str(_runtime_env_value("TELEGRAM_TOKEN", "") or "").strip()
+    panel_token = str(_runtime_env_value("POSITION_PANEL_REALTIME_TOKEN", "") or "").strip()
+    max_age_sec = max(
+        60,
+        _safe_int_env("POSITION_PANEL_TELEGRAM_AUTH_MAX_AGE_SEC", 86400),
+    )
+    session_ttl_sec = max(
+        300,
+        _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 43200),
+    )
+    allowed_ids = _load_allowed_user_ids(
+        _runtime_env_value(
+            "POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS",
+            _runtime_env_value("TELEGRAM_CHAT_ID", ""),
+        )
+    )
+    return {
+        "telegram_token": telegram_token,
+        "panel_token": panel_token,
+        "max_age_sec": max_age_sec,
+        "session_ttl_sec": session_ttl_sec,
+        "allowed_ids": allowed_ids,
+    }
+
+
 def _token_valid(token: str) -> bool:
-    if not PANEL_TOKEN:
+    panel_token = _viewer_auth_settings().get("panel_token", "")
+    if not panel_token:
         return True
-    return str(token or "").strip() == PANEL_TOKEN
+    return str(token or "").strip() == panel_token
 
 
 def _extract_token(request: Request) -> str:
@@ -137,6 +171,18 @@ def _extract_init_data_ws(websocket: WebSocket) -> str:
     ).strip()
 
 
+def _extract_panel_session_http(request: Request) -> str:
+    return str(
+        request.headers.get("x-panel-session", "")
+        or request.query_params.get("panel_session", "")
+        or ""
+    ).strip()
+
+
+def _extract_panel_session_ws(websocket: WebSocket) -> str:
+    return str(websocket.query_params.get("panel_session", "") or "").strip()
+
+
 def _parse_telegram_init_data(init_data: str) -> dict:
     values = {}
     for key, value in parse_qsl(str(init_data or ""), keep_blank_values=True):
@@ -145,8 +191,79 @@ def _parse_telegram_init_data(init_data: str) -> dict:
     return values
 
 
+def _urlsafe_b64decode(text: str) -> bytes:
+    raw = str(text or "").strip()
+    if not raw:
+        return b""
+    padding = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode((raw + padding).encode("ascii"))
+
+
+def _panel_session_secret(settings=None) -> str:
+    settings = settings or _viewer_auth_settings()
+    return str(settings.get("panel_token") or settings.get("telegram_token") or "").strip()
+
+
+def _validate_panel_session(panel_session: str):
+    settings = _viewer_auth_settings()
+    secret = _panel_session_secret(settings)
+    if not secret:
+        return None
+
+    token = str(panel_session or "").strip()
+    if "." not in token:
+        return None
+
+    body, their_sig = token.split(".", 1)
+    if not body or not their_sig:
+        return None
+
+    expected_sig = base64.urlsafe_b64encode(
+        hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
+    ).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(expected_sig, their_sig):
+        return None
+
+    try:
+        payload = json.loads(_urlsafe_b64decode(body).decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    try:
+        user_id = int(payload.get("uid"))
+        issued_at = int(payload.get("iat", 0))
+        expires_at = int(payload.get("exp", 0))
+    except Exception:
+        return None
+
+    now_ts = int(time.time())
+    max_ttl = max(300, int(settings.get("session_ttl_sec", 43200) or 43200))
+    if issued_at <= 0 or expires_at <= issued_at:
+        return None
+    if (expires_at - issued_at) > max_ttl:
+        return None
+    if now_ts >= expires_at:
+        return None
+
+    allowed_ids = settings.get("allowed_ids") or set()
+    if allowed_ids and user_id not in allowed_ids:
+        return None
+
+    payload["user_id"] = user_id
+    payload["iat"] = issued_at
+    payload["exp"] = expires_at
+    return payload
+
+
 def _validate_telegram_init_data(init_data: str):
-    if not TELEGRAM_TOKEN:
+    settings = _viewer_auth_settings()
+    telegram_token = str(settings.get("telegram_token", "") or "").strip()
+    max_age_sec = max(60, int(settings.get("max_age_sec", 86400) or 86400))
+    allowed_ids = settings.get("allowed_ids") or set()
+
+    if not telegram_token:
         return None
 
     payload = _parse_telegram_init_data(init_data)
@@ -160,11 +277,11 @@ def _validate_telegram_init_data(init_data: str):
         return None
 
     now_ts = int(time.time())
-    if auth_date <= 0 or (now_ts - auth_date) > TELEGRAM_INIT_DATA_MAX_AGE_SEC:
+    if auth_date <= 0 or (now_ts - auth_date) > max_age_sec:
         return None
 
     data_check_string = "\n".join(f"{key}={payload[key]}" for key in sorted(payload.keys()))
-    secret_key = hmac.new(b"WebAppData", TELEGRAM_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+    secret_key = hmac.new(b"WebAppData", telegram_token.encode("utf-8"), hashlib.sha256).digest()
     expected_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected_hash, their_hash):
         return None
@@ -180,7 +297,7 @@ def _validate_telegram_init_data(init_data: str):
     except Exception:
         user_id = None
 
-    if ALLOWED_TELEGRAM_USER_IDS and user_id not in ALLOWED_TELEGRAM_USER_IDS:
+    if allowed_ids and user_id not in allowed_ids:
         return None
 
     payload["user"] = user
@@ -190,19 +307,30 @@ def _validate_telegram_init_data(init_data: str):
 
 
 def _viewer_authorized_http(request: Request) -> bool:
-    if PANEL_TOKEN and _token_valid(_extract_token(request)):
+    settings = _viewer_auth_settings()
+    panel_token = str(settings.get("panel_token", "") or "").strip()
+    telegram_token = str(settings.get("telegram_token", "") or "").strip()
+
+    if panel_token and _token_valid(_extract_token(request)):
         return True
-    if not TELEGRAM_TOKEN:
-        return not PANEL_TOKEN
+    if _validate_panel_session(_extract_panel_session_http(request)) is not None:
+        return True
+    if not telegram_token:
+        return not panel_token
     return _validate_telegram_init_data(_extract_init_data_http(request)) is not None
 
 
 def _viewer_authorized_ws(websocket: WebSocket) -> bool:
+    settings = _viewer_auth_settings()
+    panel_token = str(settings.get("panel_token", "") or "").strip()
+    telegram_token = str(settings.get("telegram_token", "") or "").strip()
     token = str(websocket.query_params.get("token", "") or "").strip()
-    if PANEL_TOKEN and _token_valid(token):
+    if panel_token and _token_valid(token):
         return True
-    if not TELEGRAM_TOKEN:
-        return not PANEL_TOKEN
+    if _validate_panel_session(_extract_panel_session_ws(websocket)) is not None:
+        return True
+    if not telegram_token:
+        return not panel_token
     return _validate_telegram_init_data(_extract_init_data_ws(websocket)) is not None
 
 
