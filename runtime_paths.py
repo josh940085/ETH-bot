@@ -6,7 +6,6 @@ REPO_DIR = Path(__file__).resolve().parent
 DEFAULT_RUNTIME_DIR = REPO_DIR / ".runtime"
 DEFAULT_BOT_DATA_DIR = DEFAULT_RUNTIME_DIR / "data"
 DEFAULT_BOT_AI_DATA_DIR = DEFAULT_RUNTIME_DIR / "ai"
-LEGACY_AI_DATA_DIR = Path("/Volumes/SSD/trading")
 
 
 def _load_local_env():
@@ -49,16 +48,7 @@ def _resolve_bot_ai_data_dir(bot_data_dir: Path) -> Path:
     if raw:
         return _normalize_path(raw)
 
-    if DEFAULT_BOT_AI_DATA_DIR.exists() or bot_data_dir == DEFAULT_BOT_DATA_DIR:
-        return DEFAULT_BOT_AI_DATA_DIR
-
-    if str(os.getenv("BOT_DATA_DIR", "") or "").strip():
-        return bot_data_dir
-
-    if LEGACY_AI_DATA_DIR.exists():
-        return LEGACY_AI_DATA_DIR
-
-    return bot_data_dir
+    return DEFAULT_BOT_AI_DATA_DIR
 
 _load_local_env()
 

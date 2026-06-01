@@ -105,7 +105,7 @@ BOT_AI_DATA_DIR=.runtime/ai
 
 ## Docker
 
-已附上 `Dockerfile` 和 [compose.yaml](/Users/ju-kuangchang/ETH-bot/compose.yaml)。
+已附上 `Dockerfile` 和 [compose.yaml](compose.yaml)。
 如果另一台機器有 Docker，直接在 SSD 內的 repo 執行：
 
 ```bash
@@ -141,7 +141,7 @@ BOT_AI_DATA_DIR=.runtime/ai
 - `learning_buffer.pkl`
 - `sl_followup_reviews.json`
 
-`BOT_AI_DATA_DIR` 會接手原本寫死在 `/Volumes/SSD/trading` 的 AI 檔案：
+`BOT_AI_DATA_DIR` 會接手 AI 訓練資料與模型檔：
 
 - `model.pkl`
 - `ai_data.csv`
@@ -150,7 +150,7 @@ BOT_AI_DATA_DIR=.runtime/ai
 - `online_model_meta.json`
 - `ai_learning_meta.json`
 
-如果你沒設 `BOT_AI_DATA_DIR`，程式會先看 repo 內的 `.runtime/ai`；找不到時才退回舊的 `/Volumes/SSD/trading` 或 `BOT_DATA_DIR`，避免既有資料突然失聯。
+如果你沒設 `BOT_AI_DATA_DIR`，程式預設會使用 repo 內的 `.runtime/ai`。
 
 ### Bot Worker
 
@@ -177,9 +177,9 @@ POSITION_PANEL_REALTIME_PORT=8787
 
 ## requirements
 
-完整依賴現在放在 [requirements.txt](/Users/ju-kuangchang/ETH-bot/requirements.txt)。
+完整依賴現在放在 [requirements.txt](requirements.txt)。
 
-如果只想單獨跑面板 API，也可以只裝 [requirements-realtime.txt](/Users/ju-kuangchang/ETH-bot/requirements-realtime.txt)。
+如果只想單獨跑面板 API，也可以只裝 [requirements-realtime.txt](requirements-realtime.txt)。
 
 ## 前端面板
 
