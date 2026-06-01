@@ -242,10 +242,13 @@ FOLLOW_BUTTON_TEXT_DISABLED = "📈 開啟跟單"
 FOLLOW_BUTTON_TEXT_ENABLED = "✅ 跟單中（點擊關閉）"
 WEBAPP_COMMAND_PREFIX = "__webapp__:"
 POSITION_PANEL_REALTIME_BASE_URL = str(os.getenv("POSITION_PANEL_REALTIME_BASE_URL", "") or "").strip().rstrip("/")
+POSITION_PANEL_REALTIME_INTERNAL_BASE_URL = str(os.getenv("POSITION_PANEL_REALTIME_INTERNAL_BASE_URL", "") or "").strip().rstrip("/")
 POSITION_PANEL_REALTIME_TOKEN = str(os.getenv("POSITION_PANEL_REALTIME_TOKEN", "") or "").strip()
 POSITION_PANEL_REALTIME_HEARTBEAT_SEC = max(3.0, _safe_float_env("POSITION_PANEL_REALTIME_HEARTBEAT_SEC", 5.0))
 POSITION_PANEL_REALTIME_TIMEOUT_SEC = max(0.5, _safe_float_env("POSITION_PANEL_REALTIME_TIMEOUT_SEC", 2.5))
 POSITION_PANEL_SESSION_TTL_SEC = max(300, _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 2592000))
+POSITION_PANEL_REALTIME_PORT = max(1, _safe_int_env("POSITION_PANEL_REALTIME_PORT", 8787))
+PANEL_REALTIME_PUBLIC_URL_FILE = data_path("panel_realtime_public_url.txt")
 
 
 def _build_panel_realtime_urls(base_url: str, token: str = ""):
@@ -265,6 +268,28 @@ def _build_panel_realtime_urls(base_url: str, token: str = ""):
         ws_scheme = parsed.scheme or "wss"
     ws_url = urlunparse((ws_scheme, parsed.netloc, "/ws/panel", "", "", ""))
 
+    return state_url, ws_url, publish_url
+
+
+def _read_panel_realtime_public_base_url() -> str:
+    try:
+        raw = PANEL_REALTIME_PUBLIC_URL_FILE.read_text(encoding="utf-8").strip()
+        if raw:
+            return raw.rstrip("/")
+    except Exception:
+        pass
+    return POSITION_PANEL_REALTIME_BASE_URL
+
+
+def _panel_realtime_internal_base_url() -> str:
+    if POSITION_PANEL_REALTIME_INTERNAL_BASE_URL:
+        return POSITION_PANEL_REALTIME_INTERNAL_BASE_URL
+    return f"http://127.0.0.1:{POSITION_PANEL_REALTIME_PORT}"
+
+
+def _current_panel_realtime_urls():
+    state_url, ws_url, _ = _build_panel_realtime_urls(_read_panel_realtime_public_base_url())
+    _, _, publish_url = _build_panel_realtime_urls(_panel_realtime_internal_base_url())
     return state_url, ws_url, publish_url
 
 
@@ -306,10 +331,6 @@ def _create_panel_session(chat_id) -> str:
     return f"{body}.{signature}"
 
 
-PANEL_REALTIME_STATE_URL, PANEL_REALTIME_WS_URL, PANEL_REALTIME_PUBLISH_URL = _build_panel_realtime_urls(
-    POSITION_PANEL_REALTIME_BASE_URL,
-    POSITION_PANEL_REALTIME_TOKEN,
-)
 PANEL_REALTIME_PUBLISH_QUEUE = deque(maxlen=1)
 PANEL_REALTIME_PUBLISH_EVENT = threading.Event()
 PANEL_REALTIME_QUEUE_LOCK = threading.Lock()
@@ -411,7 +432,8 @@ def _get_follow_button_text() -> str:
 def _build_control_panel_keyboard(chat_id=None):
     follow_text = _get_follow_button_text()
     panel_url = MINI_APP_URL
-    panel_session = _create_panel_session(chat_id) if (PANEL_REALTIME_STATE_URL or PANEL_REALTIME_WS_URL) else ""
+    state_url, ws_url, _ = _current_panel_realtime_urls()
+    panel_session = _create_panel_session(chat_id) if (state_url or ws_url) else ""
 
     snapshot = {
         "t": int(time.time()),
@@ -419,14 +441,14 @@ def _build_control_panel_keyboard(chat_id=None):
         "pair": str(POSITION_PANEL_STATE.get("pair") or DEFAULT_PAIR),
         "lev": int(_safe_int(POSITION_PANEL_STATE.get("lev"), DEFAULT_LEV) or DEFAULT_LEV),
     }
-    if PANEL_REALTIME_STATE_URL:
-        snapshot["state_url"] = PANEL_REALTIME_STATE_URL
-    if PANEL_REALTIME_WS_URL:
-        snapshot["ws_url"] = PANEL_REALTIME_WS_URL
+    if state_url:
+        snapshot["state_url"] = state_url
+    if ws_url:
+        snapshot["ws_url"] = ws_url
     if panel_session:
         snapshot["panel_session"] = panel_session
 
-    if PANEL_REALTIME_STATE_URL or PANEL_REALTIME_WS_URL:
+    if state_url or ws_url:
         if not active_trade.get("open"):
             snapshot["restart"] = 1
     elif active_trade.get("open"):
@@ -3790,7 +3812,7 @@ def _send_telegram_message(chat_id, msg, include_control_panel=False, timeout=5)
 
 def _start_panel_realtime_publisher():
     global PANEL_REALTIME_WORKER_STARTED
-    if PANEL_REALTIME_WORKER_STARTED or not PANEL_REALTIME_PUBLISH_URL:
+    if PANEL_REALTIME_WORKER_STARTED:
         return
 
     def _worker():
@@ -3809,8 +3831,11 @@ def _start_panel_realtime_publisher():
                 headers["Authorization"] = f"Bearer {POSITION_PANEL_REALTIME_TOKEN}"
 
             try:
+                _, _, publish_url = _current_panel_realtime_urls()
+                if not publish_url:
+                    continue
                 res = HTTP_SESSION.post(
-                    PANEL_REALTIME_PUBLISH_URL,
+                    publish_url,
                     json=payload,
                     headers=headers,
                     timeout=POSITION_PANEL_REALTIME_TIMEOUT_SEC,
@@ -3833,7 +3858,8 @@ def _start_panel_realtime_publisher():
 
 def _queue_panel_realtime_publish(payload):
     global PANEL_REALTIME_LAST_SIGNATURE, PANEL_REALTIME_LAST_ENQUEUE_TS
-    if not PANEL_REALTIME_PUBLISH_URL or not isinstance(payload, dict):
+    _, _, publish_url = _current_panel_realtime_urls()
+    if not publish_url or not isinstance(payload, dict):
         return
 
     try:
