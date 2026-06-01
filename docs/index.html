@@ -543,7 +543,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260602-1";
+  const APP_VERSION = "20260602-2";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -685,6 +685,7 @@
   const KLINE_FETCH_TIMEOUT_MS = 1800;
   const KLINE_REFRESH_INTERVAL_MS = 60000;
   const PANEL_REFRESH_INTERVAL_MS = 1500;
+  const APP_VERSION_CHECK_INTERVAL_MS = 30000;
   const WS_RECONNECT_DELAY_MS = 2500;
   const EXCHANGE_PNL_FRESH_SEC = 4;
   let refreshInFlight = false;
@@ -734,6 +735,45 @@
       return null;
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  async function fetchTextWithTimeout(url, timeoutMs = POSITION_FETCH_TIMEOUT_MS) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        cache: "no-store",
+        signal: ctrl.signal,
+      });
+      if (!res.ok) return "";
+      return await res.text();
+    } catch (_) {
+      return "";
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function getAppShellUrl() {
+    const url = new URL(location.href);
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  }
+
+  async function checkAppVersion() {
+    const shellUrl = getAppShellUrl();
+    const sep = shellUrl.includes("?") ? "&" : "?";
+    const html = await fetchTextWithTimeout(
+      `${shellUrl}${sep}version_check=${Date.now()}`,
+      POSITION_FETCH_TIMEOUT_MS
+    );
+    if (!html) return;
+    const match = html.match(/const\s+APP_VERSION\s*=\s*["']([^"']+)["']/);
+    const nextVersion = match ? String(match[1] || "").trim() : "";
+    if (nextVersion && nextVersion !== APP_VERSION) {
+      location.reload();
     }
   }
 
@@ -1689,6 +1729,7 @@
   connectRealtimeSocket();
   refresh();
   setInterval(refresh, PANEL_REFRESH_INTERVAL_MS);
+  setInterval(checkAppVersion, APP_VERSION_CHECK_INTERVAL_MS);
 
   // 頁面重新可見時（從背景切回）立刻刷新
   document.addEventListener("visibilitychange", () => {
