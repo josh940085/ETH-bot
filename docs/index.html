@@ -66,6 +66,14 @@
       border-radius: 14px;
       padding: 14px 16px;
       margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .asset-hero-main {
+      min-width: 0;
     }
 
     .asset-hero-title {
@@ -88,6 +96,31 @@
       font-size: 11px;
       color: #c5ddf5;
       line-height: 1.4;
+    }
+
+    .asset-hero-winrate {
+      text-align: right;
+      flex: 0 0 auto;
+      min-width: 96px;
+    }
+
+    .asset-hero-winrate-label {
+      font-size: 11px;
+      color: #b8dfff;
+      margin-bottom: 6px;
+    }
+
+    .asset-hero-winrate-value {
+      font-size: 24px;
+      font-weight: 800;
+      line-height: 1.1;
+      color: #ffffff;
+    }
+
+    .asset-hero-winrate-sub {
+      margin-top: 6px;
+      font-size: 11px;
+      color: #c5ddf5;
     }
 
     .card-title {
@@ -280,10 +313,6 @@
     }
 
     .section-grid-compact {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
-    .section-grid-three {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
@@ -481,6 +510,18 @@
     }
 
     @media (max-width: 520px) {
+      .asset-hero {
+        align-items: flex-start;
+      }
+
+      .asset-hero-winrate {
+        min-width: 82px;
+      }
+
+      .asset-hero-winrate-value {
+        font-size: 20px;
+      }
+
       .section-grid-compact {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
@@ -1288,23 +1329,21 @@
     const walletAssets = Number.isFinite(Number(ACCOUNT_WALLET_BALANCE_USDT)) ? Number(ACCOUNT_WALLET_BALANCE_USDT) : 0;
     return `
   <div class="asset-hero">
-    <div class="asset-hero-title">Binance 總資產</div>
-    <div class="asset-hero-value">${fmt(totalAssetsUsdt)} USDT</div>
-    <div class="asset-hero-sub">現貨 ${fmt(spotAssets)} ｜ 合約 ${fmt(futuresAssets)} ｜ 錢包 ${fmt(walletAssets)} ｜ 可用 ${fmt(ACCOUNT_AVAILABLE_BALANCE_USDT)}</div>
+    <div class="asset-hero-main">
+      <div class="asset-hero-title">Binance 總資產</div>
+      <div class="asset-hero-value">${fmt(totalAssetsUsdt)} USDT</div>
+      <div class="asset-hero-sub">現貨 ${fmt(spotAssets)} ｜ 合約 ${fmt(futuresAssets)} ｜ 錢包 ${fmt(walletAssets)} ｜ 可用 ${fmt(ACCOUNT_AVAILABLE_BALANCE_USDT)}</div>
+    </div>
+    <div class="asset-hero-winrate">
+      <div class="asset-hero-winrate-label">目前勝率</div>
+      <div class="asset-hero-winrate-value">${PERFORMANCE_WIN_RATE !== null ? `${PERFORMANCE_WIN_RATE.toFixed(2)}%` : "-"}</div>
+      <div class="asset-hero-winrate-sub">${PERFORMANCE_TRADES > 0 ? `${PERFORMANCE_WINS}/${PERFORMANCE_TRADES}` : "尚無統計"}</div>
+    </div>
   </div>`;
   }
 
-  function renderHeaderSubtitle(totalAssetsUsdt) {
-    const parts = ["永續合約", `${LEV}x`];
-    if (PERFORMANCE_WIN_RATE !== null) {
-      const winRate = `${PERFORMANCE_WIN_RATE.toFixed(2)}%`;
-      const countText = PERFORMANCE_TRADES > 0
-        ? ` (${PERFORMANCE_WINS}/${PERFORMANCE_TRADES})`
-        : "";
-      parts.push(`目前勝率 ${winRate}${countText}`);
-    }
-    parts.push(`Binance 總資產 ${fmt(totalAssetsUsdt)} USDT`);
-    return parts.join(" · ");
+  function renderHeaderSubtitle() {
+    return ["永續合約", `${LEV}x`].join(" · ");
   }
 
   function calcKlineSupportResistance(rows) {
@@ -1358,12 +1397,6 @@
       const y = yFor(price);
       return `<line x1="${leftPad}" y1="${y.toFixed(2)}" x2="${(width - rightPad + 16)}" y2="${y.toFixed(2)}" class="${cls}" /><text x="${(width - 6)}" y="${Math.max(12, Math.min(height - 5, y + 4)).toFixed(2)}" text-anchor="end" class="${cls}-text">${label}</text>`;
     };
-    const levelBadge = (price, cls) => {
-      if (!Number.isFinite(price) || price <= 0) return "";
-      const y = Math.max(15, Math.min(height - 18, yFor(price)));
-      const text = fmt(price);
-      return `<rect x="${(width - 94)}" y="${(y - 11).toFixed(2)}" width="88" height="18" rx="9" class="${cls}-badge" /><text x="${(width - 50)}" y="${(y + 2).toFixed(2)}" text-anchor="middle" class="${cls}-badge-text">${text}</text>`;
-    };
     const candles = chartRows.map((row, idx) => {
       const x = leftPad + idx * candleSlot + candleSlot / 2;
       const isUp = row.close >= row.open;
@@ -1397,22 +1430,16 @@
           .entry-line-text, .tp-line-text, .sl-line-text { fill: rgba(255,255,255,0.55); font-size: 8px; }
           .resistance-line-text { fill: rgba(255,205,130,0.92); font-size: 8px; font-weight: 700; }
           .support-line-text { fill: rgba(145,220,255,0.92); font-size: 8px; font-weight: 700; }
-          .resistance-line-badge { fill: rgba(255,180,80,0.16); stroke: rgba(255,180,80,0.78); stroke-width: 1; }
-          .support-line-badge { fill: rgba(72,198,255,0.16); stroke: rgba(72,198,255,0.78); stroke-width: 1; }
-          .resistance-line-badge-text { fill: rgba(255,216,160,0.96); font-size: 7px; font-weight: 700; }
-          .support-line-badge-text { fill: rgba(170,230,255,0.96); font-size: 7px; font-weight: 700; }
         </style>
         <line x1="${leftPad}" y1="37.5" x2="${width - rightPad + 16}" y2="37.5" class="grid" />
         <line x1="${leftPad}" y1="75" x2="${width - rightPad + 16}" y2="75" class="grid" />
         <line x1="${leftPad}" y1="112.5" x2="${width - rightPad + 16}" y2="112.5" class="grid" />
         ${candles}
-        ${lineFor(levels.resistance, "resistance-line", "")}
-        ${lineFor(levels.support, "support-line", "")}
+        ${lineFor(levels.resistance, "resistance-line", fmt(levels.resistance))}
+        ${lineFor(levels.support, "support-line", fmt(levels.support))}
         ${lineFor(ENTRY, "entry-line", "ENTRY")}
         ${lineFor(TP, "tp-line", "TP")}
         ${lineFor(SL, "sl-line", "SL")}
-        ${levelBadge(levels.resistance, "resistance-line")}
-        ${levelBadge(levels.support, "support-line")}
       </svg>
     </div>`;
   }
@@ -1457,7 +1484,7 @@
       <div class="eth-icon">◆</div>
       <div>
         <div class="pair-name">${PAIR}</div>
-        <div class="pair-sub">${renderHeaderSubtitle(totalAssetsUsdt)}</div>
+        <div class="pair-sub">${renderHeaderSubtitle()}</div>
       </div>
     </div>
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
@@ -1526,11 +1553,13 @@
       <div class="eth-icon">◆</div>
       <div>
         <div class="pair-name">${PAIR}</div>
-        <div class="pair-sub">${renderHeaderSubtitle(totalAssetsUsdt)}</div>
+        <div class="pair-sub">${renderHeaderSubtitle()}</div>
       </div>
     </div>
     <div class="badge-open">● 持倉中</div>
   </div>
+
+  ${renderFourHourKlineChart(live)}
 
   ${renderTotalAssetsHero(totalAssetsUsdt)}
 
@@ -1553,12 +1582,10 @@
       <span>資金使用 <strong>${fmt_size(capitalUsagePct)}%</strong></span>
       <span>調倉區間 <strong>${fmt_size(minSizePct)}% - ${fmt_size(maxSizePct)}%</strong></span>
     </div>
-    <div class="section-grid section-grid-three">
+    <div class="section-grid">
       ${renderMetricCard("持倉名義價值", POSITION_NOTIONAL_USDT > 0 ? `${fmt(POSITION_NOTIONAL_USDT)} USDT` : "-", POSITION_MARGIN_USDT > 0 ? `保證金 ${fmt(POSITION_MARGIN_USDT)} USDT` : "")}
-      ${renderMetricCard("Binance 總資產", `${fmt(totalAssetsUsdt)} USDT`, assetSubtext)}
       ${renderMetricCard(BINANCE_QTY > 0 ? "實際持倉數量" : "推估持倉數量", qtyEstimate > 0 ? `${qtyEstimate.toFixed(4)} ETH` : "-", `開倉 ${fmt_elapsed(OPEN_SINCE_TS)} ｜ 槓桿 ${LEV}x`)}
     </div>
-    ${renderFourHourKlineChart(live)}
   </div>
 
   <!-- Prices + PnL -->
