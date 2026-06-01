@@ -11,7 +11,7 @@ from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 
 def _read_local_env_values():
@@ -123,7 +123,7 @@ def _viewer_auth_settings():
     )
     session_ttl_sec = max(
         300,
-        _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 43200),
+        _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 2592000),
     )
     allowed_ids = _load_allowed_user_ids(
         _runtime_env_value(
@@ -362,7 +362,28 @@ async def _broadcast_state(payload: dict):
 
 @app.get("/")
 async def root():
+    panel_path = Path(__file__).resolve().parent / "docs" / "index.html"
+    if panel_path.exists():
+        return FileResponse(panel_path, media_type="text/html")
     return {"ok": True, "service": "panel-realtime"}
+
+
+@app.get("/position.json")
+async def local_position_snapshot():
+    position_path = Path(__file__).resolve().parent / "docs" / "position.json"
+    if not position_path.exists():
+        raise HTTPException(status_code=404, detail="position snapshot not found")
+    return FileResponse(position_path, media_type="application/json")
+
+
+@app.get("/backtest_latest_summary.json")
+async def local_backtest_summary():
+    repo_dir = Path(__file__).resolve().parent
+    data_dir = Path(os.getenv("BOT_DATA_DIR", repo_dir / ".runtime" / "data")).expanduser()
+    summary_path = data_dir / "backtest_latest_summary.json"
+    if not summary_path.exists():
+        raise HTTPException(status_code=404, detail="backtest summary not found")
+    return FileResponse(summary_path, media_type="application/json")
 
 
 @app.get("/healthz")

@@ -41,7 +41,7 @@
     }
 
     .pair-name { font-size: 18px; font-weight: 700; }
-    .pair-sub  { font-size: 11px; color: #888; }
+    .pair-sub  { font-size: 11px; color: #888; line-height: 1.35; }
 
     .badge-open {
       background: #1a3a28;
@@ -272,39 +272,6 @@
       text-align: right;
     }
 
-    .action-row {
-      margin-top: 10px;
-      display: flex;
-      justify-content: center;
-      gap: 8px;
-    }
-    .close-btn {
-      border: 1px solid #e74c3c;
-      background: #351818;
-      color: #ffb3ad;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 700;
-      padding: 8px 14px;
-      cursor: pointer;
-    }
-    .close-btn:active {
-      transform: translateY(1px);
-    }
-    .panel-btn {
-      border: 1px solid #3c6d9f;
-      background: #172634;
-      color: #b2dbff;
-      border-radius: 8px;
-      font-size: 13px;
-      font-weight: 700;
-      padding: 8px 14px;
-      cursor: pointer;
-    }
-    .panel-btn:active {
-      transform: translateY(1px);
-    }
-
     .section-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -313,6 +280,10 @@
     }
 
     .section-grid-compact {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .section-grid-three {
       grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
@@ -401,6 +372,51 @@
       color: #b9dcff;
     }
 
+    .mini-kline {
+      margin-top: 12px;
+      background: #101010;
+      border: 1px solid #242424;
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+
+    .mini-kline-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .mini-kline-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #9a9a9a;
+    }
+
+    .mini-kline-meta {
+      font-size: 10px;
+      color: #777;
+      text-align: right;
+    }
+
+    .mini-kline svg {
+      display: block;
+      width: 100%;
+      height: 150px;
+    }
+
+    .mini-kline-empty {
+      height: 150px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #777;
+      font-size: 11px;
+      border-radius: 8px;
+      background: #0d0d0d;
+    }
+
     .size-summary {
       display: flex;
       justify-content: space-between;
@@ -486,10 +502,37 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260529-6";
+  const APP_VERSION = "20260602-1";
+  const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
+
+  function readViewerCache() {
+    try {
+      const raw = localStorage.getItem(PANEL_VIEWER_CACHE_KEY);
+      if (!raw) return {};
+      const data = JSON.parse(raw);
+      return (data && typeof data === "object") ? data : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function writeViewerCache(patch) {
+    try {
+      const prev = readViewerCache();
+      const next = Object.assign({}, prev, patch || {}, { updatedAt: Date.now() });
+      localStorage.setItem(PANEL_VIEWER_CACHE_KEY, JSON.stringify(next));
+    } catch (_) {}
+  }
+
+  function clearViewerCache() {
+    try {
+      localStorage.removeItem(PANEL_VIEWER_CACHE_KEY);
+    } catch (_) {}
+  }
 
   // ── 讀取 URL 參數（初始值 / 備用）──
   const p = new URLSearchParams(location.search);
+  const cachedViewer = readViewerCache();
   const readNumberParam = (name, fallback = 0) => {
     const raw = p.get(name);
     if (raw === null || raw === "") return fallback;
@@ -511,9 +554,9 @@
   let LEV    = parseInt(p.get("lev")     || "10", 10);
   const FORCE_RESTART = p.get("restart") === "1";
   const URL_SNAPSHOT_TS = Number.isFinite(Number(p.get("snapshot_ts"))) ? Number(p.get("snapshot_ts")) : 0;
-  const REMOTE_STATE_URL = p.get("state_url") || "";
-  const REMOTE_WS_URL = p.get("ws_url") || "";
-  const PANEL_SESSION = p.get("panel_session") || "";
+  const REMOTE_STATE_URL = p.get("state_url") || cachedViewer.stateUrl || "";
+  const REMOTE_WS_URL = p.get("ws_url") || cachedViewer.wsUrl || "";
+  const PANEL_SESSION = p.get("panel_session") || cachedViewer.panelSession || "";
   const hasUrlPosition = !FORCE_RESTART && ENTRY > 0 && TP > 0 && SL > 0;
   let POSITION_OPEN = hasUrlPosition;
   let LAST_CLOSE_REASON = "";
@@ -554,6 +597,11 @@
   let BREAK_EVEN_ACTIVE = false;
   let BREAK_EVEN_TARGET = 0;
   let BREAK_EVEN_TS = 0;
+  let PERFORMANCE_WIN_RATE = null;
+  let PERFORMANCE_TRADES = 0;
+  let PERFORMANCE_WINS = 0;
+  let KLINES_4H = [];
+  let KLINES_4H_FETCH_TS = 0;
 
   let livePrice = 0;
   let liveMarkPrice = 0;
@@ -563,6 +611,14 @@
   const HAS_PANEL_SESSION = PANEL_SESSION.length > 0;
   const HAS_VIEWER_AUTH = HAS_TELEGRAM_AUTH || HAS_PANEL_SESSION;
   const IS_LOCAL_PREVIEW = location.protocol === "file:" || location.hostname === "localhost" || location.hostname === "127.0.0.1";
+
+  if (REMOTE_STATE_URL || REMOTE_WS_URL || PANEL_SESSION) {
+    writeViewerCache({
+      stateUrl: REMOTE_STATE_URL || "",
+      wsUrl: REMOTE_WS_URL || "",
+      panelSession: PANEL_SESSION || "",
+    });
+  }
 
   // ── Telegram Web App 初始化 ──
   if (TELEGRAM_WEBAPP) {
@@ -577,10 +633,16 @@
     "/ETH-bot/docs/position.json",
     "/ETH-bot/position.json",
   ] : [];
+  const PERFORMANCE_SUMMARY_URLS = IS_LOCAL_PREVIEW ? [
+    "./backtest_latest_summary.json",
+    "/backtest_latest_summary.json",
+  ] : [];
   let LAST_POSITION_SOURCE = URL_SNAPSHOT_TS > 0 ? "URL 參數" : "";
   let LAST_POSITION_TS = URL_SNAPSHOT_TS > 0 ? URL_SNAPSHOT_TS : 0;
   const POSITION_FETCH_TIMEOUT_MS = 1200;
   const PRICE_FETCH_TIMEOUT_MS = 1500;
+  const KLINE_FETCH_TIMEOUT_MS = 1800;
+  const KLINE_REFRESH_INTERVAL_MS = 60000;
   const PANEL_REFRESH_INTERVAL_MS = 1500;
   const WS_RECONNECT_DELAY_MS = 2500;
   const EXCHANGE_PNL_FRESH_SEC = 4;
@@ -747,6 +809,32 @@
     return true;
   }
 
+  function applyPerformancePayload(data) {
+    if (typeof data !== "object" || data === null) return false;
+    const winRate = Number(data.win_rate);
+    const trades = Number(data.trades);
+    const wins = Number(data.wins);
+    if (!Number.isFinite(winRate)) return false;
+    PERFORMANCE_WIN_RATE = winRate;
+    PERFORMANCE_TRADES = Number.isFinite(trades) ? trades : 0;
+    PERFORMANCE_WINS = Number.isFinite(wins) ? wins : 0;
+    return true;
+  }
+
+  async function fetchPerformanceSummary() {
+    if (!PERFORMANCE_SUMMARY_URLS.length) return;
+    const fetchTasks = PERFORMANCE_SUMMARY_URLS.map((base) => {
+      const url = base + (base.includes("?") ? "&" : "?") + "t=" + Date.now();
+      return fetchJsonWithTimeout(url, POSITION_FETCH_TIMEOUT_MS)
+        .then((data) => data || null)
+        .catch(() => null);
+    });
+    const candidates = (await Promise.all(fetchTasks)).filter(Boolean);
+    for (const data of candidates) {
+      if (applyPerformancePayload(data)) return;
+    }
+  }
+
   function scheduleRealtimeReconnect() {
     if (!REMOTE_WS_URL || realtimeReconnectTimer) return;
     realtimeReconnectTimer = setTimeout(() => {
@@ -795,8 +883,9 @@
       realtimeSocketConnected = false;
       realtimeSocket = null;
       if (event && event.code === 4401) {
+        clearViewerCache();
         PANEL_ACCESS_STATE = "unauthorized";
-        PANEL_ACCESS_MESSAGE = "只有指定的 Telegram 帳號可以查看即時面板。";
+        PANEL_ACCESS_MESSAGE = "授權已失效，請回 Telegram 重新開一次面板。";
         render();
         return;
       }
@@ -818,8 +907,9 @@
         headers: buildViewerAuthHeaders(),
       });
       if (remoteData && remoteData.__auth_error) {
+        clearViewerCache();
         PANEL_ACCESS_STATE = "unauthorized";
-        PANEL_ACCESS_MESSAGE = "只有指定的 Telegram 帳號可以查看即時面板。";
+        PANEL_ACCESS_MESSAGE = "授權已失效，請回 Telegram 重新開一次面板。";
         return;
       }
       if (remoteData && applyPositionPayload(remoteData, "Realtime API")) {
@@ -877,6 +967,28 @@
     }
   }
 
+  async function fetchFourHourKlines() {
+    const now = Date.now();
+    if (KLINES_4H.length && now - KLINES_4H_FETCH_TS < KLINE_REFRESH_INTERVAL_MS) return;
+    const data = await fetchJsonWithTimeout(
+      `https://fapi.binance.com/fapi/v1/klines?symbol=${PAIR}&interval=4h&limit=32`,
+      KLINE_FETCH_TIMEOUT_MS
+    );
+    if (!Array.isArray(data)) return;
+    const parsed = data
+      .map((row) => ({
+        ts: Number(row && row[0]),
+        open: Number(row && row[1]),
+        high: Number(row && row[2]),
+        low: Number(row && row[3]),
+        close: Number(row && row[4]),
+      }))
+      .filter((row) => Number.isFinite(row.open) && Number.isFinite(row.high) && Number.isFinite(row.low) && Number.isFinite(row.close));
+    if (!parsed.length) return;
+    KLINES_4H = parsed;
+    KLINES_4H_FETCH_TS = now;
+  }
+
   // ── 同時更新倉位資料與即時價格 ──
   async function refresh() {
     if (refreshInFlight) {
@@ -885,7 +997,7 @@
     }
     refreshInFlight = true;
     try {
-      await Promise.all([fetchPositionData(), fetchPrice()]);
+      await Promise.all([fetchPositionData(), fetchPrice(), fetchPerformanceSummary(), fetchFourHourKlines()]);
       render();
     } finally {
       refreshInFlight = false;
@@ -965,36 +1077,6 @@
     const v = Number(n);
     if (!Number.isFinite(v)) return "0.0";
     return v.toFixed(1);
-  }
-
-  function triggerManualClose() {
-    if (!(window.Telegram && window.Telegram.WebApp && Telegram.WebApp.sendData)) {
-      if (window.alert) alert("請在 Telegram 內開啟此面板，才能使用手動平倉。");
-      return;
-    }
-    const payload = {
-      action: "manual_close",
-      source: "mini_app",
-      ts: Date.now(),
-    };
-    try {
-      Telegram.WebApp.sendData(JSON.stringify(payload));
-      if (Telegram.WebApp.showAlert) {
-        Telegram.WebApp.showAlert("已送出手動平倉請求，請稍候 Bot 回覆。");
-      }
-    } catch (_) {
-      if (window.alert) alert("手動平倉請求送出失敗，請稍後再試。");
-    }
-  }
-
-  function closePanel() {
-    if (window.Telegram && window.Telegram.WebApp && Telegram.WebApp.close) {
-      Telegram.WebApp.close();
-      return;
-    }
-    if (window.history && history.length > 1) {
-      history.back();
-    }
   }
 
   // ── 判斷 SL 是否已觸發 ──
@@ -1212,10 +1294,133 @@
   </div>`;
   }
 
+  function renderHeaderSubtitle(totalAssetsUsdt) {
+    const parts = ["永續合約", `${LEV}x`];
+    if (PERFORMANCE_WIN_RATE !== null) {
+      const winRate = `${PERFORMANCE_WIN_RATE.toFixed(2)}%`;
+      const countText = PERFORMANCE_TRADES > 0
+        ? ` (${PERFORMANCE_WINS}/${PERFORMANCE_TRADES})`
+        : "";
+      parts.push(`目前勝率 ${winRate}${countText}`);
+    }
+    parts.push(`Binance 總資產 ${fmt(totalAssetsUsdt)} USDT`);
+    return parts.join(" · ");
+  }
+
+  function calcKlineSupportResistance(rows) {
+    const sample = rows.slice(-20);
+    if (!sample.length) return { support: 0, resistance: 0 };
+    const percentile = (values, pctl) => {
+      const sorted = values.filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+      if (!sorted.length) return 0;
+      const idx = Math.max(0, Math.min(sorted.length - 1, Math.round((sorted.length - 1) * pctl)));
+      return sorted[idx];
+    };
+    return {
+      support: percentile(sample.map((row) => row.low), 0.15),
+      resistance: percentile(sample.map((row) => row.high), 0.85),
+    };
+  }
+
+  function renderFourHourKlineChart(live) {
+    if (!KLINES_4H.length) {
+      return `
+    <div class="mini-kline">
+      <div class="mini-kline-head">
+        <div class="mini-kline-title">4H K 線圖</div>
+        <div class="mini-kline-meta">${PAIR}</div>
+      </div>
+      <div class="mini-kline-empty">K 線載入中</div>
+    </div>`;
+    }
+
+    const chartRows = KLINES_4H.slice(-28);
+    const levels = calcKlineSupportResistance(chartRows);
+    const high = Math.max(...chartRows.map((row) => row.high), TP || 0, SL || 0, ENTRY || 0, live || 0, levels.resistance || 0);
+    const low = Math.min(...chartRows.map((row) => row.low), ...(TP > 0 ? [TP] : []), ...(SL > 0 ? [SL] : []), ...(ENTRY > 0 ? [ENTRY] : []), ...(live > 0 ? [live] : []), ...(levels.support > 0 ? [levels.support] : []));
+    const pad = Math.max((high - low) * 0.08, high * 0.0005, 1);
+    const top = high + pad;
+    const bottom = low - pad;
+    const width = 360;
+    const height = 150;
+    const leftPad = 8;
+    const rightPad = 74;
+    const plotWidth = width - leftPad - rightPad;
+    const candleGap = 2;
+    const candleSlot = plotWidth / chartRows.length;
+    const bodyWidth = Math.max(4, candleSlot - candleGap);
+    const yFor = (price) => {
+      if (!Number.isFinite(price) || top <= bottom) return height / 2;
+      return Math.max(2, Math.min(height - 2, ((top - price) / (top - bottom)) * height));
+    };
+    const lineFor = (price, cls, label) => {
+      if (!Number.isFinite(price) || price <= 0) return "";
+      const y = yFor(price);
+      return `<line x1="${leftPad}" y1="${y.toFixed(2)}" x2="${(width - rightPad + 16)}" y2="${y.toFixed(2)}" class="${cls}" /><text x="${(width - 6)}" y="${Math.max(12, Math.min(height - 5, y + 4)).toFixed(2)}" text-anchor="end" class="${cls}-text">${label}</text>`;
+    };
+    const levelBadge = (price, cls) => {
+      if (!Number.isFinite(price) || price <= 0) return "";
+      const y = Math.max(15, Math.min(height - 18, yFor(price)));
+      const text = fmt(price);
+      return `<rect x="${(width - 94)}" y="${(y - 11).toFixed(2)}" width="88" height="18" rx="9" class="${cls}-badge" /><text x="${(width - 50)}" y="${(y + 2).toFixed(2)}" text-anchor="middle" class="${cls}-badge-text">${text}</text>`;
+    };
+    const candles = chartRows.map((row, idx) => {
+      const x = leftPad + idx * candleSlot + candleSlot / 2;
+      const isUp = row.close >= row.open;
+      const yHigh = yFor(row.high);
+      const yLow = yFor(row.low);
+      const yOpen = yFor(row.open);
+      const yClose = yFor(row.close);
+      const yBody = Math.min(yOpen, yClose);
+      const bodyHeight = Math.max(2, Math.abs(yClose - yOpen));
+      const cls = isUp ? "up" : "down";
+      return `<line x1="${x.toFixed(2)}" y1="${yHigh.toFixed(2)}" x2="${x.toFixed(2)}" y2="${yLow.toFixed(2)}" class="wick ${cls}" /><rect x="${(x - bodyWidth / 2).toFixed(2)}" y="${yBody.toFixed(2)}" width="${bodyWidth.toFixed(2)}" height="${bodyHeight.toFixed(2)}" rx="1.2" class="body ${cls}" />`;
+    }).join("");
+    const last = chartRows[chartRows.length - 1];
+    const changePct = chartRows[0].open > 0 ? ((last.close - chartRows[0].open) / chartRows[0].open) * 100 : 0;
+    return `
+    <div class="mini-kline">
+      <div class="mini-kline-head">
+        <div class="mini-kline-title">4H K 線圖</div>
+        <div class="mini-kline-meta">${PAIR} ｜ ${fmt(levels.resistance)} ｜ ${fmt(levels.support)}</div>
+      </div>
+      <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="4H K 線圖">
+        <style>
+          .grid { stroke: rgba(255,255,255,0.06); stroke-width: 1; }
+          .wick.up, .body.up { stroke: #e74c3c; fill: #e74c3c; }
+          .wick.down, .body.down { stroke: #2ecc71; fill: #2ecc71; }
+          .entry-line { stroke: rgba(255,255,255,0.45); stroke-width: 1; stroke-dasharray: 3 3; }
+          .tp-line { stroke: rgba(46,204,113,0.55); stroke-width: 1; stroke-dasharray: 4 3; }
+          .sl-line { stroke: rgba(231,76,60,0.55); stroke-width: 1; stroke-dasharray: 4 3; }
+          .resistance-line { stroke: rgba(255,180,80,0.72); stroke-width: 1.3; }
+          .support-line { stroke: rgba(72,198,255,0.72); stroke-width: 1.3; }
+          .entry-line-text, .tp-line-text, .sl-line-text { fill: rgba(255,255,255,0.55); font-size: 8px; }
+          .resistance-line-text { fill: rgba(255,205,130,0.92); font-size: 8px; font-weight: 700; }
+          .support-line-text { fill: rgba(145,220,255,0.92); font-size: 8px; font-weight: 700; }
+          .resistance-line-badge { fill: rgba(255,180,80,0.16); stroke: rgba(255,180,80,0.78); stroke-width: 1; }
+          .support-line-badge { fill: rgba(72,198,255,0.16); stroke: rgba(72,198,255,0.78); stroke-width: 1; }
+          .resistance-line-badge-text { fill: rgba(255,216,160,0.96); font-size: 7px; font-weight: 700; }
+          .support-line-badge-text { fill: rgba(170,230,255,0.96); font-size: 7px; font-weight: 700; }
+        </style>
+        <line x1="${leftPad}" y1="37.5" x2="${width - rightPad + 16}" y2="37.5" class="grid" />
+        <line x1="${leftPad}" y1="75" x2="${width - rightPad + 16}" y2="75" class="grid" />
+        <line x1="${leftPad}" y1="112.5" x2="${width - rightPad + 16}" y2="112.5" class="grid" />
+        ${candles}
+        ${lineFor(levels.resistance, "resistance-line", "")}
+        ${lineFor(levels.support, "support-line", "")}
+        ${lineFor(ENTRY, "entry-line", "ENTRY")}
+        ${lineFor(TP, "tp-line", "TP")}
+        ${lineFor(SL, "sl-line", "SL")}
+        ${levelBadge(levels.resistance, "resistance-line")}
+        ${levelBadge(levels.support, "support-line")}
+      </svg>
+    </div>`;
+  }
+
   // ── 渲染 UI ──
   function render() {
     if ((REMOTE_STATE_URL || REMOTE_WS_URL) && !HAS_VIEWER_AUTH) {
-      renderAccessState("請從 Telegram 開啟", "請從和 bot 的聊天面板按鈕重新打開這個 Mini App。直接貼公開網址，或從外部瀏覽器開啟，都不會附帶可用的面板授權。");
+      renderAccessState("請先開一次面板", "請先從 Telegram 的 bot 按鈕開一次面板；之後同一台裝置可直接重開，不用每次重新驗證。");
       return;
     }
     if (!REMOTE_STATE_URL && !REMOTE_WS_URL && !POSITION_JSON_URLS.length) {
@@ -1223,11 +1428,11 @@
       return;
     }
     if (PANEL_ACCESS_STATE === "unauthorized") {
-      renderAccessState("未授權", PANEL_ACCESS_MESSAGE || "只有指定的 Telegram 帳號可以查看這個面板。");
+      renderAccessState("授權失效", PANEL_ACCESS_MESSAGE || "請回 Telegram 重新開一次面板。");
       return;
     }
     if ((REMOTE_STATE_URL || REMOTE_WS_URL) && !HAS_POSITION_PAYLOAD) {
-      renderAccessState("正在連線", PANEL_ACCESS_MESSAGE || "正在驗證 Telegram 身分並同步即時倉位資料…");
+      renderAccessState("正在連線", PANEL_ACCESS_MESSAGE || "正在同步即時倉位資料…");
       return;
     }
 
@@ -1252,7 +1457,7 @@
       <div class="eth-icon">◆</div>
       <div>
         <div class="pair-name">${PAIR}</div>
-        <div class="pair-sub">永續合約 · ${LEV}x · Binance 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
+        <div class="pair-sub">${renderHeaderSubtitle(totalAssetsUsdt)}</div>
       </div>
     </div>
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
@@ -1321,7 +1526,7 @@
       <div class="eth-icon">◆</div>
       <div>
         <div class="pair-name">${PAIR}</div>
-        <div class="pair-sub">永續合約 · ${LEV}x · Binance 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
+        <div class="pair-sub">${renderHeaderSubtitle(totalAssetsUsdt)}</div>
       </div>
     </div>
     <div class="badge-open">● 持倉中</div>
@@ -1348,16 +1553,12 @@
       <span>資金使用 <strong>${fmt_size(capitalUsagePct)}%</strong></span>
       <span>調倉區間 <strong>${fmt_size(minSizePct)}% - ${fmt_size(maxSizePct)}%</strong></span>
     </div>
-    <div class="section-grid">
+    <div class="section-grid section-grid-three">
       ${renderMetricCard("持倉名義價值", POSITION_NOTIONAL_USDT > 0 ? `${fmt(POSITION_NOTIONAL_USDT)} USDT` : "-", POSITION_MARGIN_USDT > 0 ? `保證金 ${fmt(POSITION_MARGIN_USDT)} USDT` : "")}
       ${renderMetricCard("Binance 總資產", `${fmt(totalAssetsUsdt)} USDT`, assetSubtext)}
       ${renderMetricCard(BINANCE_QTY > 0 ? "實際持倉數量" : "推估持倉數量", qtyEstimate > 0 ? `${qtyEstimate.toFixed(4)} ETH` : "-", `開倉 ${fmt_elapsed(OPEN_SINCE_TS)} ｜ 槓桿 ${LEV}x`)}
     </div>
-    <div class="status-row">
-      <span class="status-chip ${scaleTone}">倉位壓力 ${maxSizePct > 0 ? `${(sizePressure * 100).toFixed(0)}% of max` : "-"}</span>
-      <span class="status-chip ${TP_SL_ADJUSTED_4H ? "warn" : "info"}">${TP_SL_ADJUSTED_4H ? "已縮 TP" : "原始 TP"}</span>
-      <span class="status-chip info">最近調倉 ${adjustText}</span>
-    </div>
+    ${renderFourHourKlineChart(live)}
   </div>
 
   <!-- Prices + PnL -->
@@ -1366,15 +1567,6 @@
       <div class="price-block">
         <div class="label">進場價</div>
         <div class="price-entry">${fmt(ENTRY)}</div>
-      </div>
-      <div class="price-block">
-        <div class="label">Break-even</div>
-        <div class="price-entry" style="font-size:16px;">${BINANCE_BREAK_EVEN_PRICE > 0 ? fmt(BINANCE_BREAK_EVEN_PRICE) : "─"}</div>
-        <div style="font-size:11px;color:#888;margin-top:2px">
-          ${live && BINANCE_BREAK_EVEN_PRICE > 0 ? (isLong
-            ? `距 BE ${(Math.abs((live - BINANCE_BREAK_EVEN_PRICE) / BINANCE_BREAK_EVEN_PRICE) * 100).toFixed(2)}%`
-            : `距 BE ${(Math.abs((BINANCE_BREAK_EVEN_PRICE - live) / BINANCE_BREAK_EVEN_PRICE) * 100).toFixed(2)}%`) : ""}
-        </div>
       </div>
       <div class="price-block">
         <div class="label">現價</div>
@@ -1400,10 +1592,7 @@
       ${renderMetricCard("毛盈虧", `${fmt_signed(pnl.shown_pct)}%`, `${fmt_signed(pnl.shown_usdt)} USDT ｜ ${pnl.source === "binance_sync" ? "Binance 同步" : "Mark Price 估算"}`)}
       ${renderMetricCard("成本後盈虧", `${fmt_signed(pnl.net_pct)}%`, `${fmt_signed(pnl.net_usdt)} USDT ｜ 成本 -${pnl.cost_usdt.toFixed(2)} USDT`)}
     </div>
-  </div>
-
-  <!-- TP / SL -->
-  <div class="card">
+    <div class="divider"></div>
     <div class="card-title">交易計畫</div>
     <div class="tp-sl-row">
       <div class="tp-box">
@@ -1461,11 +1650,6 @@
   <!-- Legend -->
   <div class="legend">
     <span>盈利增加 → 紅色</span>｜<span>觸發止損 → 綠色</span>
-  </div>
-
-  <div class="action-row">
-    <button class="close-btn" onclick="triggerManualClose()">手動平倉</button>
-    <button class="panel-btn" onclick="closePanel()">關閉面板</button>
   </div>
 
   ${renderCloseHits()}
