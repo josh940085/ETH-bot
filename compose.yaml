@@ -1,0 +1,20 @@
+services:
+  eth-bot:
+    build: .
+    command: ["python", "-u", "program.py"]
+    env_file:
+      - .env
+    volumes:
+      - ./.runtime:/app/.runtime
+    restart: unless-stopped
+
+  panel-realtime:
+    build: .
+    command: ["python", "-u", "panel_realtime_server.py"]
+    env_file:
+      - .env
+    volumes:
+      - ./.runtime:/app/.runtime
+    ports:
+      - "${POSITION_PANEL_REALTIME_PORT:-8787}:${POSITION_PANEL_REALTIME_PORT:-8787}"
+    restart: unless-stopped

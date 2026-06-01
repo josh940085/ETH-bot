@@ -92,28 +92,43 @@ python panel_realtime_server.py
 
 這個服務現在支援雲端平台常見的 `PORT` 環境變數；如果沒給 `PORT`，才會退回 `POSITION_PANEL_REALTIME_PORT` 或預設 `8787`。
 
+## SSD 自包含模式
+
+如果你要把整套程式和資料都收斂在同一顆 SSD，建議直接用 repo 內建的 `.runtime/`：
+
+```bash
+BOT_DATA_DIR=.runtime/data
+BOT_AI_DATA_DIR=.runtime/ai
+```
+
+這樣程式碼、模型、快照、log 都會跟著 repo 走，不再依賴 `/Users/...` 或 `/Volumes/...` 這類機器路徑。
+
 ## Docker
 
-已附上 `Dockerfile`，預設啟動 bot worker：
+已附上 `Dockerfile` 和 [compose.yaml](/Users/ju-kuangchang/ETH-bot/compose.yaml)。
+如果另一台機器有 Docker，直接在 SSD 內的 repo 執行：
 
 ```bash
-docker build -t eth-bot .
-docker run --env-file .env eth-bot
+docker compose up -d --build
 ```
 
-如果要跑 panel 服務，覆寫啟動命令即可：
+這會啟動：
 
-```bash
-docker run -p 8787:8787 --env-file .env eth-bot python panel_realtime_server.py
-```
+- `eth-bot`
+- `panel-realtime`
+
+兩個服務共用 repo 內的 `.runtime/`，所以資料仍然留在 SSD。
+
+如果你繼續用 `.venv` + `supervisord` 啟動，仍然會依賴宿主機上的 Python。
+要把 SSD 插到另一台機器直接跑，應改用 `docker compose`，或把整顆 SSD 做成可開機的 Linux 環境。
 
 ## 建議環境變數
 
 ### 共同
 
 ```bash
-BOT_DATA_DIR=/data
-BOT_AI_DATA_DIR=/data/ai
+BOT_DATA_DIR=.runtime/data
+BOT_AI_DATA_DIR=.runtime/ai
 ```
 
 `BOT_DATA_DIR` 會接手這些原本偏本地化的檔案：
@@ -135,7 +150,7 @@ BOT_AI_DATA_DIR=/data/ai
 - `online_model_meta.json`
 - `ai_learning_meta.json`
 
-如果你沒設 `BOT_AI_DATA_DIR`，程式會優先沿用舊的 `/Volumes/SSD/trading`；找不到時才退回 `BOT_DATA_DIR`。這樣本地既有資料不會被直接打斷。
+如果你沒設 `BOT_AI_DATA_DIR`，程式會先看 repo 內的 `.runtime/ai`；找不到時才退回舊的 `/Volumes/SSD/trading` 或 `BOT_DATA_DIR`，避免既有資料突然失聯。
 
 ### Bot Worker
 

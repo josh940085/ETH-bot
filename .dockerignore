@@ -3,6 +3,7 @@
 .DS_Store
 .venv
 __pycache__/
+.runtime/
 *.pyc
 *.pyo
 *.pyd
