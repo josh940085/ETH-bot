@@ -148,6 +148,12 @@ DEFAULT_OPENAI_CHAT_MODEL = "gpt-5-mini"
 OPENAI_CHAT_MODEL = (os.getenv("OPENAI_CHAT_MODEL", DEFAULT_OPENAI_CHAT_MODEL) or DEFAULT_OPENAI_CHAT_MODEL).strip()
 OPENAI_TRANSLATION_MODEL = (os.getenv("OPENAI_TRANSLATION_MODEL", OPENAI_CHAT_MODEL) or OPENAI_CHAT_MODEL).strip()
 OPENAI_REASONING_EFFORT = (os.getenv("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
+OPENAI_PAID_API_ENABLED = str(os.getenv("OPENAI_PAID_API_ENABLED", "0") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 BOT_SUPERVISOR = os.getenv("BOT_SUPERVISOR") == "1"
 TELEGRAM_STATE_FILE = data_path(".telegram_state.json")
 # ===== Telegram =====
@@ -1313,7 +1319,7 @@ def translate_news_to_zh(text):
         short_src = src[:220]
 
         zh = ""
-        if OPENAI_API_KEY:
+        if OPENAI_PAID_API_ENABLED and OPENAI_API_KEY:
             url = "https://api.openai.com/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -7242,12 +7248,16 @@ def _send_trade_notification(msg, priority=True):
 
 # ===== AI分析（OpenClaw / OpenAI） =====
 OPENAI_API_KEY = _get_required_env("OPENAI_API_KEY", "", mask=True)
-if OPENAI_API_KEY:
+if OPENAI_PAID_API_ENABLED and OPENAI_API_KEY:
     print(
         f"✅ OpenAI 模型: 分析={OPENAI_CHAT_MODEL} | 翻譯={OPENAI_TRANSLATION_MODEL} | reasoning={OPENAI_REASONING_EFFORT}"
     )
+else:
+    print("🟢 OpenAI 付費 API 已停用，AI 將只使用本地模型與免費 fallback")
 
 def ask_ai_analysis(prompt):
+    if not OPENAI_PAID_API_ENABLED:
+        return "AI分析已停用 OpenAI 付費 API；目前僅使用本地模型與免費資料來源。"
     if not OPENAI_API_KEY:
         return "AI分析失敗: 未設定 OPENAI_API_KEY"
 
