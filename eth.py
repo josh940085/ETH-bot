@@ -3655,6 +3655,9 @@ def sync_active_trade_from_binance(send_notice=False):
     active_trade["add_count"] = max(0, _safe_int(active_trade.get("add_count"), 0)) if preserve_local_state else 0
     active_trade["reduce_count"] = max(0, _safe_int(active_trade.get("reduce_count"), 0)) if preserve_local_state else 0
     active_trade["last_adjust_ts"] = _safe_float(active_trade.get("last_adjust_ts"), 0.0) if preserve_local_state else 0.0
+    active_trade["scale_add_paused"] = bool(active_trade.get("scale_add_paused", False)) if preserve_local_state else False
+    active_trade["scale_add_pause_reason"] = str(active_trade.get("scale_add_pause_reason") or "") if preserve_local_state else ""
+    active_trade["scale_add_pause_ts"] = _safe_float(active_trade.get("scale_add_pause_ts"), 0.0) if preserve_local_state else 0.0
     prev_open_time = _safe_float(active_trade.get("open_time"), 0.0)
     active_trade["open_time"] = prev_open_time if preserve_local_state and prev_open_time > 0 else time.time()
     active_trade["tp_sl_adjusted_4h"] = bool(active_trade.get("tp_sl_adjusted_4h", False)) if preserve_local_state else False
@@ -3989,6 +3992,9 @@ def sync_position_panel(current_price=None):
             "add_count": _safe_int(active_trade.get("add_count"), 0),
             "reduce_count": _safe_int(active_trade.get("reduce_count"), 0),
             "last_adjust_ts": _safe_int(active_trade.get("last_adjust_ts"), 0),
+            "scale_add_paused": bool(active_trade.get("scale_add_paused", False)),
+            "scale_add_pause_reason": str(active_trade.get("scale_add_pause_reason") or ""),
+            "scale_add_pause_ts": _safe_int(active_trade.get("scale_add_pause_ts"), 0),
             "tp_sl_adjusted_4h": bool(active_trade.get("tp_sl_adjusted_4h", False)),
             "last_close_reason": POSITION_PANEL_STATE.get("last_close_reason", ""),
             "last_close_price": round(_safe_float(POSITION_PANEL_STATE.get("last_close_price"), 0.0), 4),
@@ -4041,6 +4047,9 @@ def sync_position_panel(current_price=None):
             "add_count": 0,
             "reduce_count": 0,
             "last_adjust_ts": 0,
+            "scale_add_paused": False,
+            "scale_add_pause_reason": "",
+            "scale_add_pause_ts": 0,
             "tp_sl_adjusted_4h": False,
             "last_close_reason": POSITION_PANEL_STATE.get("last_close_reason", ""),
             "last_close_price": round(_safe_float(POSITION_PANEL_STATE.get("last_close_price"), 0.0), 4),
@@ -4114,14 +4123,27 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
 
     leverage = max(1, _safe_int(row.get("leverage"), DEFAULT_LEV))
     price_ref = _safe_float(mark_price, 0.0) or _safe_float(row.get("markPrice"), 0.0) or _safe_float(WS_PRICE, 0.0)
-    qty = _calc_copy_trade_qty(delta_ratio, leverage=leverage, eth_price=price_ref)
+    if reduce:
+        qty = _calc_copy_trade_qty(delta_ratio, leverage=leverage, eth_price=price_ref)
+    else:
+        qty = _calc_copy_trade_qty_with_buffer(
+            delta_ratio,
+            leverage=leverage,
+            eth_price=price_ref,
+            enforce_min=False,
+        )
 
     # 減倉不可超過現有倉位
     if reduce:
         qty = min(qty, abs(position_amt))
 
-    qty = math.floor(max(COPY_TRADE_MIN_QTY, qty) * 1000.0) / 1000.0
+    qty = math.floor(max(0.0, qty) * 1000.0) / 1000.0
     if qty < COPY_TRADE_MIN_QTY:
+        if not reduce:
+            active_trade["scale_add_paused"] = True
+            active_trade["scale_add_pause_reason"] = f"補倉量 {qty:.3f} ETH 低於最低補倉顆數 {COPY_TRADE_MIN_QTY:.3f} ETH"
+            active_trade["scale_add_pause_ts"] = time.time()
+            return False, f"補倉已暫停：{active_trade['scale_add_pause_reason']}"
         return False, f"下單量低於最小值 {COPY_TRADE_MIN_QTY:.3f}"
 
     dual_side = _is_binance_dual_side_mode()
@@ -4171,6 +4193,12 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
         )
         if order_resp is None:
             if _is_binance_insufficient_margin_error(last_err):
+                fallback_qty = math.floor(max(0.0, _safe_float(_recalc_scale_qty(retry_steps + 1), 0.0)) * 1000.0) / 1000.0
+                if fallback_qty < COPY_TRADE_MIN_QTY:
+                    active_trade["scale_add_paused"] = True
+                    active_trade["scale_add_pause_reason"] = f"補倉量 {fallback_qty:.3f} ETH 低於最低補倉顆數 {COPY_TRADE_MIN_QTY:.3f} ETH"
+                    active_trade["scale_add_pause_ts"] = time.time()
+                    return False, f"補倉已暫停：{active_trade['scale_add_pause_reason']}"
                 return False, _format_binance_margin_failure("補倉實單失敗", final_qty, leverage, price_ref, last_err)
             return False, f"補倉實單失敗: {last_err}"
         return True, f"補倉實單成功 qty={final_qty:.3f}"
@@ -4646,6 +4674,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     )
     add_count = int(active_trade.get("add_count", 0))
     reduce_count = int(active_trade.get("reduce_count", 0))
+    scale_add_paused = bool(active_trade.get("scale_add_paused", False))
     real_copy_enabled = _get_follow_mode_enabled() and _is_real_copy_enabled()
     progress = _calc_scaling_progress(direction, entry, current_price, active_trade.get("tp"), active_trade.get("sl"))
 
@@ -4664,7 +4693,8 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     earned_r_multiple = _safe_float(progress.get("earned_r_multiple"), 0.0)
 
     add_trigger = (
-        add_count < max_add_count
+        not scale_add_paused
+        and add_count < max_add_count
         and size < max_size - 1e-9
         and min_add_drawdown <= drawdown_progress <= max_add_drawdown
         and trend_score >= min_add_trend_score
@@ -4709,6 +4739,8 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
             if real_copy_enabled:
                 ok, scale_msg = _execute_copy_trade_scale(direction, delta, reduce=False, mark_price=current_price)
                 if not ok:
+                    if active_trade.get("scale_add_paused"):
+                        sync_position_panel(current_price)
                     send_private_telegram(f"⚠️ 補倉略過：{scale_msg}", priority=True)
                     return
                 sync_active_trade_from_binance(send_notice=False)
@@ -5004,6 +5036,9 @@ active_trade = {
     "add_count": 0,
     "reduce_count": 0,
     "last_adjust_ts": 0.0,
+    "scale_add_paused": False,
+    "scale_add_pause_reason": "",
+    "scale_add_pause_ts": 0.0,
     "open_time": None,
     "tp_sl_adjusted_4h": False,
 }
@@ -5025,6 +5060,9 @@ def _reset_active_trade_state():
     active_trade["add_count"] = 0
     active_trade["reduce_count"] = 0
     active_trade["last_adjust_ts"] = 0.0
+    active_trade["scale_add_paused"] = False
+    active_trade["scale_add_pause_reason"] = ""
+    active_trade["scale_add_pause_ts"] = 0.0
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
     _clear_pending_training_sample_state()
@@ -5074,6 +5112,9 @@ def restore_active_trade_from_panel():
     active_trade["add_count"] = max(0, _safe_int(raw.get("add_count"), 0))
     active_trade["reduce_count"] = max(0, _safe_int(raw.get("reduce_count"), 0))
     active_trade["last_adjust_ts"] = _safe_float(raw.get("last_adjust_ts"), 0.0)
+    active_trade["scale_add_paused"] = bool(raw.get("scale_add_paused", False))
+    active_trade["scale_add_pause_reason"] = str(raw.get("scale_add_pause_reason") or "")
+    active_trade["scale_add_pause_ts"] = _safe_float(raw.get("scale_add_pause_ts"), 0.0)
     active_trade["open_time"] = _safe_float(raw.get("open_since_ts"), state_ts or time.time())
     active_trade["tp_sl_adjusted_4h"] = bool(raw.get("tp_sl_adjusted_4h", False))
     stored_be_active = bool(raw.get("break_even_active", False))
@@ -8027,6 +8068,9 @@ def run_bot():
                 active_trade["add_count"] = 0
                 active_trade["reduce_count"] = 0
                 active_trade["last_adjust_ts"] = 0.0
+                active_trade["scale_add_paused"] = False
+                active_trade["scale_add_pause_reason"] = ""
+                active_trade["scale_add_pause_ts"] = 0.0
                 active_trade["open_time"] = time.time()
                 active_trade["tp_sl_adjusted_4h"] = False
                 _set_break_even_state(False)
