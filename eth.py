@@ -5075,6 +5075,73 @@ def get_signal_direction(signal):
     return None
 
 
+def _same_entry_confirm_candle(prev_candle_id, candle_id):
+    if prev_candle_id is None or candle_id is None:
+        return False
+    return str(prev_candle_id) == str(candle_id)
+
+
+def _get_entry_confirm_candle_id(df_5m):
+    try:
+        if df_5m is None or len(df_5m) == 0:
+            return None
+        idx = df_5m.index[-1]
+        if hasattr(idx, "timestamp"):
+            return int(idx.timestamp())
+        return str(idx)
+    except Exception:
+        return None
+
+
+def _evaluate_pending_entry_confirmation(pending, direction, price, score, candle_id, now_ts):
+    if not pending:
+        return False, "建立待確認訊號"
+
+    if direction != pending.get("direction"):
+        return False, "方向改變，重置待確認訊號"
+
+    pending_price = _safe_float(pending.get("price"), 0.0)
+    if pending_price <= 0 or price <= 0:
+        return False, "價格資料不足"
+
+    max_age = max(60.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_AGE_SEC", 420), 420))
+    min_wait = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 45), 45))
+    max_chase = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_CHASE_RATE", 0.0018), 0.0018))
+    max_reversal = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_REVERSAL_RATE", 0.0025), 0.0025))
+    require_new_candle = str(os.getenv("TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M", "1") or "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    age = max(0.0, now_ts - _safe_float(pending.get("ts"), now_ts))
+    if age > max_age:
+        return False, "待確認訊號逾時"
+    if age < min_wait:
+        return False, f"等待確認中 {age:.0f}/{min_wait:.0f}s"
+    if require_new_candle and _same_entry_confirm_candle(pending.get("candle_id"), candle_id):
+        return False, "等待下一根 5m K 確認"
+
+    move_rate = (price - pending_price) / pending_price
+    if direction == "long":
+        if move_rate > max_chase:
+            return False, f"多單已追高 {move_rate*100:.2f}%"
+        if move_rate < -max_reversal:
+            return False, f"多單回落過深 {move_rate*100:.2f}%"
+        if score <= 0.5:
+            return False, "多單分數轉弱"
+    else:
+        if move_rate < -max_chase:
+            return False, f"空單已追低 {abs(move_rate)*100:.2f}%"
+        if move_rate > max_reversal:
+            return False, f"空單反彈過深 {move_rate*100:.2f}%"
+        if score >= 0.5:
+            return False, "空單分數轉弱"
+
+    return True, f"延遲確認通過 {age:.0f}s | 價格變化 {move_rate*100:+.2f}%"
+
+
 def auto_fix_trade_plan(signal, entry, sl, tp, atr):
     """最終開單前修正 TP/SL，避免方向錯誤或風險距離過小。"""
     direction = get_signal_direction(signal)
@@ -7586,6 +7653,19 @@ def run_bot():
     last_direction = None
     last_binance_sync_ts = 0.0
     volume_spike = None
+    pending_entry_confirmation = None
+    entry_confirm_enabled = str(os.getenv("TRADE_ENTRY_CONFIRM_ENABLED", "1") or "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    print(
+        "✅ 進場延遲確認: "
+        f"{'啟用' if entry_confirm_enabled else '停用'} | "
+        f"wait={os.getenv('TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC', '45')}s | "
+        f"new_5m={os.getenv('TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M', '1')}"
+    )
     # trade_open 移除，改用 active_trade 控制是否可開單
 
     # ===== 每日報告 =====
@@ -8194,21 +8274,57 @@ def run_bot():
 
             # ===== 最終過濾 =====
             if final.startswith("觀望"):
+                pending_entry_confirmation = None
                 continue
 
             # ===== 最終安全檢查：拒絕假突破低信心單 =====
             if fake_breakout and abs(score - 0.5) < 0.22:
+                pending_entry_confirmation = None
                 continue
 
             # ===== 多週期壓力/支撐阻擋：靠近關鍵反向區域先觀望 =====
             support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
             resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
             if "做多" in final and resistance_hits >= 2 and score < 0.72:
+                pending_entry_confirmation = None
                 continue
             if "做空" in final and support_hits >= 2 and score > 0.28:
+                pending_entry_confirmation = None
                 continue
 
             if final != "觀望":
+                direction = "long" if "做多" in final else "short"
+
+                if entry_confirm_enabled:
+                    candle_id = _get_entry_confirm_candle_id(df_5m)
+                    confirmed, confirm_msg = _evaluate_pending_entry_confirmation(
+                        pending_entry_confirmation,
+                        direction,
+                        price,
+                        score,
+                        candle_id,
+                        now_ts,
+                    )
+                    if not confirmed:
+                        keep_waiting = (
+                            pending_entry_confirmation
+                            and direction == pending_entry_confirmation.get("direction")
+                            and str(confirm_msg).startswith("等待")
+                        )
+                        if not keep_waiting:
+                            pending_entry_confirmation = {
+                                "direction": direction,
+                                "price": float(price),
+                                "score": float(score),
+                                "final": final,
+                                "ts": now_ts,
+                                "candle_id": candle_id,
+                            }
+                        print(f"⏳ 進場延遲確認 | {direction} | {confirm_msg} | 價格 {price:.2f}")
+                        sync_position_panel(price)
+                        continue
+                    print(f"✅ 進場延遲確認 | {direction} | {confirm_msg}")
+                    pending_entry_confirmation = None
 
                 # 保險：再次確認沒有持倉
                 if active_trade["open"]:
@@ -8219,7 +8335,6 @@ def run_bot():
                     continue
 
                 # ===== 建立真實交易 =====
-                direction = "long" if "做多" in final else "short"
 
                 active_trade["direction"] = direction
                 active_trade["entry"] = float(entry)
