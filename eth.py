@@ -4339,6 +4339,22 @@ def _derive_scaling_bounds(base_size):
     return round(max_size, 6), round(min_size, 6)
 
 
+def _cap_initial_position_size(size_ratio):
+    size = max(0.0, _safe_float(size_ratio, 0.0))
+    if size <= 0:
+        return 0.0
+
+    default_cap = _safe_float(os.getenv("TRADE_MAX_OPEN_SIZE_RATIO", 0.55), 0.55)
+    max_open = _safe_float(os.getenv("TRADE_INITIAL_MAX_OPEN_SIZE_RATIO", default_cap), default_cap)
+    max_open = min(0.95, max(0.05, max_open))
+
+    if _is_truthy(os.getenv("TRADE_AUTO_SCALE_ENABLED", "0")):
+        reserve = min(0.5, max(0.0, _safe_float(os.getenv("TRADE_SCALE_RESERVE_RATIO", 0.20), 0.20)))
+        max_open = min(max_open, max(0.05, 1.0 - reserve))
+
+    return min(size, max_open)
+
+
 def _resolve_scaling_bounds(size_ratio, raw_max_size=None, raw_min_size=None):
     size = max(0.0, _safe_float(size_ratio, 0.0))
     default_max, default_min = _derive_scaling_bounds(size)
@@ -6615,6 +6631,8 @@ def build_trade_signal_snapshot(
                 else:
                     position_size *= 0.7
 
+            position_size = _cap_initial_position_size(position_size)
+
     if final != "觀望":
         final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
 
@@ -8138,6 +8156,7 @@ def run_bot():
                 base_size = _safe_float(position_size, 0.0)
                 if base_size <= 0:
                     base_size = 0.2
+                base_size = _cap_initial_position_size(base_size)
                 active_trade["size"] = float(min(1.0, max(base_size, 0.1)))
                 max_size, min_size = _derive_scaling_bounds(active_trade["size"])
                 active_trade["max_size"] = max_size
