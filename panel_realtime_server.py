@@ -65,6 +65,13 @@ def _safe_int_env(name: str, default: int) -> int:
         return int(default)
 
 
+def _safe_bool_env(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return bool(default)
+    return raw not in {"0", "false", "no", "off"}
+
+
 def _runtime_env_value(name: str, default=""):
     local_values = _read_local_env_values()
     if name in local_values:
@@ -112,6 +119,23 @@ LATEST_STATE = {"open": False, "ts": 0}
 STATE_LOCK = asyncio.Lock()
 CLIENTS = set()
 CLIENTS_LOCK = asyncio.Lock()
+PANEL_ERROR_LOG_ENABLED = _safe_bool_env("POSITION_PANEL_ERROR_LOG_ENABLED", True)
+
+
+@app.middleware("http")
+async def log_panel_http_errors(request: Request, call_next):
+    start_ts = time.time()
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        if PANEL_ERROR_LOG_ENABLED:
+            print(f"⚠️ panel request error | {request.method} {request.url.path} | {exc!r}")
+        raise
+
+    if PANEL_ERROR_LOG_ENABLED and response.status_code >= 400:
+        elapsed_ms = (time.time() - start_ts) * 1000.0
+        print(f"⚠️ panel HTTP {response.status_code} | {request.method} {request.url.path} | {elapsed_ms:.1f}ms")
+    return response
 
 
 def _viewer_auth_settings():
@@ -475,4 +499,5 @@ if __name__ == "__main__":
         host=str(os.getenv("POSITION_PANEL_REALTIME_HOST", "0.0.0.0") or "0.0.0.0"),
         port=_resolve_panel_port(8787),
         log_level=str(os.getenv("POSITION_PANEL_REALTIME_LOG_LEVEL", "info") or "info"),
+        access_log=_safe_bool_env("POSITION_PANEL_ACCESS_LOG_ENABLED", False),
     )
