@@ -369,6 +369,8 @@ async def root():
 
 
 @app.get("/position.json")
+@app.get("/ETH-bot/docs/position.json")
+@app.get("/ETH-bot/position.json")
 async def local_position_snapshot():
     position_path = Path(__file__).resolve().parent / "docs" / "position.json"
     if not position_path.exists():

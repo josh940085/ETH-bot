@@ -641,6 +641,7 @@
   let PERFORMANCE_WIN_RATE = null;
   let PERFORMANCE_TRADES = 0;
   let PERFORMANCE_WINS = 0;
+  let PERFORMANCE_SUMMARY_LOCKED = false;
   let KLINES_4H = [];
   let KLINES_4H_FETCH_TS = 0;
 
@@ -671,12 +672,9 @@
   // 公開部署不再回退到靜態 position.json，避免敏感倉位被 GitHub Pages 直接暴露。
   const POSITION_JSON_URLS = IS_LOCAL_PREVIEW ? [
     "./position.json",
-    "/ETH-bot/docs/position.json",
-    "/ETH-bot/position.json",
   ] : [];
   const PERFORMANCE_SUMMARY_URLS = IS_LOCAL_PREVIEW ? [
     "./backtest_latest_summary.json",
-    "/backtest_latest_summary.json",
   ] : [];
   let LAST_POSITION_SOURCE = URL_SNAPSHOT_TS > 0 ? "URL 參數" : "";
   let LAST_POSITION_TS = URL_SNAPSHOT_TS > 0 ? URL_SNAPSHOT_TS : 0;
@@ -891,6 +889,7 @@
   }
 
   function applyPerformancePayload(data) {
+    if (PERFORMANCE_SUMMARY_LOCKED) return true;
     if (typeof data !== "object" || data === null) return false;
     const winRate = Number(data.win_rate);
     const trades = Number(data.trades);
@@ -899,10 +898,12 @@
     PERFORMANCE_WIN_RATE = winRate;
     PERFORMANCE_TRADES = Number.isFinite(trades) ? trades : 0;
     PERFORMANCE_WINS = Number.isFinite(wins) ? wins : 0;
+    PERFORMANCE_SUMMARY_LOCKED = true;
     return true;
   }
 
   async function fetchPerformanceSummary() {
+    if (PERFORMANCE_SUMMARY_LOCKED) return;
     if (!PERFORMANCE_SUMMARY_URLS.length) return;
     const fetchTasks = PERFORMANCE_SUMMARY_URLS.map((base) => {
       const url = base + (base.includes("?") ? "&" : "?") + "t=" + Date.now();
@@ -1078,7 +1079,7 @@
     }
     refreshInFlight = true;
     try {
-      await Promise.all([fetchPositionData(), fetchPrice(), fetchPerformanceSummary(), fetchFourHourKlines()]);
+      await Promise.all([fetchPositionData(), fetchPrice(), fetchFourHourKlines()]);
       render();
     } finally {
       refreshInFlight = false;
@@ -1727,6 +1728,7 @@
 
   // ── 啟動 ──
   connectRealtimeSocket();
+  void fetchPerformanceSummary().then(render);
   refresh();
   setInterval(refresh, PANEL_REFRESH_INTERVAL_MS);
   setInterval(checkAppVersion, APP_VERSION_CHECK_INTERVAL_MS);
