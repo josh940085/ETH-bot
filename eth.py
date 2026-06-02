@@ -3923,6 +3923,10 @@ def sync_position_panel(current_price=None):
     size_ratio = max(0.0, _safe_float(active_trade.get("size"), 0.0)) if active_trade.get("open") else 0.0
     position_qty = _get_active_trade_position_qty() if active_trade.get("open") else 0.0
     capital_usage_ratio = max(0.0, _safe_float(POSITION_PANEL_STATE.get("capital_usage_ratio"), 0.0)) if active_trade.get("open") else 0.0
+    max_size = round(_safe_float(active_trade.get("max_size"), 1.0), 4)
+    min_size = round(_safe_float(active_trade.get("min_size"), 0.1), 4)
+    scale_add_room = round(max(0.0, max_size - size_ratio), 4) if active_trade.get("open") else 0.0
+    scale_reduce_room = round(max(0.0, size_ratio - min_size), 4) if active_trade.get("open") else 0.0
 
     if active_trade.get("open"):
         if not last_price:
@@ -3987,8 +3991,10 @@ def sync_position_panel(current_price=None):
             "size_ratio": round(size_ratio, 4),
             "capital_usage_ratio": round(capital_usage_ratio, 4),
             "open_since_ts": _safe_int(active_trade.get("open_time"), int(time.time())),
-            "max_size": round(_safe_float(active_trade.get("max_size"), 1.0), 4),
-            "min_size": round(_safe_float(active_trade.get("min_size"), 0.1), 4),
+            "max_size": max_size,
+            "min_size": min_size,
+            "scale_add_room": scale_add_room,
+            "scale_reduce_room": scale_reduce_room,
             "add_count": _safe_int(active_trade.get("add_count"), 0),
             "reduce_count": _safe_int(active_trade.get("reduce_count"), 0),
             "last_adjust_ts": _safe_int(active_trade.get("last_adjust_ts"), 0),
@@ -4044,6 +4050,8 @@ def sync_position_panel(current_price=None):
             "open_since_ts": 0,
             "max_size": round(_safe_float(active_trade.get("max_size"), 1.0), 4),
             "min_size": round(_safe_float(active_trade.get("min_size"), 0.1), 4),
+            "scale_add_room": 0.0,
+            "scale_reduce_room": 0.0,
             "add_count": 0,
             "reduce_count": 0,
             "last_adjust_ts": 0,

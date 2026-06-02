@@ -543,7 +543,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260602-2";
+  const APP_VERSION = "20260603-1";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -629,9 +629,14 @@
   let OPEN_SINCE_TS = 0;
   let MAX_SIZE = 1;
   let MIN_SIZE = 0.1;
+  let SCALE_ADD_ROOM = 0;
+  let SCALE_REDUCE_ROOM = 0;
   let ADD_COUNT = 0;
   let REDUCE_COUNT = 0;
   let LAST_ADJUST_TS = 0;
+  let SCALE_ADD_PAUSED = false;
+  let SCALE_ADD_PAUSE_REASON = "";
+  let SCALE_ADD_PAUSE_TS = 0;
   let TP_SL_ADJUSTED_4H = false;
   let BINANCE_BREAK_EVEN_PRICE = readNumberParam("binance_break_even_price", 0);
   let FUNDING_NEXT_TS = 0;
@@ -863,9 +868,14 @@
     OPEN_SINCE_TS = Number.isFinite(Number(data.open_since_ts)) ? Number(data.open_since_ts) : OPEN_SINCE_TS;
     MAX_SIZE = Number.isFinite(Number(data.max_size)) ? Number(data.max_size) : MAX_SIZE;
     MIN_SIZE = Number.isFinite(Number(data.min_size)) ? Number(data.min_size) : MIN_SIZE;
+    SCALE_ADD_ROOM = Number.isFinite(Number(data.scale_add_room)) ? Number(data.scale_add_room) : Math.max(0, MAX_SIZE - (Number(SIZE) / 100));
+    SCALE_REDUCE_ROOM = Number.isFinite(Number(data.scale_reduce_room)) ? Number(data.scale_reduce_room) : Math.max(0, (Number(SIZE) / 100) - MIN_SIZE);
     ADD_COUNT = Number.isFinite(Number(data.add_count)) ? Number(data.add_count) : ADD_COUNT;
     REDUCE_COUNT = Number.isFinite(Number(data.reduce_count)) ? Number(data.reduce_count) : REDUCE_COUNT;
     LAST_ADJUST_TS = Number.isFinite(Number(data.last_adjust_ts)) ? Number(data.last_adjust_ts) : LAST_ADJUST_TS;
+    SCALE_ADD_PAUSED = Boolean(data.scale_add_paused);
+    SCALE_ADD_PAUSE_REASON = String(data.scale_add_pause_reason || "");
+    SCALE_ADD_PAUSE_TS = Number.isFinite(Number(data.scale_add_pause_ts)) ? Number(data.scale_add_pause_ts) : 0;
     TP_SL_ADJUSTED_4H = Boolean(data.tp_sl_adjusted_4h);
     FUNDING_NEXT_TS = Number.isFinite(Number(data.funding_next_ts)) ? Number(data.funding_next_ts) : FUNDING_NEXT_TS;
     BREAK_EVEN_ACTIVE = Boolean(data.break_even_active);
@@ -1159,6 +1169,12 @@
     const v = Number(n);
     if (!Number.isFinite(v)) return "0.0";
     return v.toFixed(1);
+  }
+
+  function fmt_room_ratio(ratio) {
+    const v = Number(ratio);
+    if (!Number.isFinite(v) || v <= 0) return "0.0%";
+    return `${(v * 100).toFixed(1)}%`;
   }
 
   // ── 判斷 SL 是否已觸發 ──
@@ -1571,6 +1587,8 @@
     const capitalUsagePct = Number.isFinite(Number(SIZE)) ? Number(SIZE) : 0;
     const maxSizePct = Math.max(0, Number(MAX_SIZE) * 100);
     const minSizePct = Math.max(0, Number(MIN_SIZE) * 100);
+    const addRoomPct = Math.max(0, Number(SCALE_ADD_ROOM) * 100);
+    const reduceRoomPct = Math.max(0, Number(SCALE_REDUCE_ROOM) * 100);
     const sizeBarBase = Math.max(maxSizePct, capitalUsagePct, 1);
     const sizeBarWidth = clamp((capitalUsagePct / sizeBarBase) * 100, 0, 100);
     const qtyEstimate = BINANCE_QTY > 0
@@ -1580,6 +1598,14 @@
     const scaleTone = sizePressure > 1.02 ? "bad" : (sizePressure > 0.85 ? "warn" : "good");
     const planTone = plan.rr >= 1.5 ? "good" : (plan.rr >= 1.1 ? "warn" : "bad");
     const adjustText = LAST_ADJUST_TS > 0 ? `${ts_full_str(LAST_ADJUST_TS)} (${fmt_elapsed(LAST_ADJUST_TS)}前)` : "尚未調倉";
+    const addRoomTone = SCALE_ADD_PAUSED ? "bad" : (addRoomPct >= 10 ? "good" : (addRoomPct > 0 ? "warn" : "bad"));
+    const reduceRoomTone = reduceRoomPct >= 8 ? "good" : (reduceRoomPct > 0 ? "warn" : "bad");
+    const addStatusText = SCALE_ADD_PAUSED
+      ? `已暫停${SCALE_ADD_PAUSE_TS > 0 ? ` ｜ ${fmt_elapsed(SCALE_ADD_PAUSE_TS)}前` : ""}`
+      : (addRoomPct > 0 ? "可補倉" : "已達上限");
+    const addStatusDetail = SCALE_ADD_PAUSED
+      ? (SCALE_ADD_PAUSE_REASON || "補倉暫停中")
+      : `目前到上限還有 ${fmt_room_ratio(SCALE_ADD_ROOM)}`;
     const totalCostRate = TOTAL_COST_RATE_EST || (ROUND_TRIP_FEE_RATE + FUNDING_COST_RATE_EST);
     const fundingText = FUNDING_NEXT_TS > 0 ? `${ts_full_str(FUNDING_NEXT_TS)} ｜ ${fmt_countdown(FUNDING_NEXT_TS)}` : "-";
     const breakEvenText = BREAK_EVEN_ACTIVE
@@ -1705,10 +1731,17 @@
   <div class="card">
     <div class="card-title">調倉與成本</div>
     <div class="section-grid">
+      ${renderMetricCard("可補倉空間", fmt_room_ratio(SCALE_ADD_ROOM), addStatusDetail)}
+      ${renderMetricCard("可減倉空間", fmt_room_ratio(SCALE_REDUCE_ROOM), `底倉下限 ${fmt_size(minSizePct)}%`)}
       ${renderMetricCard("補倉 / 減倉次數", `${ADD_COUNT} / ${REDUCE_COUNT}`, `下限 ${fmt_size(minSizePct)}% ｜ 上限 ${fmt_size(maxSizePct)}%`)}
       ${renderMetricCard("最近調整", LAST_ADJUST_TS > 0 ? ts_full_str(LAST_ADJUST_TS) : "-", LAST_ADJUST_TS > 0 ? `${fmt_elapsed(LAST_ADJUST_TS)}前` : "尚未補/減倉")}
       ${renderMetricCard("手續費 / 資金費", `${fmt_rate(ROUND_TRIP_FEE_RATE, 3)} / ${fmt_rate(FUNDING_COST_RATE_EST, 3)}`, `Funding ${fmt_rate(FUNDING_RATE, 4)} ｜ 評估 ${COST_EVAL_HOLD_HOURS.toFixed(1)}h`)}
       ${renderMetricCard("總成本估算", fmt_rate(totalCostRate, 3), `Next funding ${fundingText}`)}
+    </div>
+    <div class="status-row">
+      <span class="status-chip ${addRoomTone}">補倉狀態 ${addStatusText}</span>
+      <span class="status-chip ${reduceRoomTone}">減倉空間 ${fmt_room_ratio(SCALE_REDUCE_ROOM)}</span>
+      <span class="status-chip ${scaleTone}">倉位壓力 ${maxSizePct > 0 ? `${(sizePressure * 100).toFixed(1)}%` : "-"}</span>
     </div>
     <div class="section-note">
       成本後盈虧已把手續費與持倉期間資金費估算納入。若交易所未回傳最新盈虧，前端會退回即時估算。
