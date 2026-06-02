@@ -609,6 +609,7 @@
   let POSITION_NOTIONAL_USDT = readNumberParam("position_notional_usdt", 0);
   let POSITION_MARGIN_USDT = readNumberParam("position_margin_usdt", 0);
   let BINANCE_QTY = readNumberParam("binance_qty", 0);
+  let POSITION_SIZE_RATIO = readNumberParam("size_ratio", SIZE / 100);
   let BINANCE_ENTRY_PRICE = readNumberParam("binance_entry_price", ENTRY);
   let BINANCE_MARK_PRICE = readNumberParam("binance_mark_price", 0);
   let BINANCE_MARK_PRICE_TS = readNumberParam("binance_mark_price_ts", URL_SNAPSHOT_TS);
@@ -823,6 +824,7 @@
       } else if (Number.isFinite(Number(data.size))) {
         SIZE = Number(data.size) * 100;
       }
+      POSITION_SIZE_RATIO = Number.isFinite(Number(data.size_ratio)) ? Number(data.size_ratio) : (SIZE / 100);
       POSITION_NOTIONAL_USDT = Number.isFinite(Number(data.position_notional_usdt)) ? Number(data.position_notional_usdt) : 0;
       POSITION_MARGIN_USDT = Number.isFinite(Number(data.position_margin_usdt)) ? Number(data.position_margin_usdt) : 0;
       BINANCE_QTY = Number.isFinite(Number(data.binance_qty)) ? Number(data.binance_qty) : 0;
@@ -866,10 +868,11 @@
     BINANCE_FUTURES_TOTAL_ASSETS_USDT = Number.isFinite(Number(data.binance_futures_total_assets_usdt)) ? Number(data.binance_futures_total_assets_usdt) : BINANCE_FUTURES_TOTAL_ASSETS_USDT;
     BINANCE_TOTAL_ASSETS_USDT = Number.isFinite(Number(data.binance_total_assets_usdt)) ? Number(data.binance_total_assets_usdt) : BINANCE_TOTAL_ASSETS_USDT;
     OPEN_SINCE_TS = Number.isFinite(Number(data.open_since_ts)) ? Number(data.open_since_ts) : OPEN_SINCE_TS;
+    POSITION_SIZE_RATIO = Number.isFinite(Number(data.size_ratio)) ? Number(data.size_ratio) : (SIZE / 100);
     MAX_SIZE = Number.isFinite(Number(data.max_size)) ? Number(data.max_size) : MAX_SIZE;
     MIN_SIZE = Number.isFinite(Number(data.min_size)) ? Number(data.min_size) : MIN_SIZE;
-    SCALE_ADD_ROOM = Number.isFinite(Number(data.scale_add_room)) ? Number(data.scale_add_room) : Math.max(0, MAX_SIZE - (Number(SIZE) / 100));
-    SCALE_REDUCE_ROOM = Number.isFinite(Number(data.scale_reduce_room)) ? Number(data.scale_reduce_room) : Math.max(0, (Number(SIZE) / 100) - MIN_SIZE);
+    SCALE_ADD_ROOM = Number.isFinite(Number(data.scale_add_room)) ? Number(data.scale_add_room) : Math.max(0, MAX_SIZE - POSITION_SIZE_RATIO);
+    SCALE_REDUCE_ROOM = Number.isFinite(Number(data.scale_reduce_room)) ? Number(data.scale_reduce_room) : Math.max(0, POSITION_SIZE_RATIO - MIN_SIZE);
     ADD_COUNT = Number.isFinite(Number(data.add_count)) ? Number(data.add_count) : ADD_COUNT;
     REDUCE_COUNT = Number.isFinite(Number(data.reduce_count)) ? Number(data.reduce_count) : REDUCE_COUNT;
     LAST_ADJUST_TS = Number.isFinite(Number(data.last_adjust_ts)) ? Number(data.last_adjust_ts) : LAST_ADJUST_TS;
@@ -1585,6 +1588,7 @@
     const liveDiffStr = `${liveDiff >= 0 ? "↑" : "↓"} ${Math.abs(liveDiff).toFixed(2)} (${(liveDiff / ENTRY * 100).toFixed(2)}%)`;
     const plan = calcTradePlanStats(live);
     const capitalUsagePct = Number.isFinite(Number(SIZE)) ? Number(SIZE) : 0;
+    const strategySizePct = Math.max(0, Number(POSITION_SIZE_RATIO) * 100);
     const maxSizePct = Math.max(0, Number(MAX_SIZE) * 100);
     const minSizePct = Math.max(0, Number(MIN_SIZE) * 100);
     const addRoomPct = Math.max(0, Number(SCALE_ADD_ROOM) * 100);
@@ -1647,9 +1651,10 @@
     </div>
     <div class="size-summary">
       <span>資金使用 <strong>${fmt_size(capitalUsagePct)}%</strong></span>
-      <span>調倉區間 <strong>${fmt_size(minSizePct)}% - ${fmt_size(maxSizePct)}%</strong></span>
+      <span>策略倉位 <strong>${fmt_size(strategySizePct)}%</strong></span>
     </div>
     <div class="section-grid">
+      ${renderMetricCard("調倉區間", `${fmt_size(minSizePct)}% - ${fmt_size(maxSizePct)}%`, `策略倉位 ${fmt_size(strategySizePct)}%`)}
       ${renderMetricCard("持倉名義價值", POSITION_NOTIONAL_USDT > 0 ? `${fmt(POSITION_NOTIONAL_USDT)} USDT` : "-", POSITION_MARGIN_USDT > 0 ? `保證金 ${fmt(POSITION_MARGIN_USDT)} USDT` : "")}
       ${renderMetricCard(BINANCE_QTY > 0 ? "實際持倉數量" : "推估持倉數量", qtyEstimate > 0 ? `${qtyEstimate.toFixed(4)} ETH` : "-", `開倉 ${fmt_elapsed(OPEN_SINCE_TS)} ｜ 槓桿 ${LEV}x`)}
     </div>
