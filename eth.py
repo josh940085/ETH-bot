@@ -4635,11 +4635,69 @@ def _assess_scaling_action(direction, entry, current_price, tp, sl, reduce=False
         return False, f"可鎖定淨利不足({lock_net_rate*100:.3f}% < {min_lock_rate*100:.3f}%)", metrics
     return True, "減倉成本檢查通過", metrics
 
+
+def _maybe_relax_sl_after_scale_add(direction, current_price, atr=None, initial_risk_abs=0.0):
+    """補倉後小幅放寬 SL，但用風險上限避免無限制攤平。"""
+    if not _is_truthy(os.getenv("SCALE_ADD_RELAX_SL_ENABLED", "1")):
+        return False, ""
+
+    direction = str(direction or "")
+    entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+    old_sl = _safe_float(active_trade.get("sl"), 0.0)
+    tp = _safe_float(active_trade.get("tp"), 0.0)
+    px = _safe_float(current_price, 0.0)
+
+    if direction not in {"long", "short"} or entry <= 0 or old_sl <= 0 or px <= 0:
+        return False, ""
+
+    atr_value = max(0.0, _safe_float(atr, _safe_float(SCALING_MARKET_STATE.get("atr"), 0.0)))
+    risk_abs = max(_safe_float(initial_risk_abs, 0.0), abs(entry - old_sl), entry * 0.001)
+    relax_atr_factor = max(0.0, _safe_float(os.getenv("SCALE_ADD_SL_RELAX_ATR_FACTOR", 0.35), 0.35))
+    relax_risk_factor = max(0.0, _safe_float(os.getenv("SCALE_ADD_SL_RELAX_RISK_FACTOR", 0.12), 0.12))
+    relax_abs = max(atr_value * relax_atr_factor, risk_abs * relax_risk_factor, entry * 0.0008)
+
+    max_risk_multiplier = max(1.0, _safe_float(os.getenv("SCALE_ADD_SL_MAX_RISK_MULTIPLIER", 1.28), 1.28))
+    max_distance_rate = max(0.002, _safe_float(os.getenv("SCALE_ADD_SL_MAX_DISTANCE_RATE", 0.045), 0.045))
+    max_risk_abs = min(risk_abs * max_risk_multiplier, entry * max_distance_rate)
+    if max_risk_abs <= abs(entry - old_sl) + 1e-9:
+        return False, "SL 已達補倉放寬上限"
+
+    if direction == "long":
+        candidate = old_sl - relax_abs
+        floor_sl = entry - max_risk_abs
+        new_sl = max(candidate, floor_sl)
+        if tp > 0 and new_sl >= min(entry, tp):
+            return False, ""
+        if new_sl >= old_sl - 1e-9:
+            return False, "SL 已達補倉放寬上限"
+    else:
+        candidate = old_sl + relax_abs
+        ceiling_sl = entry + max_risk_abs
+        new_sl = min(candidate, ceiling_sl)
+        if tp > 0 and new_sl <= max(entry, tp):
+            return False, ""
+        if new_sl <= old_sl + 1e-9:
+            return False, "SL 已達補倉放寬上限"
+
+    new_sl = round(float(new_sl), 2)
+    active_trade["sl"] = float(new_sl)
+    _sync_break_even_state_from_sl(direction, entry, new_sl, preserve_existing=False)
+
+    sync_msg = ""
+    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+        try:
+            _, binance_msg = update_copy_trade_tp_sl(active_trade.get("tp"), new_sl)
+            sync_msg = f"\n{binance_msg}"
+        except Exception as e:
+            sync_msg = f"\n⚠️ Binance SL 放寬同步失敗: {e}"
+
+    return True, f"SL: {old_sl:.2f} → {new_sl:.2f}{sync_msg}"
+
 def manage_position_scaling(current_price, atr=None, now_ts=None):
     """持倉中的補倉/減倉管理（虛擬倉位）。"""
-    if not active_trade.get("open"):
+    if not _is_truthy(os.getenv("TRADE_AUTO_SCALE_ENABLED", "0")):
         return
-    if active_trade.get("break_even_active"):
+    if not active_trade.get("open"):
         return
 
     now_ts = _safe_float(now_ts, 0.0)
@@ -4675,6 +4733,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     add_count = int(active_trade.get("add_count", 0))
     reduce_count = int(active_trade.get("reduce_count", 0))
     scale_add_paused = bool(active_trade.get("scale_add_paused", False))
+    break_even_active = bool(active_trade.get("break_even_active", False))
     real_copy_enabled = _get_follow_mode_enabled() and _is_real_copy_enabled()
     progress = _calc_scaling_progress(direction, entry, current_price, active_trade.get("tp"), active_trade.get("sl"))
 
@@ -4693,7 +4752,8 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     earned_r_multiple = _safe_float(progress.get("earned_r_multiple"), 0.0)
 
     add_trigger = (
-        not scale_add_paused
+        not break_even_active
+        and not scale_add_paused
         and add_count < max_add_count
         and size < max_size - 1e-9
         and min_add_drawdown <= drawdown_progress <= max_add_drawdown
@@ -4748,16 +4808,25 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                 active_trade["last_adjust_ts"] = now_ts
                 active_trade["max_size"] = max_size
                 active_trade["min_size"] = min_size
-                update_copy_trade_tp_sl(active_trade.get("tp"), active_trade.get("sl"))
+                relaxed_sl, relax_msg = _maybe_relax_sl_after_scale_add(
+                    direction,
+                    current_price,
+                    atr=atr_value,
+                    initial_risk_abs=_safe_float(progress.get("initial_risk_abs"), 0.0),
+                )
+                if not relaxed_sl:
+                    update_copy_trade_tp_sl(active_trade.get("tp"), active_trade.get("sl"))
                 sync_position_panel(current_price)
                 synced_size = _safe_float(active_trade.get("size"), size + delta)
                 synced_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), entry)
+                sl_note = f"\n🛡️ 補倉後放寬止損: {relax_msg}" if relaxed_sl and relax_msg else ""
                 send_telegram(
                     f"➕ 補倉（{direction}）\n"
                     f"現價: {current_price:.2f} | 目標加倉: +{int(delta*100)}%\n"
                     f"進場均價: {synced_entry:.2f} | TP: {_safe_float(active_trade.get('tp'), 0.0):.2f} | SL: {_safe_float(active_trade.get('sl'), 0.0):.2f}\n"
                     f"倉位(同步後): {int(size*100)}% → {int(synced_size*100)}%\n"
-                    f"{scale_msg}",
+                    f"{scale_msg}"
+                    f"{sl_note}",
                     priority=True,
                 )
                 return
@@ -4765,8 +4834,6 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
             new_size = size + delta
             # 均價更新（虛擬倉位）
             new_entry = ((entry * size) + (current_price * delta)) / max(new_size, 1e-9)
-            tp_text = f"{_safe_float(active_trade.get('tp'), 0.0):.2f}" if active_trade.get("tp") is not None else "N/A"
-            sl_text = f"{_safe_float(active_trade.get('sl'), 0.0):.2f}" if active_trade.get("sl") is not None else "N/A"
             active_trade["entry"] = float(new_entry)
             active_trade["avg_entry"] = float(new_entry)
             active_trade["size"] = float(new_size)
@@ -4774,12 +4841,22 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
             active_trade["min_size"] = min_size
             active_trade["add_count"] = add_count + 1
             active_trade["last_adjust_ts"] = now_ts
+            relaxed_sl, relax_msg = _maybe_relax_sl_after_scale_add(
+                direction,
+                current_price,
+                atr=atr_value,
+                initial_risk_abs=_safe_float(progress.get("initial_risk_abs"), 0.0),
+            )
+            tp_text = f"{_safe_float(active_trade.get('tp'), 0.0):.2f}" if active_trade.get("tp") is not None else "N/A"
+            sl_text = f"{_safe_float(active_trade.get('sl'), 0.0):.2f}" if active_trade.get("sl") is not None else "N/A"
+            sl_note = f"\n🛡️ 補倉後放寬止損: {relax_msg}" if relaxed_sl and relax_msg else ""
             sync_position_panel(current_price)
             send_telegram(
                 f"➕ 補倉（{direction}）\n"
                 f"現價: {current_price:.2f} | 加倉: +{int(delta*100)}%\n"
                 f"進場均價: {new_entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
-                f"倉位: {int(size*100)}% → {int(new_size*100)}%",
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%"
+                f"{sl_note}",
                 priority=True,
             )
             return
