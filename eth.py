@@ -144,6 +144,10 @@ _load_local_env()
 
 TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "", warn_if_missing=False)
+DEFAULT_OPENAI_CHAT_MODEL = "gpt-5-mini"
+OPENAI_CHAT_MODEL = (os.getenv("OPENAI_CHAT_MODEL", DEFAULT_OPENAI_CHAT_MODEL) or DEFAULT_OPENAI_CHAT_MODEL).strip()
+OPENAI_TRANSLATION_MODEL = (os.getenv("OPENAI_TRANSLATION_MODEL", OPENAI_CHAT_MODEL) or OPENAI_CHAT_MODEL).strip()
+OPENAI_REASONING_EFFORT = (os.getenv("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
 BOT_SUPERVISOR = os.getenv("BOT_SUPERVISOR") == "1"
 TELEGRAM_STATE_FILE = data_path(".telegram_state.json")
 # ===== Telegram =====
@@ -224,6 +228,52 @@ def _safe_float_env_names(names, default: float) -> float:
         except Exception:
             continue
     return float(default)
+
+
+def _uses_reasoning_chat_model(model_name: str) -> bool:
+    model = str(model_name or "").strip().lower()
+    return model.startswith("gpt-5") or model.startswith(("o1", "o3", "o4"))
+
+
+def _openai_instruction_role(model_name: str) -> str:
+    return "developer" if _uses_reasoning_chat_model(model_name) else "system"
+
+
+def _build_openai_chat_payload(model_name: str, messages, temperature=None):
+    model = str(model_name or DEFAULT_OPENAI_CHAT_MODEL).strip() or DEFAULT_OPENAI_CHAT_MODEL
+    payload = {
+        "model": model,
+        "messages": messages,
+    }
+
+    if _uses_reasoning_chat_model(model):
+        if OPENAI_REASONING_EFFORT:
+            payload["reasoning_effort"] = OPENAI_REASONING_EFFORT
+    elif temperature is not None:
+        payload["temperature"] = temperature
+
+    return payload
+
+
+def _extract_openai_chat_text(response_json) -> str:
+    if not isinstance(response_json, dict):
+        return ""
+    choices = response_json.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict)
+        ).strip()
+    return ""
 
 
 MINI_APP_URL = _normalize_mini_app_url(os.getenv("TELEGRAM_MINI_APP_URL", DEFAULT_MINI_APP_URL))
@@ -1269,11 +1319,11 @@ def translate_news_to_zh(text):
                 "Authorization": f"Bearer {OPENAI_API_KEY}",
                 "Content-Type": "application/json"
             }
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [
+            payload = _build_openai_chat_payload(
+                OPENAI_TRANSLATION_MODEL,
+                [
                     {
-                        "role": "system",
+                        "role": _openai_instruction_role(OPENAI_TRANSLATION_MODEL),
                         "content": "你是專業翻譯員。請把輸入內容翻成繁體中文，只輸出翻譯結果，不要補充說明。"
                     },
                     {
@@ -1281,12 +1331,12 @@ def translate_news_to_zh(text):
                         "content": short_src
                     }
                 ],
-                "temperature": 0
-            }
+                temperature=0,
+            )
 
             res = requests.post(url, headers=headers, json=payload, timeout=6)
             data = res.json() if res is not None else {}
-            zh = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            zh = _extract_openai_chat_text(data)
 
         if not zh:
             zh = _google_translate_to_zh(src)
@@ -7192,6 +7242,10 @@ def _send_trade_notification(msg, priority=True):
 
 # ===== AI分析（OpenClaw / OpenAI） =====
 OPENAI_API_KEY = _get_required_env("OPENAI_API_KEY", "", mask=True)
+if OPENAI_API_KEY:
+    print(
+        f"✅ OpenAI 模型: 分析={OPENAI_CHAT_MODEL} | 翻譯={OPENAI_TRANSLATION_MODEL} | reasoning={OPENAI_REASONING_EFFORT}"
+    )
 
 def ask_ai_analysis(prompt):
     if not OPENAI_API_KEY:
@@ -7204,18 +7258,19 @@ def ask_ai_analysis(prompt):
         "Content-Type": "application/json"
     }
 
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "system", "content": "你是一個專業ETH交易分析師"},
+    payload = _build_openai_chat_payload(
+        OPENAI_CHAT_MODEL,
+        [
+            {"role": _openai_instruction_role(OPENAI_CHAT_MODEL), "content": "你是一個專業ETH交易分析師"},
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.3
-    }
+        temperature=0.3,
+    )
 
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10).json()
-        return res["choices"][0]["message"]["content"]
+        text = _extract_openai_chat_text(res)
+        return text or f"AI分析失敗: {res}"
     except Exception as e:
         return f"AI分析失敗: {e}"
 
