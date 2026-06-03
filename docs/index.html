@@ -13,17 +13,26 @@
 
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f0f0f;
+      background:
+        radial-gradient(circle at 50% -10%, rgba(51, 86, 123, 0.22), transparent 38%),
+        linear-gradient(180deg, #0a0d11 0%, #0d1015 54%, #090b0f 100%);
       color: #ffffff;
       min-height: 100vh;
       padding: 12px 14px 24px;
+    }
+
+    #app {
+      width: 100%;
+      max-width: 760px;
+      margin: 0 auto;
     }
 
     .header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 16px;
+      margin-bottom: 14px;
+      padding: 2px 2px 0;
     }
 
     .pair-info {
@@ -34,42 +43,55 @@
 
     .eth-icon {
       width: 36px; height: 36px;
-      background: linear-gradient(135deg, #627eea, #8498f0);
+      background:
+        radial-gradient(circle at 34% 26%, rgba(255,255,255,0.88), transparent 0 11%, transparent 12%),
+        linear-gradient(135deg, #5267d9, #7890f2);
       border-radius: 50%;
       display: flex; align-items: center; justify-content: center;
       font-size: 18px;
+      box-shadow: 0 10px 22px rgba(82, 103, 217, 0.18);
     }
 
-    .pair-name { font-size: 18px; font-weight: 700; }
-    .pair-sub  { font-size: 11px; color: #888; line-height: 1.35; }
+    .pair-name {
+      font-size: 18px;
+      font-weight: 750;
+      letter-spacing: 0.2px;
+    }
+    .pair-sub  { font-size: 11px; color: #8c96a3; line-height: 1.35; }
 
     .badge-open {
-      background: #1a3a28;
-      color: #2ecc71;
+      background: rgba(46, 204, 113, 0.11);
+      color: #74e2a1;
       font-size: 11px;
       padding: 3px 10px;
       border-radius: 20px;
       font-weight: 600;
-      border: 1px solid #2ecc71;
+      border: 1px solid rgba(116, 226, 161, 0.62);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
     }
 
     .card {
-      background: #1a1a1a;
-      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(25, 29, 36, 0.98), rgba(17, 20, 26, 0.98));
+      border: 1px solid rgba(121, 139, 161, 0.10);
+      border-radius: 12px;
       padding: 14px 16px;
       margin-bottom: 12px;
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.20), inset 0 1px 0 rgba(255,255,255,0.035);
     }
 
     .asset-hero {
-      background: linear-gradient(135deg, #13314f, #1c4a70);
-      border: 1px solid #2a5f8d;
-      border-radius: 14px;
+      background:
+        linear-gradient(135deg, rgba(22, 53, 82, 0.96), rgba(20, 74, 111, 0.88)),
+        linear-gradient(180deg, rgba(255,255,255,0.08), transparent);
+      border: 1px solid rgba(92, 157, 212, 0.42);
+      border-radius: 12px;
       padding: 14px 16px;
       margin-bottom: 12px;
       display: flex;
       justify-content: space-between;
       gap: 14px;
       align-items: center;
+      box-shadow: 0 16px 38px rgba(0, 0, 0, 0.22), inset 0 1px 0 rgba(255,255,255,0.08);
     }
 
     .asset-hero-main {
@@ -78,7 +100,7 @@
 
     .asset-hero-title {
       font-size: 11px;
-      color: #b8dfff;
+      color: #bcd9ee;
       letter-spacing: 0.5px;
       text-transform: uppercase;
       margin-bottom: 6px;
@@ -89,12 +111,13 @@
       font-weight: 800;
       line-height: 1.1;
       color: #ffffff;
+      letter-spacing: 0.1px;
     }
 
     .asset-hero-sub {
       margin-top: 6px;
       font-size: 11px;
-      color: #c5ddf5;
+      color: #b6cbe0;
       line-height: 1.4;
     }
 
@@ -106,7 +129,7 @@
 
     .asset-hero-winrate-label {
       font-size: 11px;
-      color: #b8dfff;
+      color: #bcd9ee;
       margin-bottom: 6px;
     }
 
@@ -120,12 +143,12 @@
     .asset-hero-winrate-sub {
       margin-top: 6px;
       font-size: 11px;
-      color: #c5ddf5;
+      color: #b6cbe0;
     }
 
     .card-title {
       font-size: 11px;
-      color: #888;
+      color: #7f8b99;
       margin-bottom: 10px;
       letter-spacing: 0.5px;
       text-transform: uppercase;
@@ -137,7 +160,7 @@
       align-items: flex-start;
     }
 
-    .label { font-size: 11px; color: #888; margin-bottom: 3px; }
+    .label { font-size: 11px; color: #7f8b99; margin-bottom: 3px; }
 
     .direction-val {
       font-size: 22px;
@@ -154,7 +177,7 @@
     }
 
     .progress-wrap {
-      background: #2a2a2a;
+      background: rgba(255,255,255,0.07);
       border-radius: 4px;
       height: 6px;
       margin-top: 8px;
@@ -204,8 +227,9 @@
     }
     .tp-box, .sl-box {
       flex: 1;
-      background: #111;
-      border-radius: 10px;
+      background: rgba(9, 12, 17, 0.62);
+      border: 1px solid rgba(121, 139, 161, 0.10);
+      border-radius: 8px;
       padding: 10px 12px;
     }
 
@@ -218,7 +242,7 @@
     .tp-icon {
       font-size: 14px;
     }
-    .tp-label { font-size: 12px; font-weight: 600; color: #888; }
+    .tp-label { font-size: 12px; font-weight: 600; color: #7f8b99; }
 
     .tp-val { font-size: 16px; font-weight: 700; margin: 3px 0; }
 
@@ -235,7 +259,7 @@
 
     .legend {
       font-size: 10px;
-      color: #666;
+      color: #667180;
       margin-top: 10px;
       text-align: center;
     }
@@ -243,7 +267,7 @@
 
     .update-time {
       font-size: 10px;
-      color: #555;
+      color: #5e6977;
       text-align: center;
       margin-top: 8px;
     }
@@ -270,6 +294,8 @@
     .close-summary-card {
       text-align: center;
       padding: 22px 16px;
+      background:
+        linear-gradient(180deg, rgba(25, 29, 36, 0.98), rgba(15, 18, 23, 0.98));
     }
     .close-summary-icon {
       font-size: 26px;
@@ -283,13 +309,15 @@
 
     .hit-history {
       margin-top: 12px;
-      background: #151515;
-      border-radius: 10px;
-      padding: 10px 12px;
+      background: linear-gradient(180deg, rgba(21, 25, 31, 0.98), rgba(15, 18, 23, 0.98));
+      border: 1px solid rgba(121, 139, 161, 0.10);
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255,255,255,0.03);
     }
     .hit-history-title {
       font-size: 11px;
-      color: #888;
+      color: #7f8b99;
       margin-bottom: 8px;
       text-transform: uppercase;
       letter-spacing: 0.5px;
@@ -300,7 +328,7 @@
       align-items: center;
       gap: 8px;
       padding: 6px 0;
-      border-bottom: 1px dashed #2a2a2a;
+      border-bottom: 1px dashed rgba(121, 139, 161, 0.16);
     }
     .hit-item:last-child {
       border-bottom: none;
@@ -391,16 +419,17 @@
     }
 
     .metric-card {
-      background: #111;
-      border: 1px solid #262626;
-      border-radius: 12px;
+      background: rgba(9, 12, 17, 0.56);
+      border: 1px solid rgba(121, 139, 161, 0.12);
+      border-radius: 8px;
       padding: 10px 12px;
       min-width: 0;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.025);
     }
 
     .metric-label {
       font-size: 10px;
-      color: #777;
+      color: #7d8896;
       margin-bottom: 6px;
       letter-spacing: 0.5px;
       text-transform: uppercase;
@@ -415,14 +444,14 @@
 
     .metric-sub {
       font-size: 11px;
-      color: #8e8e8e;
+      color: #8e9aa8;
       margin-top: 4px;
       line-height: 1.35;
     }
 
     .section-note {
       font-size: 11px;
-      color: #8c8c8c;
+      color: #8793a2;
       line-height: 1.45;
       margin-top: 12px;
     }
@@ -442,9 +471,9 @@
       padding: 6px 10px;
       font-size: 11px;
       font-weight: 600;
-      border: 1px solid #2b2b2b;
-      background: #141414;
-      color: #d0d0d0;
+      border: 1px solid rgba(121, 139, 161, 0.14);
+      background: rgba(9, 12, 17, 0.58);
+      color: #c8d1dc;
     }
 
     .status-chip.good {
@@ -473,9 +502,9 @@
 
     .mini-kline {
       margin-top: 12px;
-      background: #101010;
-      border: 1px solid #242424;
-      border-radius: 10px;
+      background: rgba(9, 12, 17, 0.60);
+      border: 1px solid rgba(121, 139, 161, 0.12);
+      border-radius: 8px;
       padding: 10px 12px;
     }
 
@@ -490,12 +519,12 @@
     .mini-kline-title {
       font-size: 11px;
       font-weight: 700;
-      color: #9a9a9a;
+      color: #8d9aaa;
     }
 
     .mini-kline-meta {
       font-size: 10px;
-      color: #777;
+      color: #7b8795;
       text-align: right;
     }
 
@@ -510,10 +539,10 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      color: #777;
+      color: #7b8795;
       font-size: 11px;
       border-radius: 8px;
-      background: #0d0d0d;
+      background: rgba(4, 7, 11, 0.46);
     }
 
     .size-summary {
@@ -523,7 +552,7 @@
       align-items: baseline;
       margin-top: 10px;
       font-size: 11px;
-      color: #8a8a8a;
+      color: #8793a2;
     }
 
     .size-summary strong {
@@ -535,7 +564,7 @@
       position: relative;
       height: 10px;
       border-radius: 999px;
-      background: #232323;
+      background: rgba(255,255,255,0.07);
       overflow: hidden;
       margin-top: 12px;
     }
@@ -564,12 +593,12 @@
       gap: 8px;
       margin-top: 6px;
       font-size: 10px;
-      color: #7a7a7a;
+      color: #7b8795;
     }
 
     .divider {
       height: 1px;
-      background: linear-gradient(90deg, transparent, #2d2d2d, transparent);
+      background: linear-gradient(90deg, transparent, rgba(121, 139, 161, 0.18), transparent);
       margin: 12px 0;
     }
 
@@ -613,7 +642,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-6";
+  const APP_VERSION = "20260604-7";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
