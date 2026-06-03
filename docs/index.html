@@ -418,6 +418,11 @@
       min-height: 100%;
     }
 
+    .last-settings-grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+    }
+
     .last-settings-grid .metric-card {
       padding: 8px 10px;
       min-height: 70px;
@@ -655,7 +660,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-11";
+  const APP_VERSION = "20260604-12";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
