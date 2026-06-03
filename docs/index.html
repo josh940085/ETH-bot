@@ -642,7 +642,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-8";
+  const APP_VERSION = "20260604-9";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1754,7 +1754,6 @@
     }
 
     const totalAssetsUsdt = calcTotalAssetsUsdt();
-    const assetSubtext = buildAssetSubtext();
 
     // 已平倉：顯示簡單的已平倉面板
     if (!POSITION_OPEN) {
@@ -1792,7 +1791,6 @@
   <div class="card">
     <div class="card-title">上一筆設定</div>
     <div class="section-grid section-grid-compact">
-      ${renderMetricCard("Binance 總資產", `${fmt(totalAssetsUsdt)} USDT`, assetSubtext)}
       ${renderMetricCard("方向", lastDir, `槓桿 ${LEV}x`)}
       ${renderMetricCard("進場 / BE", `${ENTRY > 0 ? fmt(ENTRY) : "-"} / ${BINANCE_BREAK_EVEN_PRICE > 0 ? fmt(BINANCE_BREAK_EVEN_PRICE) : "-"}`)}
       ${renderMetricCard("TP / SL", `${TP > 0 ? fmt(TP) : "-"} / ${SL > 0 ? fmt(SL) : "-"}`)}
