@@ -842,6 +842,7 @@ def _load_position_panel_state():
             "last_close_candle_high": 0.0,
             "last_close_candle_low": 0.0,
             "close_hits": [],
+            "latest_news": [],
             "size": 0.0,
             "size_ratio": 0.0,
             "capital_usage_ratio": 0.0,
@@ -879,6 +880,7 @@ def _load_position_panel_state():
             "last_close_candle_high": 0.0,
             "last_close_candle_low": 0.0,
             "close_hits": [],
+            "latest_news": [],
             "size": 0.0,
             "size_ratio": 0.0,
             "capital_usage_ratio": 0.0,
@@ -907,6 +909,9 @@ def _load_position_panel_state():
     close_hits = raw.get("close_hits")
     if not isinstance(close_hits, list):
         close_hits = []
+    latest_news = raw.get("latest_news")
+    if not isinstance(latest_news, list):
+        latest_news = []
 
     return {
         "last_close_reason": str(raw.get("last_close_reason", "") or "").upper(),
@@ -915,6 +920,7 @@ def _load_position_panel_state():
         "last_close_candle_high": float(raw.get("last_close_candle_high", 0.0) or 0.0),
         "last_close_candle_low": float(raw.get("last_close_candle_low", 0.0) or 0.0),
         "close_hits": close_hits[:10],
+        "latest_news": latest_news[:8],
         "size": float(raw.get("size", raw.get("capital_usage_ratio", 0.0)) or 0.0),
         "size_ratio": float(raw.get("size_ratio", raw.get("size", 0.0)) or 0.0),
         "capital_usage_ratio": float(raw.get("capital_usage_ratio", raw.get("size", 0.0)) or 0.0),
@@ -1862,6 +1868,52 @@ def build_news_message(news_text, now_time=None):
         f"📝 原文: {raw_text}\n"
         f"━━━━━━━━━━━━━━"
     )
+
+
+def build_panel_news_items(news_list, limit=5):
+    items = []
+    seen = set()
+
+    for raw_item in list(news_list or [])[: max(limit * 2, limit)]:
+        raw_text = str(raw_item or "").strip()
+        if not raw_text:
+            continue
+
+        match = re.match(r"^\[([^\]]+)\]\s*(.*)$", raw_text)
+        if match:
+            source = match.group(1).strip() or "News"
+            title = match.group(2).strip()
+        else:
+            source = "News"
+            title = raw_text
+
+        if not title:
+            continue
+
+        key = normalize_news_text(f"{source} {title}").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+
+        analysis = analyze_news_text(title, log_result=False)
+        bias = _safe_int(analysis.get("bias"), 0) if isinstance(analysis, dict) else 0
+        confidence = _safe_float(analysis.get("confidence"), 0.0) if isinstance(analysis, dict) else 0.0
+        title_zh = translate_news_to_zh(title)
+        items.append(
+            {
+                "source": source[:40],
+                "title": title[:220],
+                "title_zh": str(title_zh or title)[:220],
+                "bias": bias,
+                "confidence": round(confidence, 4),
+                "ts": int(time.time()),
+            }
+        )
+
+        if len(items) >= limit:
+            break
+
+    return items
 
 
 def _walk_strings(obj, limit=3000):
@@ -3983,6 +4035,9 @@ def sync_position_panel(current_price=None):
     min_size = round(_safe_float(active_trade.get("min_size"), 0.1), 4)
     scale_add_room = round(max(0.0, max_size - size_ratio), 4) if active_trade.get("open") else 0.0
     scale_reduce_room = round(max(0.0, size_ratio - min_size), 4) if active_trade.get("open") else 0.0
+    latest_news = POSITION_PANEL_STATE.get("latest_news", [])
+    if not isinstance(latest_news, list):
+        latest_news = []
 
     if active_trade.get("open"):
         if not last_price:
@@ -4064,6 +4119,7 @@ def sync_position_panel(current_price=None):
             "last_close_candle_high": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_high"), 0.0), 4),
             "last_close_candle_low": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_low"), 0.0), 4),
             "close_hits": POSITION_PANEL_STATE.get("close_hits", [])[:10],
+            "latest_news": latest_news[:8],
             "binance_qty": round(position_qty, 6),
             "position_notional_usdt": round(position_notional_usdt, 4),
             "position_margin_usdt": round(position_margin_usdt, 4),
@@ -4121,6 +4177,7 @@ def sync_position_panel(current_price=None):
             "last_close_candle_high": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_high"), 0.0), 4),
             "last_close_candle_low": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_low"), 0.0), 4),
             "close_hits": POSITION_PANEL_STATE.get("close_hits", [])[:10],
+            "latest_news": latest_news[:8],
             "binance_qty": 0.0,
             "position_notional_usdt": 0.0,
             "position_margin_usdt": 0.0,
@@ -7815,6 +7872,7 @@ def run_bot():
                 run_bot.startup_news_snapshot_sent = False
 
             if news_list:
+                POSITION_PANEL_STATE["latest_news"] = build_panel_news_items(news_list, limit=5)
                 new_news = []
 
                 for n in news_list:

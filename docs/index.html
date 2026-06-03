@@ -296,6 +296,8 @@
     .hit-left {
       font-size: 12px;
       font-weight: 600;
+      line-height: 1.45;
+      word-break: break-word;
     }
     .hit-left.tp { color: #2ecc71; }
     .hit-left.sl { color: #e74c3c; }
@@ -543,7 +545,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-1";
+  const APP_VERSION = "20260604-2";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -606,6 +608,7 @@
   let LAST_CLOSE_CANDLE_HIGH = 0;
   let LAST_CLOSE_CANDLE_LOW = 0;
   let CLOSE_HITS = [];
+  let LATEST_NEWS = [];
   let POSITION_NOTIONAL_USDT = readNumberParam("position_notional_usdt", 0);
   let POSITION_MARGIN_USDT = readNumberParam("position_margin_usdt", 0);
   let BINANCE_QTY = readNumberParam("binance_qty", 0);
@@ -895,6 +898,19 @@
         .sort((a, b) => b.ts - a.ts)
         .slice(0, 10);
     }
+    if (Array.isArray(data.latest_news)) {
+      LATEST_NEWS = data.latest_news
+        .map((n) => ({
+          source: String((n && n.source) || "News"),
+          title: String((n && n.title) || ""),
+          title_zh: String((n && n.title_zh) || ""),
+          bias: Number.isFinite(Number(n && n.bias)) ? Number(n.bias) : 0,
+          confidence: Number.isFinite(Number(n && n.confidence)) ? Number(n.confidence) : 0,
+          ts: Number.isFinite(Number(n && n.ts)) ? Number(n.ts) : 0,
+        }))
+        .filter((n) => n.title || n.title_zh)
+        .slice(0, 5);
+    }
 
     const ageMin = dataAge > 60 ? ` (${Math.floor(dataAge / 60)}m前)` : "";
     LAST_POSITION_SOURCE = `${sourceLabel || "URL 參數"}${ageMin}`;
@@ -1174,6 +1190,15 @@
     return v.toFixed(1);
   }
 
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function fmt_room_ratio(ratio) {
     const v = Number(ratio);
     if (!Number.isFinite(v) || v <= 0) return "0.0%";
@@ -1354,29 +1379,35 @@
 </div>`;
   }
 
-  function renderCloseHits() {
-    if (!Array.isArray(CLOSE_HITS) || CLOSE_HITS.length === 0) {
+  function renderLatestNews() {
+    if (!Array.isArray(LATEST_NEWS) || LATEST_NEWS.length === 0) {
       return `
   <div class="hit-history">
-    <div class="hit-history-title">最近 TP / SL 命中</div>
-    <div style="font-size:12px;color:#777;">目前尚無歷史命中紀錄</div>
+    <div class="hit-history-title">最新新聞時事</div>
+    <div style="font-size:12px;color:#777;">目前尚無最新新聞</div>
   </div>`;
     }
 
-    const rows = CLOSE_HITS.map((h) => {
-      const cls = h.reason === "TP" ? "tp" : "sl";
-      const label = h.reason === "TP" ? "TP 命中" : "SL 命中";
-      const priceText = h.price > 0 ? fmt(h.price) : "-";
+    const rows = LATEST_NEWS.map((n) => {
+      const cls = n.bias > 0 ? "tp" : (n.bias < 0 ? "sl" : "");
+      const label = n.bias > 0 ? "偏多" : (n.bias < 0 ? "偏空" : "中性");
+      const titleText = escapeHtml(n.title_zh || n.title);
+      const sourceText = escapeHtml(n.source || "News");
+      const timeText = n.ts > 0 ? ts_str(n.ts) : "即時";
+      const confidenceText = n.confidence > 0 ? ` ｜ ${(n.confidence * 100).toFixed(0)}%` : "";
       return `
     <div class="hit-item">
-      <div class="hit-left ${cls}">${label}</div>
-      <div class="hit-right">${ts_str(h.ts)} ｜ ${priceText}</div>
+      <div style="min-width:0;">
+        <div class="hit-left ${cls}">${label} ｜ ${titleText}</div>
+        <div class="metric-sub">${sourceText}${confidenceText}</div>
+      </div>
+      <div class="hit-right">${timeText}</div>
     </div>`;
     }).join("");
 
     return `
   <div class="hit-history">
-    <div class="hit-history-title">最近 TP / SL 命中</div>
+    <div class="hit-history-title">最新新聞時事</div>
     ${rows}
   </div>`;
   }
@@ -1568,7 +1599,7 @@
       ${renderMetricCard("成本估算", `${fmt_rate(TOTAL_COST_RATE_EST || (ROUND_TRIP_FEE_RATE + FUNDING_COST_RATE_EST), 3)}`, `手續費 ${fmt_rate(ROUND_TRIP_FEE_RATE, 3)} ｜ 資金費 ${fmt_rate(FUNDING_COST_RATE_EST, 3)}`)}
     </div>
   </div>
-  ${renderCloseHits()}
+  ${renderLatestNews()}
   <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
       return;
@@ -1758,7 +1789,7 @@
     <span>盈利增加 → 紅色</span>｜<span>觸發止損 → 綠色</span>
   </div>
 
-  ${renderCloseHits()}
+  ${renderLatestNews()}
 
   <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
