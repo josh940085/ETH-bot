@@ -8216,7 +8216,7 @@ def run_bot():
             msg += (
                 f"🤖 AI信號：{display_signal}\n"
                 f"📊 信心值: {ai_prob:.2f}\n"
-                f"📈 勝率: {(performance['win']/performance['total'] if performance['total']>0 else 0):.2%}\n"
+                f"📈 啟動後TP/SL勝率: {(performance['win']/performance['total'] if performance['total']>0 else 0):.2%}\n"
                 f"🌍 市場狀態: {regime_text}\n"
                 f"📰 時事判斷: {macro_text}\n"
                 f"{news_text}"
@@ -8420,7 +8420,7 @@ def run_bot():
                 report = (
                     f"📊 交易報告\n"
                     f"總交易: {performance['total']}\n"
-                    f"勝率: {winrate:.2%}\n"
+                    f"啟動後TP/SL勝率: {winrate:.2%}\n"
                     f"勝: {performance['win']} / 敗: {performance['loss']}"
                 )
 

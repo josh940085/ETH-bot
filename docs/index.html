@@ -543,7 +543,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260603-1";
+  const APP_VERSION = "20260604-1";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1395,7 +1395,7 @@
       <div class="asset-hero-sub">現貨 ${fmt(spotAssets)} ｜ 合約 ${fmt(futuresAssets)} ｜ 錢包 ${fmt(walletAssets)} ｜ 可用 ${fmt(ACCOUNT_AVAILABLE_BALANCE_USDT)}</div>
     </div>
     <div class="asset-hero-winrate">
-      <div class="asset-hero-winrate-label">目前勝率</div>
+      <div class="asset-hero-winrate-label">固定回測勝率</div>
       <div class="asset-hero-winrate-value">${PERFORMANCE_WIN_RATE !== null ? `${PERFORMANCE_WIN_RATE.toFixed(2)}%` : "-"}</div>
       <div class="asset-hero-winrate-sub">${PERFORMANCE_TRADES > 0 ? `${PERFORMANCE_WINS}/${PERFORMANCE_TRADES}` : "尚無統計"}</div>
     </div>
