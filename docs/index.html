@@ -642,7 +642,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-9";
+  const APP_VERSION = "20260604-10";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1778,6 +1778,7 @@
     </div>
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
   </div>
+  ${renderLatestNews()}
   ${renderTotalAssetsHero(totalAssetsUsdt)}
   <div class="card close-summary-card">
     <div class="close-hit ${hitClass}">${hitText}</div>
@@ -1787,7 +1788,6 @@
     <div style="font-size:12px;color:#777;margin-top:4px;">1m 高/低：${closeCandleText}</div>
     <div style="font-size:12px;color:#777;margin-top:4px;">命中時間：${ts_str(LAST_CLOSE_TS)}</div>
   </div>
-  ${renderLatestNews()}
   <div class="card">
     <div class="card-title">上一筆設定</div>
     <div class="section-grid section-grid-compact">
@@ -1858,11 +1858,11 @@
     <div class="badge-open">● 持倉中</div>
   </div>
 
+  ${renderLatestNews()}
+
   ${renderFourHourKlineChart(live)}
 
   ${renderTotalAssetsHero(totalAssetsUsdt)}
-
-  ${renderLatestNews()}
 
   <!-- Direction + Size -->
   <div class="card">
