@@ -1890,7 +1890,7 @@ def build_panel_news_items(news_list, limit=5):
         if not title:
             continue
 
-        key = normalize_news_text(f"{source} {title}").lower()
+        key = normalize_news_text(title).lower()
         if key in seen:
             continue
         seen.add(key)
