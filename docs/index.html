@@ -418,6 +418,19 @@
       min-height: 100%;
     }
 
+    .last-settings-grid .metric-card {
+      padding: 8px 10px;
+      min-height: 70px;
+    }
+
+    .last-settings-grid .metric-label {
+      margin-bottom: 4px;
+    }
+
+    .last-settings-grid .metric-sub {
+      margin-top: 4px;
+    }
+
     .metric-card {
       background: rgba(9, 12, 17, 0.56);
       border: 1px solid rgba(121, 139, 161, 0.12);
@@ -642,7 +655,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-10";
+  const APP_VERSION = "20260604-11";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1790,7 +1803,7 @@
   </div>
   <div class="card">
     <div class="card-title">上一筆設定</div>
-    <div class="section-grid section-grid-compact">
+    <div class="section-grid section-grid-compact last-settings-grid">
       ${renderMetricCard("方向", lastDir, `槓桿 ${LEV}x`)}
       ${renderMetricCard("進場 / BE", `${ENTRY > 0 ? fmt(ENTRY) : "-"} / ${BINANCE_BREAK_EVEN_PRICE > 0 ? fmt(BINANCE_BREAK_EVEN_PRICE) : "-"}`)}
       ${renderMetricCard("TP / SL", `${TP > 0 ? fmt(TP) : "-"} / ${SL > 0 ? fmt(SL) : "-"}`)}
