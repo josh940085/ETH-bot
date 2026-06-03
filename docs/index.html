@@ -352,13 +352,13 @@
       height: clamp(230px, 42vw, 300px);
       margin-bottom: 10px;
       overflow: hidden;
-      border: 1px solid #26384a;
+      border: 1px solid rgba(82, 106, 128, 0.28);
       border-radius: 10px;
       background:
-        linear-gradient(90deg, rgba(6, 12, 20, 0.22), transparent 18%, transparent 82%, rgba(6, 12, 20, 0.22)),
+        linear-gradient(90deg, rgba(2, 6, 10, 0.36), transparent 18%, transparent 82%, rgba(2, 6, 10, 0.36)),
         url("./world-map.svg") center / cover no-repeat,
-        #0d1823;
-      box-shadow: inset 0 0 36px rgba(0, 0, 0, 0.24);
+        #060b12;
+      box-shadow: inset 0 0 42px rgba(0, 0, 0, 0.42);
     }
     .news-marker {
       position: absolute;
@@ -386,9 +386,9 @@
       max-width: 156px;
       padding: 5px 8px;
       border-radius: 7px;
-      background: rgba(11, 18, 28, 0.88);
-      border: 1px solid rgba(184, 223, 255, 0.18);
-      color: #dceaff;
+      background: rgba(8, 12, 18, 0.92);
+      border: 1px solid rgba(151, 174, 196, 0.18);
+      color: #d4dee8;
       font-size: 12px;
       line-height: 1.25;
       transform: translate(8px, -50%);
@@ -642,7 +642,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-7";
+  const APP_VERSION = "20260604-8";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
