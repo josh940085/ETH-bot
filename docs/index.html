@@ -267,6 +267,19 @@
       color: #e74c3c;
       border-color: #e74c3c;
     }
+    .close-summary-card {
+      text-align: center;
+      padding: 22px 16px;
+    }
+    .close-summary-icon {
+      font-size: 26px;
+      margin-bottom: 8px;
+    }
+    .close-summary-title {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 5px;
+    }
 
     .hit-history {
       margin-top: 12px;
@@ -305,6 +318,61 @@
       font-size: 11px;
       color: #9a9a9a;
       text-align: right;
+    }
+    .news-map {
+      position: relative;
+      height: clamp(230px, 42vw, 300px);
+      margin-bottom: 10px;
+      overflow: hidden;
+      border: 1px solid #26384a;
+      border-radius: 10px;
+      background:
+        linear-gradient(90deg, rgba(6, 12, 20, 0.22), transparent 18%, transparent 82%, rgba(6, 12, 20, 0.22)),
+        url("./world-map.svg") center / cover no-repeat,
+        #0d1823;
+      box-shadow: inset 0 0 36px rgba(0, 0, 0, 0.24);
+    }
+    .news-marker {
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #ffffff;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.08), 0 8px 16px rgba(0, 0, 0, 0.28);
+    }
+    .news-marker.tp {
+      background: #2ecc71;
+      border-color: #a6f4c5;
+    }
+    .news-marker.sl {
+      background: #e74c3c;
+      border-color: #ffc9c3;
+    }
+    .news-marker.neutral {
+      background: #6d83f2;
+      border-color: #dce4ff;
+    }
+    .news-marker-label {
+      position: absolute;
+      max-width: 156px;
+      padding: 5px 8px;
+      border-radius: 7px;
+      background: rgba(11, 18, 28, 0.88);
+      border: 1px solid rgba(184, 223, 255, 0.18);
+      color: #dceaff;
+      font-size: 12px;
+      line-height: 1.25;
+      transform: translate(8px, -50%);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      pointer-events: none;
+    }
+    .news-location {
+      color: #8fb8da;
+      font-size: 11px;
+      margin-top: 2px;
     }
 
     .section-grid {
@@ -545,7 +613,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-3";
+  const APP_VERSION = "20260604-6";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -609,6 +677,33 @@
   let LAST_CLOSE_CANDLE_LOW = 0;
   let CLOSE_HITS = [];
   let LATEST_NEWS = [];
+  const NEWS_LOCATION_HINTS = [
+    { keys: ["canada", "air canada", "加拿大"], name: "加拿大", lat: 56.1304, lon: -106.3468 },
+    { keys: ["united states", "u.s.", " us ", "美國", "華爾街", "wall street", "new york", "紐約"], name: "美國", lat: 39.8283, lon: -98.5795 },
+    { keys: ["washington", "white house", "federal reserve", "fed", "白宮", "聯準會"], name: "華盛頓", lat: 38.9072, lon: -77.0369 },
+    { keys: ["china", "beijing", "中國", "北京"], name: "中國", lat: 35.8617, lon: 104.1954 },
+    { keys: ["taiwan", "台灣", "臺灣"], name: "台灣", lat: 23.6978, lon: 120.9605 },
+    { keys: ["japan", "tokyo", "日本", "東京"], name: "日本", lat: 36.2048, lon: 138.2529 },
+    { keys: ["south korea", "korea", "seoul", "韓國", "首爾"], name: "韓國", lat: 35.9078, lon: 127.7669 },
+    { keys: ["india", "new delhi", "印度"], name: "印度", lat: 20.5937, lon: 78.9629 },
+    { keys: ["pakistan", "巴基斯坦"], name: "巴基斯坦", lat: 30.3753, lon: 69.3451 },
+    { keys: ["iran", "tehran", "伊朗"], name: "伊朗", lat: 32.4279, lon: 53.6880 },
+    { keys: ["israel", "gaza", "jerusalem", "以色列", "加薩", "耶路撒冷"], name: "以色列/加薩", lat: 31.0461, lon: 34.8516 },
+    { keys: ["syria", "damascus", "敘利亞", "大馬士革"], name: "敘利亞", lat: 34.8021, lon: 38.9968 },
+    { keys: ["russia", "moscow", "俄羅斯", "莫斯科"], name: "俄羅斯", lat: 61.5240, lon: 105.3188 },
+    { keys: ["ukraine", "kyiv", "烏克蘭", "基輔"], name: "烏克蘭", lat: 48.3794, lon: 31.1656 },
+    { keys: ["united kingdom", "britain", "london", "英國", "倫敦"], name: "英國", lat: 55.3781, lon: -3.4360 },
+    { keys: ["france", "paris", "法國", "巴黎"], name: "法國", lat: 46.2276, lon: 2.2137 },
+    { keys: ["germany", "berlin", "德國", "柏林"], name: "德國", lat: 51.1657, lon: 10.4515 },
+    { keys: ["europe", "eurozone", "eu ", "歐洲", "歐盟", "歐元區"], name: "歐洲", lat: 54.5260, lon: 15.2551 },
+    { keys: ["zambia", "尚比亞", "贊比亞"], name: "尚比亞", lat: -13.1339, lon: 27.8493 },
+    { keys: ["south africa", "南非"], name: "南非", lat: -30.5595, lon: 22.9375 },
+    { keys: ["brazil", "巴西"], name: "巴西", lat: -14.2350, lon: -51.9253 },
+    { keys: ["mexico", "墨西哥"], name: "墨西哥", lat: 23.6345, lon: -102.5528 },
+    { keys: ["australia", "澳洲", "澳大利亞"], name: "澳洲", lat: -25.2744, lon: 133.7751 },
+    { keys: ["saudi", "riyadh", "沙烏地", "沙特"], name: "沙烏地阿拉伯", lat: 23.8859, lon: 45.0792 },
+  ];
+  const NEWS_UNLOCATED_POINT = { name: "未定位", lat: -70.0, lon: -160.0 };
   let POSITION_NOTIONAL_USDT = readNumberParam("position_notional_usdt", 0);
   let POSITION_MARGIN_USDT = readNumberParam("position_margin_usdt", 0);
   let BINANCE_QTY = readNumberParam("binance_qty", 0);
@@ -906,6 +1001,9 @@
           title_zh: String((n && n.title_zh) || ""),
           bias: Number.isFinite(Number(n && n.bias)) ? Number(n.bias) : 0,
           confidence: Number.isFinite(Number(n && n.confidence)) ? Number(n.confidence) : 0,
+          location: String((n && n.location) || ""),
+          lat: Number.isFinite(Number(n && n.lat)) ? Number(n.lat) : null,
+          lon: Number.isFinite(Number(n && n.lon)) ? Number(n.lon) : null,
           ts: Number.isFinite(Number(n && n.ts)) ? Number(n.ts) : 0,
         }))
         .filter((n) => n.title || n.title_zh)
@@ -1379,27 +1477,98 @@
 </div>`;
   }
 
+  function resolveNewsLocation(news) {
+    const hasExplicitLat = news && news.lat !== null && news.lat !== undefined && news.lat !== "";
+    const hasExplicitLon = news && news.lon !== null && news.lon !== undefined && news.lon !== "";
+    const explicitLat = hasExplicitLat ? Number(news.lat) : NaN;
+    const explicitLon = hasExplicitLon ? Number(news.lon) : NaN;
+    if (hasExplicitLat && hasExplicitLon && Number.isFinite(explicitLat) && Number.isFinite(explicitLon)) {
+      return {
+        name: String((news && news.location) || "新聞位置"),
+        lat: Math.max(-85, Math.min(85, explicitLat)),
+        lon: Math.max(-180, Math.min(180, explicitLon)),
+      };
+    }
+
+    const haystack = ` ${String((news && news.title) || "")} ${String((news && news.title_zh) || "")} ${String((news && news.source) || "")} `.toLowerCase();
+    for (const hint of NEWS_LOCATION_HINTS) {
+      if (hint.keys.some((key) => haystack.includes(String(key).toLowerCase()))) {
+        return { name: hint.name, lat: hint.lat, lon: hint.lon };
+      }
+    }
+    return null;
+  }
+
+  function projectNewsLocation(lat, lon) {
+    return {
+      x: Math.max(3, Math.min(97, ((lon + 180) / 360) * 100)),
+      y: Math.max(6, Math.min(94, ((85 - lat) / 170) * 100)),
+    };
+  }
+
+  function renderNewsMap(newsItems) {
+    const located = (newsItems || [])
+      .map((n) => ({ news: n, location: resolveNewsLocation(n) || NEWS_UNLOCATED_POINT }))
+      .slice(0, 5);
+
+    const grouped = [];
+    const groupIndex = {};
+    for (const item of located) {
+      const key = `${item.location.name}|${item.location.lat.toFixed(2)},${item.location.lon.toFixed(2)}`;
+      if (groupIndex[key] === undefined) {
+        groupIndex[key] = grouped.length;
+        grouped.push({ location: item.location, count: 0, biasScore: 0 });
+      }
+      const group = grouped[groupIndex[key]];
+      group.count += 1;
+      group.biasScore += item.news.bias > 0 ? 1 : (item.news.bias < 0 ? -1 : 0);
+    }
+
+    const markers = grouped.map((group) => {
+      const point = projectNewsLocation(group.location.lat, group.location.lon);
+      const cls = group.biasScore > 0 ? "tp" : (group.biasScore < 0 ? "sl" : "neutral");
+      const labelText = `${group.location.name}${group.count > 1 ? ` x${group.count}` : ""}`;
+      const label = escapeHtml(labelText);
+      const labelX = point.x > 72 ? "translate(calc(-100% - 8px), -50%)" : "translate(8px, -50%)";
+      return `
+      <span class="news-marker ${cls}" style="left:${point.x.toFixed(2)}%;top:${point.y.toFixed(2)}%;" title="${label}"></span>
+      <span class="news-marker-label" style="left:${point.x.toFixed(2)}%;top:${point.y.toFixed(2)}%;transform:${labelX};">${label}</span>`;
+    }).join("");
+
+    return `
+    <div class="news-map" aria-label="新聞發生位置地圖">
+      ${markers}
+    </div>`;
+  }
+
   function renderLatestNews() {
-    if (!Array.isArray(LATEST_NEWS) || LATEST_NEWS.length === 0) {
+    const visibleNews = (Array.isArray(LATEST_NEWS) ? LATEST_NEWS : [])
+      .filter((n) => Number(n && n.bias) !== 0);
+
+    if (visibleNews.length === 0) {
       return `
   <div class="hit-history">
     <div class="hit-history-title">最新新聞時事</div>
-    <div style="font-size:12px;color:#777;">目前尚無最新新聞</div>
+    ${renderNewsMap([])}
+    <div style="font-size:12px;color:#777;">目前尚無偏多 / 偏空新聞</div>
   </div>`;
     }
 
-    const rows = LATEST_NEWS.map((n) => {
+    const rows = visibleNews.map((n) => {
       const cls = n.bias > 0 ? "tp" : (n.bias < 0 ? "sl" : "");
       const label = n.bias > 0 ? "偏多" : (n.bias < 0 ? "偏空" : "中性");
       const titleText = escapeHtml(n.title_zh || n.title);
       const sourceText = escapeHtml(n.source || "News");
       const timeText = n.ts > 0 ? ts_str(n.ts) : "即時";
       const confidenceText = n.confidence > 0 ? ` ｜ ${(n.confidence * 100).toFixed(0)}%` : "";
+      const location = resolveNewsLocation(n);
+      const locationText = `<div class="news-location">位置：${escapeHtml((location || NEWS_UNLOCATED_POINT).name)}</div>`;
       return `
     <div class="hit-item">
       <div style="min-width:0;">
         <div class="hit-left ${cls}">${label} ｜ ${titleText}</div>
         <div class="metric-sub">${sourceText}${confidenceText}</div>
+        ${locationText}
       </div>
       <div class="hit-right">${timeText}</div>
     </div>`;
@@ -1408,6 +1577,7 @@
     return `
   <div class="hit-history">
     <div class="hit-history-title">最新新聞時事</div>
+    ${renderNewsMap(visibleNews)}
     ${rows}
   </div>`;
   }
@@ -1581,10 +1751,10 @@
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
   </div>
   ${renderTotalAssetsHero(totalAssetsUsdt)}
-  <div class="card" style="text-align:center;padding:32px 16px;">
+  <div class="card close-summary-card">
     <div class="close-hit ${hitClass}">${hitText}</div>
-    <div style="font-size:32px;margin-bottom:12px;">📋</div>
-    <div style="font-size:16px;font-weight:700;margin-bottom:6px;">目前無持倉</div>
+    <div class="close-summary-icon">📋</div>
+    <div class="close-summary-title">目前無持倉</div>
     <div style="font-size:13px;color:#888;">平倉價：${closePriceText}</div>
     <div style="font-size:12px;color:#777;margin-top:4px;">1m 高/低：${closeCandleText}</div>
     <div style="font-size:12px;color:#777;margin-top:4px;">命中時間：${ts_str(LAST_CLOSE_TS)}</div>

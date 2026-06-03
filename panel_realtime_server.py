@@ -402,6 +402,15 @@ async def local_position_snapshot():
     return FileResponse(position_path, media_type="application/json")
 
 
+@app.get("/world-map.svg")
+@app.get("/ETH-bot/docs/world-map.svg")
+async def local_world_map():
+    map_path = Path(__file__).resolve().parent / "docs" / "world-map.svg"
+    if not map_path.exists():
+        raise HTTPException(status_code=404, detail="world map not found")
+    return FileResponse(map_path, media_type="image/svg+xml")
+
+
 @app.get("/backtest_latest_summary.json")
 async def local_backtest_summary():
     repo_dir = Path(__file__).resolve().parent

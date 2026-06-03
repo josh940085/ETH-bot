@@ -1870,6 +1870,42 @@ def build_news_message(news_text, now_time=None):
     )
 
 
+NEWS_LOCATION_HINTS = [
+    (("canada", "air canada", "加拿大"), "加拿大", 56.1304, -106.3468),
+    (("united states", "u.s.", " us ", "美國", "華爾街", "wall street", "new york", "紐約"), "美國", 39.8283, -98.5795),
+    (("washington", "white house", "federal reserve", "fed", "白宮", "聯準會"), "華盛頓", 38.9072, -77.0369),
+    (("china", "beijing", "中國", "北京"), "中國", 35.8617, 104.1954),
+    (("taiwan", "台灣", "臺灣"), "台灣", 23.6978, 120.9605),
+    (("japan", "tokyo", "日本", "東京"), "日本", 36.2048, 138.2529),
+    (("south korea", "korea", "seoul", "韓國", "首爾"), "韓國", 35.9078, 127.7669),
+    (("india", "new delhi", "印度"), "印度", 20.5937, 78.9629),
+    (("pakistan", "巴基斯坦"), "巴基斯坦", 30.3753, 69.3451),
+    (("iran", "tehran", "伊朗"), "伊朗", 32.4279, 53.6880),
+    (("israel", "gaza", "jerusalem", "以色列", "加薩", "耶路撒冷"), "以色列/加薩", 31.0461, 34.8516),
+    (("syria", "damascus", "敘利亞", "大馬士革"), "敘利亞", 34.8021, 38.9968),
+    (("russia", "moscow", "俄羅斯", "莫斯科"), "俄羅斯", 61.5240, 105.3188),
+    (("ukraine", "kyiv", "烏克蘭", "基輔"), "烏克蘭", 48.3794, 31.1656),
+    (("united kingdom", "britain", "london", "英國", "倫敦"), "英國", 55.3781, -3.4360),
+    (("france", "paris", "法國", "巴黎"), "法國", 46.2276, 2.2137),
+    (("germany", "berlin", "德國", "柏林"), "德國", 51.1657, 10.4515),
+    (("europe", "eurozone", "eu ", "歐洲", "歐盟", "歐元區"), "歐洲", 54.5260, 15.2551),
+    (("zambia", "尚比亞", "贊比亞"), "尚比亞", -13.1339, 27.8493),
+    (("south africa", "南非"), "南非", -30.5595, 22.9375),
+    (("brazil", "巴西"), "巴西", -14.2350, -51.9253),
+    (("mexico", "墨西哥"), "墨西哥", 23.6345, -102.5528),
+    (("australia", "澳洲", "澳大利亞"), "澳洲", -25.2744, 133.7751),
+    (("saudi", "riyadh", "沙烏地", "沙特"), "沙烏地阿拉伯", 23.8859, 45.0792),
+]
+
+
+def infer_news_location(title, title_zh="", source=""):
+    haystack = f" {title or ''} {title_zh or ''} {source or ''} ".lower()
+    for keys, name, lat, lon in NEWS_LOCATION_HINTS:
+        if any(str(key).lower() in haystack for key in keys):
+            return {"location": name, "lat": lat, "lon": lon}
+    return {}
+
+
 def build_panel_news_items(news_list, limit=5):
     items = []
     seen = set()
@@ -1899,16 +1935,16 @@ def build_panel_news_items(news_list, limit=5):
         bias = _safe_int(analysis.get("bias"), 0) if isinstance(analysis, dict) else 0
         confidence = _safe_float(analysis.get("confidence"), 0.0) if isinstance(analysis, dict) else 0.0
         title_zh = translate_news_to_zh(title)
-        items.append(
-            {
-                "source": source[:40],
-                "title": title[:220],
-                "title_zh": str(title_zh or title)[:220],
-                "bias": bias,
-                "confidence": round(confidence, 4),
-                "ts": int(time.time()),
-            }
-        )
+        item = {
+            "source": source[:40],
+            "title": title[:220],
+            "title_zh": str(title_zh or title)[:220],
+            "bias": bias,
+            "confidence": round(confidence, 4),
+            "ts": int(time.time()),
+        }
+        item.update(infer_news_location(title, title_zh, source))
+        items.append(item)
 
         if len(items) >= limit:
             break
