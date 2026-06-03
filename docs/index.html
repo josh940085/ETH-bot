@@ -545,7 +545,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-2";
+  const APP_VERSION = "20260604-3";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1589,6 +1589,7 @@
     <div style="font-size:12px;color:#777;margin-top:4px;">1m 高/低：${closeCandleText}</div>
     <div style="font-size:12px;color:#777;margin-top:4px;">命中時間：${ts_str(LAST_CLOSE_TS)}</div>
   </div>
+  ${renderLatestNews()}
   <div class="card">
     <div class="card-title">上一筆設定</div>
     <div class="section-grid section-grid-compact">
@@ -1599,7 +1600,6 @@
       ${renderMetricCard("成本估算", `${fmt_rate(TOTAL_COST_RATE_EST || (ROUND_TRIP_FEE_RATE + FUNDING_COST_RATE_EST), 3)}`, `手續費 ${fmt_rate(ROUND_TRIP_FEE_RATE, 3)} ｜ 資金費 ${fmt_rate(FUNDING_COST_RATE_EST, 3)}`)}
     </div>
   </div>
-  ${renderLatestNews()}
   <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
       return;
@@ -1664,6 +1664,8 @@
   ${renderFourHourKlineChart(live)}
 
   ${renderTotalAssetsHero(totalAssetsUsdt)}
+
+  ${renderLatestNews()}
 
   <!-- Direction + Size -->
   <div class="card">
@@ -1788,8 +1790,6 @@
   <div class="legend">
     <span>盈利增加 → 紅色</span>｜<span>觸發止損 → 綠色</span>
   </div>
-
-  ${renderLatestNews()}
 
   <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
