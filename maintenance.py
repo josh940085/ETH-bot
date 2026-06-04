@@ -36,6 +36,32 @@ JSON_AUTO_FIX_DEFAULTS = {
         "ts": 0,
     },
 }
+ENTRY_CONFIRM_FUNCTION_RE = re.compile(
+    r"def _get_entry_confirm_candle_id\(df_5m\):\n"
+    r"(?:    .*\n)+?"
+    r"    except Exception:\n"
+    r"        return None\n",
+    re.MULTILINE,
+)
+ENTRY_CONFIRM_FIXED_FUNCTION = """def _get_entry_confirm_candle_id(df_5m):
+    try:
+        if df_5m is None or len(df_5m) == 0:
+            return None
+        if "time" in df_5m.columns:
+            candle_time = df_5m["time"].iloc[-1]
+            if candle_time is not None:
+                return int(float(candle_time))
+        idx = df_5m.index[-1]
+        if hasattr(idx, "timestamp"):
+            return int(idx.timestamp())
+        return str(idx)
+    except Exception:
+        return None
+"""
+ENTRY_CONFIRM_STUCK_RE = re.compile(r"進場延遲確認 \| (?P<direction>long|short) \| 等待下一根 5m K 確認")
+ENTRY_CONFIRM_PROGRESS_RE = re.compile(
+    r"進場延遲確認 \| .* \| (延遲確認通過|空單已追低|多單已追高|空單反彈過深|多單回落過深|分數轉弱|待確認訊號逾時|方向改變)"
+)
 TELEGRAM_BOT_COMMANDS = [
     {"command": "start", "description": "開始使用與顯示控制面板"},
     {"command": "help", "description": "顯示可用指令與說明"},
@@ -572,6 +598,112 @@ def _check_runtime_json_and_repair():
     }
 
 
+def _run_entry_confirm_candle_id_probe():
+    snippet = """
+import json
+import os
+os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
+import pandas as pd
+import eth
+with_time = pd.DataFrame({"time": [111000, 222000], "close": [1.0, 2.0]})
+fallback = pd.DataFrame({"close": [1.0, 2.0]})
+payload = {
+    "with_time": eth._get_entry_confirm_candle_id(with_time),
+    "fallback": eth._get_entry_confirm_candle_id(fallback),
+}
+print("REPORT_JSON=" + json.dumps(payload, ensure_ascii=False))
+raise SystemExit(0 if payload["with_time"] == 222000 and payload["fallback"] == "1" else 1)
+"""
+    result = _run_command([sys.executable, "-c", snippet], timeout=180)
+    payload = _extract_report_payload(result.stdout)
+    return result, payload
+
+
+def _repair_entry_confirm_candle_id():
+    target = REPO_DIR / "eth.py"
+    text = target.read_text(encoding="utf-8")
+    match = ENTRY_CONFIRM_FUNCTION_RE.search(text)
+    if not match:
+        raise RuntimeError("could not locate _get_entry_confirm_candle_id in eth.py")
+
+    current = match.group(0)
+    if 'if "time" in df_5m.columns' in current:
+        return False
+
+    target.write_text(text[: match.start()] + ENTRY_CONFIRM_FIXED_FUNCTION + text[match.end():], encoding="utf-8")
+    return True
+
+
+def _check_entry_confirm_candle_id_and_repair():
+    result, payload = _run_entry_confirm_candle_id_probe()
+    if result.returncode == 0 and payload:
+        return {
+            "status": "ok",
+            "detail": f"with_time={payload.get('with_time')} fallback={payload.get('fallback')}",
+            "probe": payload,
+        }
+
+    repaired = _repair_entry_confirm_candle_id()
+    result, payload = _run_entry_confirm_candle_id_probe()
+    if result.returncode != 0 or not payload:
+        output = (result.stdout or "").strip()
+        raise RuntimeError(output or "entry confirmation candle id probe failed after repair")
+
+    return {
+        "status": "fixed" if repaired else "ok",
+        "detail": f"with_time={payload.get('with_time')} fallback={payload.get('fallback')}",
+        "repaired": ["eth.py"] if repaired else [],
+        "repair_details": [
+            {
+                "target": "eth.py",
+                "action": "use Binance kline time for entry confirmation candle id",
+            }
+        ] if repaired else [],
+        "probe": payload,
+    }
+
+
+def _check_entry_confirm_runtime_liveness():
+    log_path = REPO_DIR / ".runtime" / "logs" / "program.log"
+    if not log_path.exists():
+        return {
+            "status": "ok",
+            "detail": "program.log not found; skipped",
+            "skipped": True,
+        }
+
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="ignore").splitlines()[-1200:]
+    except Exception as exc:
+        raise RuntimeError(f"failed to read program.log: {exc}")
+
+    waiting = []
+    last_progress_idx = -1
+    for idx, line in enumerate(lines):
+        if ENTRY_CONFIRM_PROGRESS_RE.search(line):
+            last_progress_idx = idx
+            waiting.clear()
+            continue
+        match = ENTRY_CONFIRM_STUCK_RE.search(line)
+        if match:
+            waiting.append((idx, match.group("direction"), line.strip()))
+
+    trailing_waits = [item for item in waiting if item[0] > last_progress_idx]
+    wait_count = len(trailing_waits)
+    if wait_count >= 80:
+        sample = trailing_waits[-1][2] if trailing_waits else ""
+        raise RuntimeError(
+            "entry confirmation appears stuck waiting for next 5m candle; "
+            f"trailing_waits={wait_count}; latest={sample}"
+        )
+
+    return {
+        "status": "ok",
+        "detail": f"trailing_waits={wait_count}",
+        "trailing_waits": wait_count,
+    }
+
+
 def _check_import_smoke():
     snippet = """
 import importlib.util
@@ -837,6 +969,8 @@ def main():
     checks = [
         ("conflict_markers", _check_conflict_markers),
         ("runtime_json", _check_runtime_json_and_repair),
+        ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
+        ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
         ("telegram_policy", _check_telegram_policy_and_repair),
