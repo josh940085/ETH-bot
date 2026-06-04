@@ -660,7 +660,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-13";
+  const APP_VERSION = "20260604-14";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1635,6 +1635,14 @@
       ? Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT)
       : (Number.isFinite(Number(ACCOUNT_MARGIN_BALANCE_USDT)) ? Number(ACCOUNT_MARGIN_BALANCE_USDT) : 0);
     const walletAssets = Number.isFinite(Number(ACCOUNT_WALLET_BALANCE_USDT)) ? Number(ACCOUNT_WALLET_BALANCE_USDT) : 0;
+    const liveWins = CLOSE_HITS.filter((h) => h.reason === "TP").length;
+    const liveTrades = CLOSE_HITS.length;
+    const hasLiveWinRate = liveTrades > 0;
+    const displayedWinRate = hasLiveWinRate
+      ? (liveWins / liveTrades) * 100
+      : PERFORMANCE_WIN_RATE;
+    const displayedWins = hasLiveWinRate ? liveWins : PERFORMANCE_WINS;
+    const displayedTrades = hasLiveWinRate ? liveTrades : PERFORMANCE_TRADES;
     return `
   <div class="asset-hero">
     <div class="asset-hero-main">
@@ -1643,9 +1651,9 @@
       <div class="asset-hero-sub">現貨 ${fmt(spotAssets)} ｜ 合約 ${fmt(futuresAssets)} ｜ 錢包 ${fmt(walletAssets)} ｜ 可用 ${fmt(ACCOUNT_AVAILABLE_BALANCE_USDT)}</div>
     </div>
     <div class="asset-hero-winrate">
-      <div class="asset-hero-winrate-label">固定回測勝率</div>
-      <div class="asset-hero-winrate-value">${PERFORMANCE_WIN_RATE !== null ? `${PERFORMANCE_WIN_RATE.toFixed(2)}%` : "-"}</div>
-      <div class="asset-hero-winrate-sub">${PERFORMANCE_TRADES > 0 ? `${PERFORMANCE_WINS}/${PERFORMANCE_TRADES}` : "尚無統計"}</div>
+      <div class="asset-hero-winrate-label">${hasLiveWinRate ? "近期實盤勝率" : "固定回測勝率"}</div>
+      <div class="asset-hero-winrate-value">${displayedWinRate !== null ? `${displayedWinRate.toFixed(2)}%` : "-"}</div>
+      <div class="asset-hero-winrate-sub">${displayedTrades > 0 ? `${displayedWins}/${displayedTrades}` : "尚無統計"}</div>
     </div>
   </div>`;
   }
