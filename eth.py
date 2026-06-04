@@ -5178,6 +5178,10 @@ def _get_entry_confirm_candle_id(df_5m):
     try:
         if df_5m is None or len(df_5m) == 0:
             return None
+        if "time" in df_5m.columns:
+            candle_time = df_5m["time"].iloc[-1]
+            if candle_time is not None:
+                return int(float(candle_time))
         idx = df_5m.index[-1]
         if hasattr(idx, "timestamp"):
             return int(idx.timestamp())
