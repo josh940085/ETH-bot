@@ -692,8 +692,24 @@ def _check_entry_confirm_runtime_liveness():
     wait_count = len(trailing_waits)
     if wait_count >= 80:
         sample = trailing_waits[-1][2] if trailing_waits else ""
+        repaired = _repair_entry_confirm_candle_id()
+        if repaired:
+            return {
+                "status": "fixed",
+                "detail": f"repaired entry confirmation candle tracking; trailing_waits={wait_count}",
+                "repaired": ["eth.py"],
+                "repair_details": [
+                    {
+                        "target": "eth.py",
+                        "action": "auto-repaired stuck entry confirmation by using Binance kline time",
+                    }
+                ],
+                "trailing_waits": wait_count,
+                "latest_wait": sample,
+            }
+
         raise RuntimeError(
-            "entry confirmation appears stuck waiting for next 5m candle; "
+            "entry confirmation still appears stuck after known repairs; "
             f"trailing_waits={wait_count}; latest={sample}"
         )
 
@@ -969,8 +985,8 @@ def main():
     checks = [
         ("conflict_markers", _check_conflict_markers),
         ("runtime_json", _check_runtime_json_and_repair),
-        ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
+        ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
         ("telegram_policy", _check_telegram_policy_and_repair),
