@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import datetime as dt
+import importlib.metadata
 import json
 import os
 import py_compile
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,7 @@ TEXT_SCAN_FILES = (
     "requirements.txt",
     "requirements-realtime.txt",
 )
+PANEL_PUBLIC_URL_PATH = data_path("panel_realtime_public_url.txt")
 JSON_AUTO_FIX_DEFAULTS = {
     data_path(".telegram_state.json"): {},
     data_path("news_stats_cache.json"): {},
@@ -502,6 +505,81 @@ def _run_command(cmd, timeout=180, extra_env=None):
         timeout=timeout,
         check=False,
     )
+
+
+def _check_dependency_constraints():
+    result = _run_command(
+        [sys.executable, "-m", "pip", "install", "--dry-run", "-r", "requirements.txt"],
+        timeout=240,
+    )
+    output = result.stdout or ""
+    if result.returncode != 0:
+        raise RuntimeError(output.strip() or "pip requirements dry-run failed")
+
+    would_install = []
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("Would install "):
+            would_install = [item.strip() for item in line[len("Would install ") :].split()]
+            break
+
+    try:
+        pandas_version = importlib.metadata.version("pandas")
+    except importlib.metadata.PackageNotFoundError:
+        pandas_version = ""
+
+    if would_install:
+        raise RuntimeError(f"requirements drift detected: {' '.join(would_install[:8])}")
+
+    detail = "requirements satisfied"
+    if pandas_version:
+        detail += f"; pandas={pandas_version}"
+
+    return {
+        "status": "ok",
+        "detail": detail,
+        "repaired": [],
+        "repair_details": [],
+        "pandas_version": pandas_version,
+    }
+
+
+def _check_cloudflared_and_panel_tunnel():
+    cloudflared = shutil.which("cloudflared")
+    if not cloudflared:
+        raise RuntimeError("cloudflared command not found")
+
+    version_result = _run_command([cloudflared, "version"], timeout=30)
+    if version_result.returncode != 0:
+        raise RuntimeError((version_result.stdout or "").strip() or "cloudflared version failed")
+
+    local = requests.get("http://127.0.0.1:8787/healthz", timeout=8)
+    if local.status_code != 200:
+        raise RuntimeError(f"local panel healthz HTTP {local.status_code}")
+
+    public_url = ""
+    try:
+        public_url = PANEL_PUBLIC_URL_PATH.read_text(encoding="utf-8").strip().rstrip("/")
+    except Exception:
+        public_url = ""
+
+    public_status = 0
+    if public_url:
+        public = requests.get(f"{public_url}/healthz", timeout=12)
+        public_status = int(public.status_code)
+        if public.status_code != 200:
+            raise RuntimeError(f"public panel healthz HTTP {public.status_code}")
+
+    return {
+        "status": "ok",
+        "detail": (
+            f"{(version_result.stdout or '').strip()}; "
+            f"local=200 public={public_status or 'not_configured'}"
+        ),
+        "public_url": public_url,
+        "local_healthz": 200,
+        "public_healthz": public_status,
+    }
 
 
 def _extract_report_payload(output):
@@ -984,6 +1062,8 @@ def main():
 
     checks = [
         ("conflict_markers", _check_conflict_markers),
+        ("dependency_constraints", _check_dependency_constraints),
+        ("panel_tunnel_health", _check_cloudflared_and_panel_tunnel),
         ("runtime_json", _check_runtime_json_and_repair),
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
