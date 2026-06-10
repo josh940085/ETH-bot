@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import datetime as dt
+import gzip
 import importlib.metadata
 import json
 import os
@@ -30,6 +31,10 @@ TEXT_SCAN_FILES = (
     "requirements-realtime.txt",
 )
 PANEL_PUBLIC_URL_PATH = data_path("panel_realtime_public_url.txt")
+RUNTIME_CLEANUP_MIN_BYTES = max(
+    10 * 1024 * 1024,
+    int(float(os.getenv("MAINTENANCE_RUNTIME_CLEANUP_MIN_MB", "100") or "100") * 1024 * 1024),
+)
 JSON_AUTO_FIX_DEFAULTS = {
     data_path(".telegram_state.json"): {},
     data_path("news_stats_cache.json"): {},
@@ -582,6 +587,70 @@ def _check_cloudflared_and_panel_tunnel():
     }
 
 
+def _gzip_file_atomic(path: Path):
+    gz_path = path.with_suffix(path.suffix + ".gz")
+    tmp_path = gz_path.with_suffix(gz_path.suffix + ".tmp")
+    with path.open("rb") as src, gzip.open(tmp_path, "wb", compresslevel=6) as dst:
+        shutil.copyfileobj(src, dst, length=1024 * 1024)
+    os.replace(tmp_path, gz_path)
+    path.unlink()
+    return gz_path
+
+
+def _check_runtime_storage_and_cleanup():
+    targets = [
+        data_path("news_predictions.jsonl.1"),
+    ]
+    checked = []
+    repaired = []
+    repair_details = []
+
+    for raw_path in targets:
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        size_bytes = path.stat().st_size
+        checked.append({"path": path.name, "size_mb": round(size_bytes / 1024 / 1024, 1)})
+        if size_bytes < RUNTIME_CLEANUP_MIN_BYTES:
+            continue
+
+        gz_path = path.with_suffix(path.suffix + ".gz")
+        if gz_path.exists():
+            continue
+
+        compressed = _gzip_file_atomic(path)
+        repaired.append(path.name)
+        repair_details.append(
+            {
+                "target": path.name,
+                "action": "gzip_old_runtime_file",
+                "size_mb": round(size_bytes / 1024 / 1024, 1),
+                "output": compressed.name,
+            }
+        )
+
+    total_log_bytes = 0
+    log_dir = data_path("..", "logs").resolve()
+    if log_dir.exists():
+        total_log_bytes = sum(p.stat().st_size for p in log_dir.glob("*") if p.is_file())
+
+    detail = (
+        f"checked={len(checked)} "
+        f"logs_mb={round(total_log_bytes / 1024 / 1024, 1)}"
+    )
+    if repaired:
+        detail += f"; compressed {len(repaired)} old runtime files"
+
+    return {
+        "status": "fixed" if repaired else "ok",
+        "detail": detail,
+        "checked": checked,
+        "repaired": repaired,
+        "repair_details": repair_details,
+        "log_size_mb": round(total_log_bytes / 1024 / 1024, 1),
+    }
+
+
 def _extract_report_payload(output):
     for line in reversed((output or "").splitlines()):
         if line.startswith(REPORT_PREFIX):
@@ -1064,6 +1133,7 @@ def main():
         ("conflict_markers", _check_conflict_markers),
         ("dependency_constraints", _check_dependency_constraints),
         ("panel_tunnel_health", _check_cloudflared_and_panel_tunnel),
+        ("runtime_storage", _check_runtime_storage_and_cleanup),
         ("runtime_json", _check_runtime_json_and_repair),
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),

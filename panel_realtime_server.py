@@ -5,13 +5,14 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import time
 from pathlib import Path
 from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 
 def _read_local_env_values():
@@ -120,22 +121,42 @@ STATE_LOCK = asyncio.Lock()
 CLIENTS = set()
 CLIENTS_LOCK = asyncio.Lock()
 PANEL_ERROR_LOG_ENABLED = _safe_bool_env("POSITION_PANEL_ERROR_LOG_ENABLED", True)
+APP_VERSION_RE = re.compile(r'const\s+APP_VERSION\s*=\s*["\']([^"\']*)["\'];')
 
 
-@app.middleware("http")
-async def log_panel_http_errors(request: Request, call_next):
-    start_ts = time.time()
-    try:
-        response = await call_next(request)
-    except Exception as exc:
-        if PANEL_ERROR_LOG_ENABLED:
-            print(f"⚠️ panel request error | {request.method} {request.url.path} | {exc!r}")
-        raise
+class PanelHttpErrorLogMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-    if PANEL_ERROR_LOG_ENABLED and response.status_code >= 400:
-        elapsed_ms = (time.time() - start_ts) * 1000.0
-        print(f"⚠️ panel HTTP {response.status_code} | {request.method} {request.url.path} | {elapsed_ms:.1f}ms")
-    return response
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start_ts = time.time()
+        status_code = {"value": 0}
+
+        async def send_wrapper(message):
+            if message.get("type") == "http.response.start":
+                status_code["value"] = int(message.get("status") or 0)
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except Exception as exc:
+            if PANEL_ERROR_LOG_ENABLED:
+                print(f"⚠️ panel request error | {scope.get('method')} {scope.get('path')} | {exc!r}")
+            raise
+
+        if PANEL_ERROR_LOG_ENABLED and status_code["value"] >= 400:
+            elapsed_ms = (time.time() - start_ts) * 1000.0
+            print(
+                f"⚠️ panel HTTP {status_code['value']} | "
+                f"{scope.get('method')} {scope.get('path')} | {elapsed_ms:.1f}ms"
+            )
+
+
+app.add_middleware(PanelHttpErrorLogMiddleware)
 
 
 def _viewer_auth_settings():
@@ -162,6 +183,25 @@ def _viewer_auth_settings():
         "session_ttl_sec": session_ttl_sec,
         "allowed_ids": allowed_ids,
     }
+
+
+def _panel_app_version(path: Path) -> str:
+    raw = str(os.getenv("POSITION_PANEL_APP_VERSION", "") or "").strip()
+    if raw:
+        return raw
+    try:
+        return time.strftime("%Y%m%d-%H%M%S", time.localtime(path.stat().st_mtime))
+    except Exception:
+        return str(int(time.time()))
+
+
+def _render_panel_html(path: Path) -> str:
+    html = path.read_text(encoding="utf-8")
+    version = _panel_app_version(path)
+    replacement = f'const APP_VERSION = "{version}";'
+    if APP_VERSION_RE.search(html):
+        return APP_VERSION_RE.sub(replacement, html, count=1)
+    return html
 
 
 def _token_valid(token: str) -> bool:
@@ -388,7 +428,7 @@ async def _broadcast_state(payload: dict):
 async def root():
     panel_path = Path(__file__).resolve().parent / "docs" / "index.html"
     if panel_path.exists():
-        return FileResponse(panel_path, media_type="text/html")
+        return HTMLResponse(_render_panel_html(panel_path))
     return {"ok": True, "service": "panel-realtime"}
 
 
