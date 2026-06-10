@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 
 def _read_local_env_values():
@@ -430,6 +430,16 @@ async def root():
     if panel_path.exists():
         return HTMLResponse(_render_panel_html(panel_path))
     return {"ok": True, "service": "panel-realtime"}
+
+
+@app.head("/")
+async def root_head():
+    return Response(status_code=200)
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    return Response(status_code=204)
 
 
 @app.get("/position.json")
