@@ -175,25 +175,6 @@ POSITION_PANEL_REALTIME_HOST=0.0.0.0
 POSITION_PANEL_REALTIME_PORT=8787
 ```
 
-### Panel Tunnel
-
-本機 supervisor 預設會用 `panel_tunnel.py` 啟動 quick tunnel，並把目前可用的公開 URL 寫到 `.runtime/data/panel_realtime_public_url.txt`。
-
-如果要改成 Cloudflare named tunnel，設定：
-
-```bash
-POSITION_PANEL_CLOUDFLARED_TUNNEL_NAME=your-tunnel-name
-POSITION_PANEL_PUBLIC_URL=https://your-fixed-panel-domain
-```
-
-如果 named tunnel 需要指定 config，再加：
-
-```bash
-POSITION_PANEL_CLOUDFLARED_CONFIG=/path/to/config.yml
-```
-
-`POSITION_PANEL_PUBLIC_URL` 會讓 bot 和 Mini App 使用固定網址；沒有設定 named tunnel 時，程式會繼續使用 `trycloudflare.com` quick tunnel fallback。
-
 ## requirements
 
 完整依賴現在放在 [requirements.txt](requirements.txt)。
