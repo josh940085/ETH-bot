@@ -4053,6 +4053,63 @@ def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0
     POSITION_PANEL_STATE["close_hits"] = hits[:10]
 
 
+def _recent_tp_sl_stats(limit=5):
+    hits = POSITION_PANEL_STATE.get("close_hits")
+    if not isinstance(hits, list):
+        return {"total": 0, "tp": 0, "sl": 0}
+
+    total = 0
+    tp = 0
+    sl = 0
+    for hit in hits:
+        if total >= max(1, _safe_int(limit, 5)):
+            break
+        reason = str(hit.get("reason") if isinstance(hit, dict) else "").upper()
+        if reason not in {"TP", "SL"}:
+            continue
+        total += 1
+        if reason == "TP":
+            tp += 1
+        elif reason == "SL":
+            sl += 1
+
+    return {"total": total, "tp": tp, "sl": sl}
+
+
+def _recent_sl_guard_reason(final, score, net_edge_rate_est, risk_rate, macro_bias, mid_trend, sr_bias):
+    if not _is_truthy(os.getenv("TRADE_RECENT_SL_GUARD_ENABLED", "1")):
+        return ""
+    if final.startswith("觀望"):
+        return ""
+
+    lookback = max(3, _safe_int(os.getenv("TRADE_RECENT_SL_GUARD_LOOKBACK", 5), 5))
+    max_sl = max(2, _safe_int(os.getenv("TRADE_RECENT_SL_GUARD_MAX_SL", 4), 4))
+    stats = _recent_tp_sl_stats(lookback)
+    if stats["total"] < lookback or stats["sl"] < max_sl:
+        return ""
+
+    min_score_gap = max(0.20, _safe_float(os.getenv("TRADE_SL_GUARD_MIN_SCORE_GAP", 0.36), 0.36))
+    min_edge = max(0.0005, _safe_float(os.getenv("TRADE_SL_GUARD_MIN_EDGE_RATE", 0.003), 0.003))
+    min_risk = max(0.001, _safe_float(os.getenv("TRADE_SL_GUARD_MIN_RISK_RATE", 0.003), 0.003))
+    score_gap = abs(_safe_float(score, 0.5) - 0.5)
+
+    if score_gap < min_score_gap:
+        return f"觀望（連續SL防護-信號強度不足 {stats['sl']}/{stats['total']}）"
+    if _safe_float(net_edge_rate_est, 0.0) < min_edge:
+        return f"觀望（連續SL防護-期望值不足 {stats['sl']}/{stats['total']}）"
+    if _safe_float(risk_rate, 0.0) < min_risk:
+        return f"觀望（連續SL防護-停損距離過近 {stats['sl']}/{stats['total']}）"
+
+    sr_bias = _safe_float(sr_bias, 0.0)
+    macro_bias = _safe_float(macro_bias, 0.0)
+    if "做空" in final and (mid_trend == 1 or macro_bias > 0.4 or sr_bias > 0.12):
+        return f"觀望（連續SL防護-空單逆向共振 {stats['sl']}/{stats['total']}）"
+    if "做多" in final and (mid_trend == -1 or macro_bias < -0.4 or sr_bias < -0.12):
+        return f"觀望（連續SL防護-多單逆向共振 {stats['sl']}/{stats['total']}）"
+
+    return ""
+
+
 def sync_position_panel(current_price=None):
     _refresh_position_panel_account_state(force=False, log_on_error=False)
     entry_price = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
@@ -6740,6 +6797,11 @@ def build_trade_signal_snapshot(
     entry = price
     min_accept_rr = max(1.1, _safe_float(min_accept_rr if min_accept_rr is not None else os.getenv("TRADE_MIN_ACCEPT_RR", 1.8), 1.8))
     min_net_edge_rate = max(0.0005, _safe_float(min_net_edge_rate if min_net_edge_rate is not None else os.getenv("TRADE_MIN_NET_EDGE_RATE", 0.0012), 0.0012))
+    min_entry_risk_rate = max(0.001, _safe_float(os.getenv("TRADE_MIN_ENTRY_RISK_RATE", 0.003), 0.003))
+    min_direction_win_prob = max(0.05, min(0.75, _safe_float(os.getenv("TRADE_MIN_DIRECTION_WIN_PROB", 0.42), 0.42)))
+    conflict_min_edge_rate = max(min_net_edge_rate, _safe_float(os.getenv("TRADE_CONFLICT_MIN_EDGE_RATE", 0.0025), 0.0025))
+    conflict_short_max_score = min(0.45, _safe_float(os.getenv("TRADE_CONFLICT_SHORT_MAX_SCORE", 0.20), 0.20))
+    conflict_long_min_score = max(0.55, _safe_float(os.getenv("TRADE_CONFLICT_LONG_MIN_SCORE", 0.80), 0.80))
     est_slippage_rate = max(0.0, _safe_float(est_slippage_rate if est_slippage_rate is not None else os.getenv("TRADE_EST_SLIPPAGE_RATE", 0.0004), 0.0004))
     est_hold_hours = max(0.0, _safe_float(est_hold_hours if est_hold_hours is not None else os.getenv("TRADE_EST_HOLD_HOURS", 6.0), 6.0))
     fee_round_trip_rate = max(0.0, _safe_float(fee_round_trip_rate if fee_round_trip_rate is not None else POSITION_PANEL_STATE.get("fee_round_trip_rate"), 0.001))
@@ -6889,15 +6951,47 @@ def build_trade_signal_snapshot(
         )
         if rr_at_entry < min_accept_rr:
             final = "觀望（RR不足）"
+        elif risk_rate < min_entry_risk_rate:
+            final = "觀望（停損距離過近）"
+        elif direction_win_prob < min_direction_win_prob:
+            final = "觀望（方向勝率不足）"
         elif reward_rate < min_reward_rate_needed:
             final = "觀望（報酬不足覆蓋成本）"
-        elif _is_truthy(os.getenv("TRADE_REQUIRE_AI_EDGE", "0")):
+        elif _is_truthy(os.getenv("TRADE_REQUIRE_AI_EDGE", "1")):
             min_expected_edge_rate = max(
                 0.0002,
                 _safe_float(os.getenv("TRADE_MIN_EXPECTED_EDGE_RATE", min_net_edge_rate), min_net_edge_rate),
             )
             if net_edge_rate_est < min_expected_edge_rate:
                 final = "觀望（AI期望值不足）"
+        if not final.startswith("觀望"):
+            sr_bias = _safe_float(sr_analysis.get("bias"), 0.0)
+            support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
+            resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
+            if "做空" in final:
+                conflict_count = 0
+                if mid_trend == 1:
+                    conflict_count += 1
+                if macro_bias > 0.4:
+                    conflict_count += 1
+                if sr_bias > 0.12 or support_hits >= 1:
+                    conflict_count += 1
+                if derivatives_pressure > 0.12:
+                    conflict_count += 1
+                if conflict_count >= 2 and (score > conflict_short_max_score or net_edge_rate_est < conflict_min_edge_rate):
+                    final = "觀望（空單逆向共振不足）"
+            elif "做多" in final:
+                conflict_count = 0
+                if mid_trend == -1:
+                    conflict_count += 1
+                if macro_bias < -0.4:
+                    conflict_count += 1
+                if sr_bias < -0.12 or resistance_hits >= 1:
+                    conflict_count += 1
+                if derivatives_pressure < -0.12:
+                    conflict_count += 1
+                if conflict_count >= 2 and (score < conflict_long_min_score or net_edge_rate_est < conflict_min_edge_rate):
+                    final = "觀望（多單逆向共振不足）"
 
     return {
         "features": features,
@@ -8190,7 +8284,20 @@ def run_bot():
             taker_buy_ratio = _safe_float(decision.get("taker_buy_ratio"), 0.5)
             open_interest_change = _safe_float(decision.get("open_interest_change"), 0.0)
             net_edge_rate_est = _safe_float(decision.get("net_edge_rate_est"), 0.0)
+            risk_rate = _safe_float(decision.get("risk_rate"), 0.0)
             entry = price
+
+            sl_guard_reason = _recent_sl_guard_reason(
+                final,
+                score,
+                net_edge_rate_est,
+                risk_rate,
+                macro_bias,
+                mid_trend,
+                _safe_float(sr_analysis.get("bias"), 0.0),
+            )
+            if sl_guard_reason:
+                final = sl_guard_reason
 
             # ===== 中文時事解讀 =====
             macro_text = "中性"
