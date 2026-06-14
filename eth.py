@@ -6794,6 +6794,59 @@ def build_trade_signal_snapshot(
         score += max(-0.06, min(0.06, derivatives_pressure * 0.045))
         score = max(0.05, min(score, 0.95))
 
+    if _is_truthy(os.getenv("TRADE_USE_CONFLUENCE_PROB_FLOOR", "1")):
+        long_confluence = 0.0
+        short_confluence = 0.0
+        if htf == 1:
+            long_confluence += 1.0
+        else:
+            short_confluence += 1.0
+        if mid_trend == 1:
+            long_confluence += 1.0
+        else:
+            short_confluence += 1.0
+        if breakout == 1:
+            long_confluence += 1.0
+        elif breakout == -1:
+            short_confluence += 1.0
+        if regime == "bull_trend_strong":
+            long_confluence += 1.2
+        elif regime == "bull_trend":
+            long_confluence += 0.7
+        elif regime == "bear_trend_strong":
+            short_confluence += 1.2
+        elif regime == "bear_trend":
+            short_confluence += 0.7
+        if macro_bias > 0.6:
+            long_confluence += 0.7
+        elif macro_bias < -0.6:
+            short_confluence += 0.7
+        if sr_bias > 0.10:
+            long_confluence += 0.4
+        elif sr_bias < -0.10:
+            short_confluence += 0.4
+        if derivatives_pressure > 0.12:
+            long_confluence += 0.4
+        elif derivatives_pressure < -0.12:
+            short_confluence += 0.4
+        if volume_spike and buy_pressure:
+            long_confluence += 0.4
+        elif volume_spike and sell_pressure:
+            short_confluence += 0.4
+        if score >= 0.80:
+            long_confluence += 1.0
+        elif score <= 0.20:
+            short_confluence += 1.0
+
+        confluence_trigger = max(3.5, _safe_float(os.getenv("TRADE_CONFLUENCE_PROB_FLOOR_TRIGGER", 4.0), 4.0))
+        base_floor = max(0.42, min(0.75, _safe_float(os.getenv("TRADE_CONFLUENCE_PROB_FLOOR_BASE", 0.52), 0.52)))
+        if long_confluence >= confluence_trigger and score >= 0.80:
+            confluence_floor = min(0.72, base_floor + (long_confluence - confluence_trigger) * 0.04)
+            ai_long_prob = max(ai_long_prob, confluence_floor)
+        if short_confluence >= confluence_trigger and score <= 0.20:
+            confluence_floor = min(0.72, base_floor + (short_confluence - confluence_trigger) * 0.04)
+            ai_short_prob = max(ai_short_prob, confluence_floor)
+
     entry = price
     min_accept_rr = max(1.1, _safe_float(min_accept_rr if min_accept_rr is not None else os.getenv("TRADE_MIN_ACCEPT_RR", 1.8), 1.8))
     min_net_edge_rate = max(0.0005, _safe_float(min_net_edge_rate if min_net_edge_rate is not None else os.getenv("TRADE_MIN_NET_EDGE_RATE", 0.0012), 0.0012))
