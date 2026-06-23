@@ -8190,6 +8190,11 @@ def run_bot():
         pending_training_sample = None
         _clear_pending_training_sample_state()
 
+    # 重啟時已存在的部位同樣算作當日已開單，避免每日保底重複加開。
+    if active_trade.get("open"):
+        _mark_daily_trade_opened("restored_position")
+        sync_position_panel(_safe_float(WS_PRICE, active_trade.get("avg_entry", active_trade.get("entry", 0.0))))
+
     while True:
         try:
             # ===== Telegram 指令接收 =====
