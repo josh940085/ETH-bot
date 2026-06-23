@@ -5579,6 +5579,66 @@ def calc_indicators(df):
 
     return df
 
+
+def get_td_sequential_setup(df, completed_only=True):
+    """Return the current TD Setup count using close vs. the close four bars earlier.
+
+    Only completed candles are used by default.  This keeps a live, unfinished
+    candle from repeatedly enabling/disabling the entry filter.
+    """
+    if df is None or "close" not in df.columns:
+        return {
+            "up_count": 0,
+            "down_count": 0,
+            "up_9": False,
+            "down_9": False,
+            "up_sequence_start": None,
+            "down_sequence_start": None,
+        }
+
+    closes = df["close"].dropna()
+    if completed_only and len(closes) > 0:
+        closes = closes.iloc[:-1]
+    if len(closes) < 13:
+        return {
+            "up_count": 0,
+            "down_count": 0,
+            "up_9": False,
+            "down_9": False,
+            "up_sequence_start": None,
+            "down_sequence_start": None,
+        }
+
+    up_count = 0
+    down_count = 0
+    up_sequence_start = None
+    down_sequence_start = None
+    for index in range(4, len(closes)):
+        close = _safe_float(closes.iloc[index], 0.0)
+        compare_close = _safe_float(closes.iloc[index - 4], 0.0)
+        if close > compare_close:
+            up_count += 1
+            up_sequence_start = closes.index[index - up_count + 1]
+        else:
+            up_count = 0
+            up_sequence_start = None
+
+        if close < compare_close:
+            down_count += 1
+            down_sequence_start = closes.index[index - down_count + 1]
+        else:
+            down_count = 0
+            down_sequence_start = None
+
+    return {
+        "up_count": up_count,
+        "down_count": down_count,
+        "up_9": up_count >= 9,
+        "down_9": down_count >= 9,
+        "up_sequence_start": up_sequence_start,
+        "down_sequence_start": down_sequence_start,
+    }
+
 # =============================
 # Market Regime（市場狀態）
 # =============================
@@ -7992,6 +8052,7 @@ def run_bot():
             # ===== MID（策略）=====
             df_30m = get_kline("30m")
             df_15m = get_kline("15m")
+            td_setup_15m = get_td_sequential_setup(df_15m)
 
             mid_trend = 1 if df_30m["macd"].iloc[-1] > df_30m["signal"].iloc[-1] else -1
             fvg_low, fvg_high = calc_fvg(df_15m)
@@ -8120,6 +8181,26 @@ def run_bot():
 
             # ===== 真實交易管理（TP/SL） =====
             if active_trade["open"]:
+                position_direction = str(active_trade.get("direction") or "")
+                td_position_warning = (
+                    (position_direction == "long" and td_setup_15m["up_9"])
+                    or (position_direction == "short" and td_setup_15m["down_9"])
+                )
+                if td_position_warning:
+                    td_side = "上漲" if position_direction == "long" else "下跌"
+                    td_count = td_setup_15m["up_count"] if position_direction == "long" else td_setup_15m["down_count"]
+                    td_start = td_setup_15m["up_sequence_start"] if position_direction == "long" else td_setup_15m["down_sequence_start"]
+                    td_warning_key = f"{position_direction}:{td_side}:{td_start}"
+                    if getattr(run_bot, "last_td_position_warning_key", None) != td_warning_key:
+                        warning = (
+                            f"⚠️ 15m {td_side}九轉持倉警示\n"
+                            f"目前{('多單' if position_direction == 'long' else '空單')}遇到{td_side} Setup {td_count}，趨勢可能衰竭。\n"
+                            "僅警示：不會自動平倉或反手，請依 TP/SL 與其他訊號管理。"
+                        )
+                        print(warning)
+                        _send_trade_notification(warning, priority=True)
+                        run_bot.last_td_position_warning_key = td_warning_key
+
                 # 實單跟單時定期回同步 Binance，確保面板與開倉點位/持倉量一致。
                 if _get_follow_mode_enabled() and _is_real_copy_enabled() and (time.time() - last_binance_sync_ts) >= 12:
                     try:
@@ -8432,8 +8513,6 @@ def run_bot():
                 f"多週期SR偏置（{_safe_float(sr_analysis.get('bias'), 0.0):+.2f} | 支撐{_safe_int(sr_analysis.get('support_hits'), 0)} / 壓力{_safe_int(sr_analysis.get('resistance_hits'), 0)}）"
             )
 
-            reason_text = " | ".join(reason)
-
             # ===== 市場狀態中文轉換 =====
             regime_map = {
                 "bull_trend_strong": "強多趨勢",
@@ -8444,6 +8523,22 @@ def run_bot():
             }
 
             regime_text = regime_map.get(regime, regime)
+
+            # 九轉只作為反向開倉的保守濾網，不以單一訊號自動反手。
+            td_entry_block_reason = ""
+            if "做多" in final and td_setup_15m["up_9"]:
+                td_entry_block_reason = f"觀望（15m上漲九轉 Setup {td_setup_15m['up_count']}）"
+            elif "做空" in final and td_setup_15m["down_9"]:
+                td_entry_block_reason = f"觀望（15m下跌九轉 Setup {td_setup_15m['down_count']}）"
+            if td_entry_block_reason:
+                final = td_entry_block_reason
+                reason.append("九轉反向開倉濾網（等待其他確認）")
+            elif td_setup_15m["up_9"]:
+                reason.append(f"15m上漲九轉 Setup {td_setup_15m['up_count']}（封鎖新多單）")
+            elif td_setup_15m["down_9"]:
+                reason.append(f"15m下跌九轉 Setup {td_setup_15m['down_count']}（封鎖新空單）")
+
+            reason_text = " | ".join(reason)
 
             # ===== 統一輸出訊號格式 =====
             if "做多" in final:
