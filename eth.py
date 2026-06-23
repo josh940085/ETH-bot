@@ -706,6 +706,36 @@ def _perform_manual_close():
     return current, binance_close_msg
 
 
+def _close_trade_at_max_hold(current_price, candle_high=0.0, candle_low=0.0):
+    """Close an expired position at market; retain local state if Binance close fails."""
+    current_price = _safe_float(current_price, _safe_float(active_trade.get("entry"), 0.0))
+    direction = str(active_trade.get("direction") or "long").lower()
+    close_msg = ""
+    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+        try:
+            qty = _get_active_trade_position_qty()
+            if qty <= 0:
+                return False, "⚠️ 24h 到期但無法取得 Binance 持倉數量，保留本地持倉並重試"
+            dual_side = _is_binance_dual_side_mode()
+            position_side = "LONG" if direction == "long" else "SHORT"
+            close_side = "SELL" if direction == "long" else "BUY"
+            _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
+            params = {"symbol": COPY_TRADE_SYMBOL, "side": close_side, "type": "MARKET", "quantity": round(qty, 3)}
+            if dual_side:
+                params["positionSide"] = position_side
+            else:
+                params["reduceOnly"] = "true"
+            _binance_futures_signed_request("POST", "/fapi/v1/order", params)
+            close_msg = f"✅ Binance 24h 到期市價平倉已送出 qty={qty:.3f}"
+        except Exception as e:
+            return False, f"⚠️ Binance 24h 到期平倉失敗: {e}"
+
+    record_position_close("MAX_HOLD", current_price, candle_high, candle_low)
+    _reset_active_trade_state()
+    sync_position_panel(current_price)
+    return True, close_msg or ("✅ 模擬持倉已於 24h 上限結束" if not _is_real_copy_enabled() else "✅ 24h 到期持倉已結束")
+
+
 def _handle_control_callback(raw_text, fallback_chat_id=None):
     text = str(raw_text or "")
 
@@ -4029,7 +4059,7 @@ def _queue_panel_realtime_publish(payload):
 
 def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0):
     reason_text = str(reason or "").upper()
-    if reason_text not in {"TP", "SL", "MANUAL"}:
+    if reason_text not in {"TP", "SL", "MANUAL", "MAX_HOLD"}:
         reason_text = "CLOSE"
 
     ts_now = int(time.time())
@@ -4151,6 +4181,62 @@ def _recent_sl_review_guard_reason(final):
         return ""
     issue = str((review.get("issues") or ["等待15m重新確認"])[0])
     return f"觀望（SL後檢討防護-{issue}）"
+
+
+TAIPEI_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+
+def _taipei_trade_date(now=None):
+    now = now or datetime.datetime.now(TAIPEI_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TAIPEI_TZ)
+    return now.astimezone(TAIPEI_TZ).date().isoformat()
+
+
+def _daily_min_trade_due(now=None):
+    if not _is_truthy(os.getenv("DAILY_MIN_TRADE_ENABLED", "1")):
+        return False
+    now = now or datetime.datetime.now(TAIPEI_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TAIPEI_TZ)
+    today = _taipei_trade_date(now)
+    if POSITION_PANEL_STATE.get("daily_trade_date") != today:
+        POSITION_PANEL_STATE["daily_trade_date"] = today
+        POSITION_PANEL_STATE["daily_trade_opened"] = False
+        POSITION_PANEL_STATE["daily_trade_source"] = ""
+    due_hour = min(23, max(0, _safe_int(os.getenv("DAILY_MIN_TRADE_HOUR", 22), 22)))
+    due_minute = min(59, max(0, _safe_int(os.getenv("DAILY_MIN_TRADE_MINUTE", 30), 30)))
+    return not bool(POSITION_PANEL_STATE.get("daily_trade_opened", False)) and (now.hour, now.minute) >= (due_hour, due_minute)
+
+
+def _mark_daily_trade_opened(source):
+    POSITION_PANEL_STATE["daily_trade_date"] = _taipei_trade_date()
+    POSITION_PANEL_STATE["daily_trade_opened"] = True
+    POSITION_PANEL_STATE["daily_trade_source"] = str(source or "signal")
+    POSITION_PANEL_STATE["daily_trade_opened_ts"] = int(time.time())
+
+
+def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend):
+    """Create the small end-of-day trade from current structure, never a blind side."""
+    entry = max(0.0, _safe_float(price, 0.0))
+    direction = "long" if (_safe_int(htf, 0) + _safe_int(mid_trend, 0)) >= 0 else "short"
+    atr_ref = max(_safe_float(atr, 0.0), entry * 0.001, 1e-6)
+    if direction == "long":
+        structural_sl = _safe_float(df_15m["low"].tail(10).min(), entry)
+        structural_sl = min(structural_sl, _safe_float(df_5m["low"].tail(6).min(), entry))
+        risk = max(entry - structural_sl, atr_ref * 0.5)
+        sl = entry - risk
+        tp = entry + risk * 1.5
+        final = "⏰ 每日保底做多"
+    else:
+        structural_sl = _safe_float(df_15m["high"].tail(10).max(), entry)
+        structural_sl = max(structural_sl, _safe_float(df_5m["high"].tail(6).max(), entry))
+        risk = max(structural_sl - entry, atr_ref * 0.5)
+        sl = entry + risk
+        tp = entry - risk * 1.5
+        final = "⏰ 每日保底做空"
+    size = min(0.10, max(0.05, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.08), 0.08)))
+    return {"direction": direction, "final": final, "sl": sl, "tp": tp, "position_size": size}
 
 
 def _recent_tp_sl_stats(limit=5):
@@ -4313,6 +4399,10 @@ def sync_position_panel(current_price=None):
             "last_close_candle_low": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_low"), 0.0), 4),
             "close_hits": POSITION_PANEL_STATE.get("close_hits", [])[:10],
             "last_sl_review": POSITION_PANEL_STATE.get("last_sl_review", {}),
+            "daily_trade_date": str(POSITION_PANEL_STATE.get("daily_trade_date") or ""),
+            "daily_trade_opened": bool(POSITION_PANEL_STATE.get("daily_trade_opened", False)),
+            "daily_trade_source": str(POSITION_PANEL_STATE.get("daily_trade_source") or ""),
+            "daily_trade_opened_ts": _safe_int(POSITION_PANEL_STATE.get("daily_trade_opened_ts"), 0),
             "latest_news": latest_news[:8],
             "binance_qty": round(position_qty, 6),
             "position_notional_usdt": round(position_notional_usdt, 4),
@@ -4372,6 +4462,10 @@ def sync_position_panel(current_price=None):
             "last_close_candle_low": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_low"), 0.0), 4),
             "close_hits": POSITION_PANEL_STATE.get("close_hits", [])[:10],
             "last_sl_review": POSITION_PANEL_STATE.get("last_sl_review", {}),
+            "daily_trade_date": str(POSITION_PANEL_STATE.get("daily_trade_date") or ""),
+            "daily_trade_opened": bool(POSITION_PANEL_STATE.get("daily_trade_opened", False)),
+            "daily_trade_source": str(POSITION_PANEL_STATE.get("daily_trade_source") or ""),
+            "daily_trade_opened_ts": _safe_int(POSITION_PANEL_STATE.get("daily_trade_opened_ts"), 0),
             "latest_news": latest_news[:8],
             "binance_qty": 0.0,
             "position_notional_usdt": 0.0,
@@ -8315,6 +8409,37 @@ def run_bot():
                 current = price
                 candle_high = float(df_1m["high"].iloc[-1]) if len(df_1m) > 0 else current
                 candle_low = float(df_1m["low"].iloc[-1]) if len(df_1m) > 0 else current
+                open_ts = _safe_float(active_trade.get("open_time"), 0.0)
+                if open_ts > 0 and time.time() - open_ts >= 24 * 3600:
+                    held_direction = str(active_trade.get("direction") or "long")
+                    held_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+                    profitable = (
+                        (held_direction == "long" and current > held_entry)
+                        or (held_direction == "short" and current < held_entry)
+                    )
+                    if not profitable:
+                        if time.time() - getattr(run_bot, "last_max_hold_loss_notice_ts", 0.0) > 3600:
+                            print("⏱️ 持倉已超過 24 小時但尚未盈利，依規則維持 TP/SL，不強制平倉")
+                            run_bot.last_max_hold_loss_notice_ts = time.time()
+                    else:
+                        closed, close_msg = _close_trade_at_max_hold(current, candle_high, candle_low)
+                        if closed:
+                            performance["win"] += 1
+                            performance["total"] += 1
+                            pending_training_sample = _finalize_pending_training_sample(
+                                pending_training_sample, 1, close_reason="MAX_HOLD", close_price=current, atr=atr,
+                            )
+                            last_signal_cache = None
+                            _send_trade_notification(
+                                _build_trade_close_message("MAX_HOLD", held_direction, current, candle_high, candle_low)
+                                + "\n⏱️ 持倉超過 24 小時且仍有盈利，已結束。\n" + close_msg,
+                                priority=True,
+                            )
+                        elif time.time() - getattr(run_bot, "last_max_hold_error_ts", 0.0) > 300:
+                            print(close_msg)
+                            _send_trade_notification(close_msg, priority=True)
+                            run_bot.last_max_hold_error_ts = time.time()
+                        continue
                 has_valid_tp_sl = _has_valid_tp_sl(active_trade)
 
                 if active_trade["direction"] == "long":
@@ -8546,21 +8671,29 @@ def run_bot():
             net_edge_rate_est = _safe_float(decision.get("net_edge_rate_est"), 0.0)
             risk_rate = _safe_float(decision.get("risk_rate"), 0.0)
             entry = price
+            daily_min_trade = _daily_min_trade_due()
+            if daily_min_trade:
+                daily_plan = _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend)
+                final = daily_plan["final"]
+                sl = daily_plan["sl"]
+                tp = daily_plan["tp"]
+                position_size = daily_plan["position_size"]
 
-            sl_guard_reason = _recent_sl_guard_reason(
-                final,
-                score,
-                net_edge_rate_est,
-                risk_rate,
-                macro_bias,
-                mid_trend,
-                _safe_float(sr_analysis.get("bias"), 0.0),
-            )
-            if sl_guard_reason:
-                final = sl_guard_reason
-            sl_review_guard_reason = _recent_sl_review_guard_reason(final)
-            if sl_review_guard_reason:
-                final = sl_review_guard_reason
+            if not daily_min_trade:
+                sl_guard_reason = _recent_sl_guard_reason(
+                    final,
+                    score,
+                    net_edge_rate_est,
+                    risk_rate,
+                    macro_bias,
+                    mid_trend,
+                    _safe_float(sr_analysis.get("bias"), 0.0),
+                )
+                if sl_guard_reason:
+                    final = sl_guard_reason
+                sl_review_guard_reason = _recent_sl_review_guard_reason(final)
+                if sl_review_guard_reason:
+                    final = sl_review_guard_reason
 
             # ===== 中文時事解讀 =====
             macro_text = "中性"
@@ -8655,13 +8788,15 @@ def run_bot():
 
             # 九轉只作為反向開倉的保守濾網，不以單一訊號自動反手。
             td_entry_block_reason = ""
-            if "做多" in final and td_setup_15m["up_9"]:
+            if not daily_min_trade and "做多" in final and td_setup_15m["up_9"]:
                 td_entry_block_reason = f"觀望（15m上漲九轉 Setup {td_setup_15m['up_count']}）"
-            elif "做空" in final and td_setup_15m["down_9"]:
+            elif not daily_min_trade and "做空" in final and td_setup_15m["down_9"]:
                 td_entry_block_reason = f"觀望（15m下跌九轉 Setup {td_setup_15m['down_count']}）"
             if td_entry_block_reason:
                 final = td_entry_block_reason
                 reason.append("九轉反向開倉濾網（等待其他確認）")
+            elif daily_min_trade:
+                reason.append("每日最低一單：22:30 後小倉位結構單")
             elif td_setup_15m["up_9"]:
                 reason.append(f"15m上漲九轉 Setup {td_setup_15m['up_count']}（封鎖新多單）")
             elif td_setup_15m["down_9"]:
@@ -8729,7 +8864,7 @@ def run_bot():
             last_direction_simple = get_signal_direction(last_trade_signal) if last_trade_signal else None
 
             # ===== 防洗單 v6 =====
-            if current_direction == last_direction_simple:
+            if not daily_min_trade and current_direction == last_direction_simple:
                 # 價格變動太小 → 不開單
                 if last_entry_price is not None:
                     price_change = abs(price - last_entry_price) / price
@@ -8741,7 +8876,7 @@ def run_bot():
                     if abs(score - last_signal) < MIN_SIGNAL_DIFF:
                         final = "觀望（防洗單-信號重複）"
 
-            if final != "觀望":
+            if final != "觀望" and not daily_min_trade:
                 # ===== 冷卻防洗單 =====
                 if now_ts - last_trade_time < TRADE_COOLDOWN:
                     final = "觀望（冷卻中）"
@@ -8760,24 +8895,24 @@ def run_bot():
                 continue
 
             # ===== 最終安全檢查：拒絕假突破低信心單 =====
-            if fake_breakout and abs(score - 0.5) < 0.22:
+            if not daily_min_trade and fake_breakout and abs(score - 0.5) < 0.22:
                 pending_entry_confirmation = None
                 continue
 
             # ===== 多週期壓力/支撐阻擋：靠近關鍵反向區域先觀望 =====
             support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
             resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
-            if "做多" in final and resistance_hits >= 2 and score < 0.72:
+            if not daily_min_trade and "做多" in final and resistance_hits >= 2 and score < 0.72:
                 pending_entry_confirmation = None
                 continue
-            if "做空" in final and support_hits >= 2 and score > 0.28:
+            if not daily_min_trade and "做空" in final and support_hits >= 2 and score > 0.28:
                 pending_entry_confirmation = None
                 continue
 
             if final != "觀望":
                 direction = "long" if "做多" in final else "short"
 
-                if entry_confirm_enabled:
+                if entry_confirm_enabled and not daily_min_trade:
                     candle_id = _get_entry_confirm_candle_id(df_5m)
                     confirmed, confirm_msg = _evaluate_pending_entry_confirmation(
                         pending_entry_confirmation,
@@ -8813,7 +8948,7 @@ def run_bot():
                     continue
 
                 # 防止同一訊號重複刷
-                if last_signal_cache == msg:
+                if not daily_min_trade and last_signal_cache == msg:
                     continue
 
                 # ===== 建立真實交易 =====
@@ -8868,6 +9003,7 @@ def run_bot():
                         }
                         pending_training_sample = _save_pending_training_sample_state(pending_training_sample)
                         active_trade["open"] = True
+                        _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
                         sync_active_trade_from_binance(send_notice=False)
                     else:
                         # 開單失敗，清除本地倉位狀態，避免面板顯示假倉位
@@ -8885,6 +9021,7 @@ def run_bot():
                     }
                     pending_training_sample = _save_pending_training_sample_state(pending_training_sample)
                     active_trade["open"] = True
+                    _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
                     sync_position_panel(price)
 
             # ===== 學習標籤改為真實 TP/SL，避免用 1.2 秒短噪音污染模型 =====
