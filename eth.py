@@ -4053,6 +4053,106 @@ def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0
     POSITION_PANEL_STATE["close_hits"] = hits[:10]
 
 
+def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, candle_low, atr, context=None):
+    """Review the SL plan at execution time and retain a short re-entry guard."""
+    direction = _normalize_trade_direction(direction)
+    context = context if isinstance(context, dict) else {}
+    entry = max(0.0, _safe_float(entry, 0.0))
+    tp = max(0.0, _safe_float(tp, 0.0))
+    sl = max(0.0, _safe_float(sl, 0.0))
+    close_price = max(0.0, _safe_float(close_price, 0.0))
+    atr_ref = max(_safe_float(atr, 0.0), entry * 0.001, 1e-6)
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
+    stop_atr = risk / atr_ref
+    planned_rr = reward / max(risk, 1e-6)
+    stop_overshoot = (
+        max(0.0, sl - close_price) if direction == "long" else max(0.0, close_price - sl)
+    ) / atr_ref
+
+    expected_sign = 1 if direction == "long" else -1
+    htf = _safe_int(context.get("htf"), 0)
+    mid_trend = _safe_int(context.get("mid_trend"), 0)
+    sr_bias = _safe_float(context.get("sr_bias"), 0.0)
+    macro_bias = _safe_float(context.get("macro_bias"), 0.0)
+    derivatives_pressure = _safe_float(context.get("derivatives_pressure"), 0.0)
+    td_exhaustion = bool(context.get("td_exhaustion", False))
+    alignment_score = 0
+    indicators = []
+    for label, value, threshold in (
+        ("4H趨勢", htf, 0.0),
+        ("30m動能", mid_trend, 0.0),
+        ("支撐壓力", sr_bias, 0.10),
+        ("宏觀", macro_bias, 0.20),
+        ("衍生品", derivatives_pressure, 0.10),
+    ):
+        signed_value = _safe_float(value, 0.0) * expected_sign
+        if signed_value > threshold:
+            alignment_score += 1
+            indicators.append(f"{label}同向")
+        elif signed_value < -threshold:
+            alignment_score -= 1
+            indicators.append(f"{label}逆向")
+        else:
+            indicators.append(f"{label}中性")
+    if td_exhaustion:
+        alignment_score -= 1
+        indicators.append("15m九轉衰竭")
+
+    min_rr = max(1.1, _safe_float(os.getenv("TRADE_MIN_ACCEPT_RR", 1.8), 1.8))
+    issues = []
+    if stop_atr < 0.50:
+        issues.append(f"SL過近 {stop_atr:.2f} ATR")
+    if planned_rr < min_rr:
+        issues.append(f"RR不足 {planned_rr:.2f}")
+    if alignment_score <= 0:
+        issues.append(f"技術面逆向/不足 score={alignment_score:+d}")
+    if stop_overshoot >= 0.25:
+        issues.append(f"觸發超出SL {stop_overshoot:.2f} ATR")
+
+    requires_revalidation = bool(issues)
+    verdict = "需重新確認" if requires_revalidation else "SL設定合理，屬正常風控出場"
+    review = {
+        "ts": int(time.time()),
+        "direction": direction,
+        "entry": round(entry, 4),
+        "tp": round(tp, 4),
+        "sl": round(sl, 4),
+        "close_price": round(close_price, 4),
+        "candle_high": round(_safe_float(candle_high, 0.0), 4),
+        "candle_low": round(_safe_float(candle_low, 0.0), 4),
+        "stop_atr": round(stop_atr, 3),
+        "planned_rr": round(planned_rr, 3),
+        "stop_overshoot_atr": round(stop_overshoot, 3),
+        "alignment_score": alignment_score,
+        "indicators": indicators,
+        "issues": issues,
+        "requires_revalidation": requires_revalidation,
+        "verdict": verdict,
+    }
+    POSITION_PANEL_STATE["last_sl_review"] = review
+    return review
+
+
+def _recent_sl_review_guard_reason(final):
+    if not _is_truthy(os.getenv("TRADE_SL_REVIEW_GUARD_ENABLED", "1")) or final.startswith("觀望"):
+        return ""
+    review = POSITION_PANEL_STATE.get("last_sl_review")
+    if not isinstance(review, dict) or not review.get("requires_revalidation"):
+        return ""
+    guard_sec = max(60.0, _safe_float(os.getenv("TRADE_SL_REVIEW_GUARD_SEC", 900), 900))
+    if time.time() - _safe_float(review.get("ts"), 0.0) > guard_sec:
+        return ""
+    same_direction = (
+        ("做多" in final and review.get("direction") == "long")
+        or ("做空" in final and review.get("direction") == "short")
+    )
+    if not same_direction:
+        return ""
+    issue = str((review.get("issues") or ["等待15m重新確認"])[0])
+    return f"觀望（SL後檢討防護-{issue}）"
+
+
 def _recent_tp_sl_stats(limit=5):
     hits = POSITION_PANEL_STATE.get("close_hits")
     if not isinstance(hits, list):
@@ -4212,6 +4312,7 @@ def sync_position_panel(current_price=None):
             "last_close_candle_high": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_high"), 0.0), 4),
             "last_close_candle_low": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_low"), 0.0), 4),
             "close_hits": POSITION_PANEL_STATE.get("close_hits", [])[:10],
+            "last_sl_review": POSITION_PANEL_STATE.get("last_sl_review", {}),
             "latest_news": latest_news[:8],
             "binance_qty": round(position_qty, 6),
             "position_notional_usdt": round(position_notional_usdt, 4),
@@ -4270,6 +4371,7 @@ def sync_position_panel(current_price=None):
             "last_close_candle_high": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_high"), 0.0), 4),
             "last_close_candle_low": round(_safe_float(POSITION_PANEL_STATE.get("last_close_candle_low"), 0.0), 4),
             "close_hits": POSITION_PANEL_STATE.get("close_hits", [])[:10],
+            "last_sl_review": POSITION_PANEL_STATE.get("last_sl_review", {}),
             "latest_news": latest_news[:8],
             "binance_qty": 0.0,
             "position_notional_usdt": 0.0,
@@ -8231,6 +8333,15 @@ def run_bot():
                             atr=atr,
                         )
                         record_position_close("SL", current, candle_high, candle_low)
+                        sl_review = _review_stop_loss_event(
+                            active_trade["direction"], active_trade.get("avg_entry", active_trade.get("entry")),
+                            active_trade.get("tp"), active_trade.get("sl"), current, candle_high, candle_low, atr,
+                            {
+                                "htf": htf, "mid_trend": mid_trend, "sr_bias": sr_analysis.get("bias"),
+                                "macro_bias": macro_bias, "derivatives_pressure": derivatives_flow.get("derivatives_pressure"),
+                                "td_exhaustion": td_setup_15m["up_9"],
+                            },
+                        )
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["position_qty"] = 0.0
@@ -8244,7 +8355,10 @@ def run_bot():
                         sync_position_panel(current)
                         print("❌ SL 命中")
                         _send_trade_notification(
-                            _build_trade_close_message("SL", active_trade["direction"], current, candle_high, candle_low),
+                            _build_trade_close_message("SL", active_trade["direction"], current, candle_high, candle_low)
+                            + f"\n\n🔎 SL檢討：{sl_review['verdict']}\n"
+                            + f"風險 {sl_review['stop_atr']:.2f} ATR｜RR {sl_review['planned_rr']:.2f}｜技術分數 {sl_review['alignment_score']:+d}\n"
+                            + "；".join(sl_review["issues"] or sl_review["indicators"]),
                             priority=True,
                         )
 
@@ -8292,6 +8406,15 @@ def run_bot():
                             atr=atr,
                         )
                         record_position_close("SL", current, candle_high, candle_low)
+                        sl_review = _review_stop_loss_event(
+                            active_trade["direction"], active_trade.get("avg_entry", active_trade.get("entry")),
+                            active_trade.get("tp"), active_trade.get("sl"), current, candle_high, candle_low, atr,
+                            {
+                                "htf": htf, "mid_trend": mid_trend, "sr_bias": sr_analysis.get("bias"),
+                                "macro_bias": macro_bias, "derivatives_pressure": derivatives_flow.get("derivatives_pressure"),
+                                "td_exhaustion": td_setup_15m["down_9"],
+                            },
+                        )
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["position_qty"] = 0.0
@@ -8305,7 +8428,10 @@ def run_bot():
                         sync_position_panel(current)
                         print("❌ SL 命中")
                         _send_trade_notification(
-                            _build_trade_close_message("SL", active_trade["direction"], current, candle_high, candle_low),
+                            _build_trade_close_message("SL", active_trade["direction"], current, candle_high, candle_low)
+                            + f"\n\n🔎 SL檢討：{sl_review['verdict']}\n"
+                            + f"風險 {sl_review['stop_atr']:.2f} ATR｜RR {sl_review['planned_rr']:.2f}｜技術分數 {sl_review['alignment_score']:+d}\n"
+                            + "；".join(sl_review["issues"] or sl_review["indicators"]),
                             priority=True,
                         )
 
@@ -8432,6 +8558,9 @@ def run_bot():
             )
             if sl_guard_reason:
                 final = sl_guard_reason
+            sl_review_guard_reason = _recent_sl_review_guard_reason(final)
+            if sl_review_guard_reason:
+                final = sl_review_guard_reason
 
             # ===== 中文時事解讀 =====
             macro_text = "中性"
