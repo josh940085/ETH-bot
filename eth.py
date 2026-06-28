@@ -154,6 +154,16 @@ OPENAI_PAID_API_ENABLED = str(os.getenv("OPENAI_PAID_API_ENABLED", "0") or "0").
     "yes",
     "on",
 }
+MLX_AGENT_ENABLED = str(os.getenv("MLX_AGENT_ENABLED", "1") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+MLX_AGENT_BASE_URL = (
+    os.getenv("MLX_AGENT_BASE_URL", "http://127.0.0.1:8080/v1") or "http://127.0.0.1:8080/v1"
+).strip().rstrip("/")
+MLX_MODEL = (os.getenv("MLX_MODEL", "Qwen/Qwen3-4B-MLX-4bit") or "Qwen/Qwen3-4B-MLX-4bit").strip()
 BOT_SUPERVISOR = os.getenv("BOT_SUPERVISOR") == "1"
 TELEGRAM_STATE_FILE = data_path(".telegram_state.json")
 # ===== Telegram =====
@@ -217,6 +227,9 @@ def _safe_int_env(name: str, default: int) -> int:
         return int(str(os.getenv(name, default)).strip())
     except Exception:
         return int(default)
+
+
+MLX_AGENT_TIMEOUT_SEC = _safe_int_env("MLX_AGENT_TIMEOUT_SEC", 120)
 
 
 def _safe_float_env_names(names, default: float) -> float:
@@ -7813,8 +7826,10 @@ def _send_trade_notification(msg, priority=True):
     return send_private_telegram(msg, priority=priority)
 
 
-# ===== AI分析（OpenClaw / OpenAI） =====
+# ===== AI分析（MLX / OpenAI fallback） =====
 OPENAI_API_KEY = _get_required_env("OPENAI_API_KEY", "", mask=True)
+if MLX_AGENT_ENABLED:
+    print(f"✅ MLX AI agent: {MLX_MODEL} @ {MLX_AGENT_BASE_URL}")
 if OPENAI_PAID_API_ENABLED and OPENAI_API_KEY:
     print(
         f"✅ OpenAI 模型: 分析={OPENAI_CHAT_MODEL} | 翻譯={OPENAI_TRANSLATION_MODEL} | reasoning={OPENAI_REASONING_EFFORT}"
@@ -7823,33 +7838,68 @@ else:
     print("🟢 OpenAI 付費 API 已停用，AI 將只使用本地模型與免費 fallback")
 
 def ask_ai_analysis(prompt):
-    if not OPENAI_PAID_API_ENABLED:
-        return "AI分析已停用 OpenAI 付費 API；目前僅使用本地模型與免費資料來源。"
-    if not OPENAI_API_KEY:
-        return "AI分析失敗: 未設定 OPENAI_API_KEY"
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是一個專業 ETH 交易分析師。只根據使用者提供的市場資料分析，"
+                "清楚區分事實與推論，不承諾獲利，並用繁體中文簡潔回答。"
+            ),
+        },
+        {"role": "user", "content": prompt},
+    ]
+    mlx_error = ""
 
-    url = "https://api.openai.com/v1/chat/completions"
+    if MLX_AGENT_ENABLED:
+        try:
+            response = requests.post(
+                f"{MLX_AGENT_BASE_URL}/chat/completions",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "model": MLX_MODEL,
+                    "messages": messages,
+                    "temperature": 0.3,
+                    "max_tokens": 900,
+                },
+                timeout=max(10, MLX_AGENT_TIMEOUT_SEC),
+            )
+            response.raise_for_status()
+            text = _extract_openai_chat_text(response.json())
+            if text:
+                return text
+            mlx_error = "本地模型回傳空內容"
+        except Exception as exc:
+            mlx_error = str(exc)
+            print(f"⚠️ MLX AI agent 請求失敗: {exc}")
 
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    if OPENAI_PAID_API_ENABLED and OPENAI_API_KEY:
+        try:
+            payload = _build_openai_chat_payload(
+                OPENAI_CHAT_MODEL,
+                [
+                    {"role": _openai_instruction_role(OPENAI_CHAT_MODEL), "content": messages[0]["content"]},
+                    messages[1],
+                ],
+                temperature=0.3,
+            )
+            response = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {OPENAI_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+            response.raise_for_status()
+            text = _extract_openai_chat_text(response.json())
+            return text or "AI分析失敗: OpenAI 回傳空內容"
+        except Exception as exc:
+            return f"AI分析失敗: {exc}"
 
-    payload = _build_openai_chat_payload(
-        OPENAI_CHAT_MODEL,
-        [
-            {"role": _openai_instruction_role(OPENAI_CHAT_MODEL), "content": "你是一個專業ETH交易分析師"},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3,
-    )
-
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=10).json()
-        text = _extract_openai_chat_text(res)
-        return text or f"AI分析失敗: {res}"
-    except Exception as e:
-        return f"AI分析失敗: {e}"
+    if mlx_error:
+        return f"AI分析失敗: 本地 MLX agent 無法使用（{mlx_error}）"
+    return "AI分析已停用：MLX agent 與 OpenAI 付費 API 均未啟用。"
 
 
 def _build_bot_help_text():

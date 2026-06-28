@@ -181,6 +181,24 @@ POSITION_PANEL_REALTIME_PORT=8787
 
 如果只想單獨跑面板 API，也可以只裝 [requirements-realtime.txt](requirements-realtime.txt)。
 
+## MLX AI agent（Apple Silicon）
+
+本機 supervisor 會在 `127.0.0.1:8080` 啟動 MLX LM 的 OpenAI-compatible API，
+Telegram `/ai` 指令會優先使用本機模型，失敗時才依設定回退 OpenAI。
+
+預設模型為 `Qwen/Qwen3-4B-MLX-4bit`，模型快取放在 `.runtime/ai/huggingface`。
+可用以下環境變數調整：
+
+```bash
+MLX_AGENT_ENABLED=1
+MLX_AGENT_BASE_URL=http://127.0.0.1:8080/v1
+MLX_AGENT_PORT=8080
+MLX_MODEL=Qwen/Qwen3-4B-MLX-4bit
+MLX_AGENT_TIMEOUT_SEC=120
+```
+
+MLX 依賴只會在 Apple Silicon macOS 安裝；Linux／Intel 環境請在 supervisor 設定停用 `mlx-agent`。
+
 ## 前端面板
 
 `docs/index.html` 會優先連線 Realtime API / WebSocket。
