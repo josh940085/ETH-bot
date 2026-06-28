@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 import requests
 
-from runtime_paths import REPO_DIR, data_path
+from runtime_paths import REPO_DIR, ai_data_path, data_path
 from telegram import configure_token, get_notification_chat_ids, load_local_env, send_message
 
 
@@ -649,6 +649,127 @@ def _check_runtime_memory_and_optimize():
     }
 
 
+def _check_mlx_replacement_readiness():
+    import sqlite3
+    import time
+
+    base_url = (
+        os.getenv("MLX_AGENT_BASE_URL", "http://127.0.0.1:8080/v1")
+        or "http://127.0.0.1:8080/v1"
+    ).strip().rstrip("/")
+    model_name = (os.getenv("MLX_MODEL", "Qwen/Qwen3-4B-MLX-4bit") or "").strip()
+    payload = {
+        "model": model_name,
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "你是交易分類器。只輸出純 JSON，欄位為 long_probability、"
+                    "short_probability、action。機率總和必須為1，action只能是"
+                    "long、short、neutral。資料：htf=-1, mid_trend=1, breakout=0, "
+                    "regime=空頭趨勢, macro=-1.5, volume_spike=0。"
+                ),
+            }
+        ],
+        "temperature": 0,
+        "max_tokens": 128,
+    }
+    started = time.perf_counter()
+    response = requests.post(
+        f"{base_url}/chat/completions",
+        headers={"Content-Type": "application/json"},
+        json=payload,
+        timeout=120,
+    )
+    latency_sec = time.perf_counter() - started
+    response.raise_for_status()
+    body = response.json()
+    choices = body.get("choices") if isinstance(body, dict) else None
+    message = choices[0].get("message", {}) if isinstance(choices, list) and choices else {}
+    content = str(message.get("content", "") or "").strip()
+
+    structured_output_ok = False
+    try:
+        classification = json.loads(content)
+        long_probability = float(classification["long_probability"])
+        short_probability = float(classification["short_probability"])
+        action = str(classification["action"])
+        structured_output_ok = (
+            0 <= long_probability <= 1
+            and 0 <= short_probability <= 1
+            and abs(long_probability + short_probability - 1) <= 0.001
+            and action in {"long", "short", "neutral"}
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        structured_output_ok = False
+
+    learning_total = 0
+    learning_evaluated = 0
+    learning_successful = 0
+    learning_db = ai_data_path("mlx_agent_learning.sqlite3")
+    if learning_db.exists():
+        with sqlite3.connect(str(learning_db), timeout=10) as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN evaluated_at IS NOT NULL THEN 1 ELSE 0 END) AS evaluated,
+                    SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successful
+                FROM analysis_episode
+                """
+            ).fetchone()
+        learning_total = int(row[0] or 0)
+        learning_evaluated = int(row[1] or 0)
+        learning_successful = int(row[2] or 0)
+    learning_accuracy = (
+        learning_successful / learning_evaluated * 100 if learning_evaluated else 0.0
+    )
+
+    backtest = _read_json(data_path("backtest_latest_summary.json")) or {}
+    current_win_rate = float(backtest.get("win_rate", 0) or 0)
+    current_return = float(backtest.get("total_return_pct", 0) or 0)
+    current_trades = int(backtest.get("trades", 0) or 0)
+
+    max_latency_sec = max(0.1, float(os.getenv("MLX_REPLACEMENT_MAX_LATENCY_SEC", "0.5") or "0.5"))
+    min_evaluated = max(20, int(os.getenv("MLX_REPLACEMENT_MIN_EVALUATED", "100") or "100"))
+    min_accuracy = max(50.0, float(os.getenv("MLX_REPLACEMENT_MIN_ACCURACY_PCT", "55") or "55"))
+    gates = {
+        "structured_output": structured_output_ok,
+        "latency": latency_sec <= max_latency_sec,
+        "sample_count": learning_evaluated >= min_evaluated,
+        "accuracy": learning_accuracy >= min_accuracy,
+        # Direct replacement also requires a dedicated MLX shadow backtest, which is not
+        # equivalent to conversational /ai outcome tracking.
+        "shadow_backtest": False,
+    }
+    ready = all(gates.values())
+    failed = [name for name, passed in gates.items() if not passed]
+    detail = (
+        f"ready={ready}; latency={latency_sec:.2f}s/{max_latency_sec:.2f}s; "
+        f"json={structured_output_ok}; mlx_accuracy={learning_accuracy:.1f}% "
+        f"({learning_successful}/{learning_evaluated}, total={learning_total}); "
+        f"current_backtest={current_win_rate:.1f}% return={current_return:.2f}% "
+        f"trades={current_trades}; blocked={','.join(failed) or 'none'}"
+    )
+    return {
+        "status": "ok",
+        "detail": detail,
+        "ready_for_direct_replacement": ready,
+        "gates": gates,
+        "latency_sec": round(latency_sec, 3),
+        "structured_output_ok": structured_output_ok,
+        "mlx_learning_accuracy_pct": round(learning_accuracy, 2),
+        "mlx_learning_evaluated": learning_evaluated,
+        "current_backtest_win_rate_pct": current_win_rate,
+        "current_backtest_return_pct": current_return,
+        "recommendations": (
+            ["keep current model; MLX has not passed direct-replacement gates"]
+            if not ready
+            else ["MLX passed readiness gates; review shadow results before enabling"]
+        ),
+    }
+
+
 def _check_cloudflared_and_panel_tunnel():
     cloudflared = shutil.which("cloudflared")
     if not cloudflared:
@@ -1233,6 +1354,7 @@ def main():
         ("conflict_markers", _check_conflict_markers),
         ("dependency_constraints", _check_dependency_constraints),
         ("runtime_memory", _check_runtime_memory_and_optimize),
+        ("mlx_replacement_readiness", _check_mlx_replacement_readiness),
         ("panel_tunnel_health", _check_cloudflared_and_panel_tunnel),
         ("runtime_storage", _check_runtime_storage_and_cleanup),
         ("runtime_json", _check_runtime_json_and_repair),
