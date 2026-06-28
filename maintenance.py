@@ -549,6 +549,106 @@ def _check_dependency_constraints():
     }
 
 
+def _memory_free_percentage():
+    if sys.platform != "darwin":
+        return None
+    result = _run_command(["memory_pressure", "-Q"], timeout=30)
+    match = re.search(r"System-wide memory free percentage:\s*(\d+)%", result.stdout or "")
+    return int(match.group(1)) if match else None
+
+
+def _runtime_process_memory():
+    result = _run_command(["ps", "-axo", "pid=,rss=,command="], timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError((result.stdout or "").strip() or "ps failed")
+    services = {}
+    service_files = {
+        "eth-bot": "eth.py",
+        "program": "program.py",
+        "mlx-agent": "mlx_agent.py",
+        "panel-realtime": "panel_realtime_server.py",
+        "panel-tunnel": "panel_tunnel.py",
+    }
+    for raw_line in (result.stdout or "").splitlines():
+        parts = raw_line.strip().split(None, 2)
+        if len(parts) != 3:
+            continue
+        try:
+            pid, rss_kb = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        command = parts[2]
+        for service, filename in service_files.items():
+            if str(REPO_DIR / filename) in command:
+                services[service] = {"pid": pid, "rss_mb": rss_kb / 1024}
+    return services
+
+
+def _process_footprint_mb(pid):
+    if sys.platform != "darwin" or not shutil.which("footprint"):
+        return None
+    result = _run_command(["footprint", "-p", str(int(pid))], timeout=60)
+    match = re.search(r"Footprint:\s*([0-9.]+)\s*(KB|MB|GB)", result.stdout or "", re.IGNORECASE)
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).upper()
+    if unit == "GB":
+        return value * 1024
+    if unit == "KB":
+        return value / 1024
+    return value
+
+
+def _check_runtime_memory_and_optimize():
+    services = _runtime_process_memory()
+    free_pct = _memory_free_percentage()
+    mlx = services.get("mlx-agent") or {}
+    mlx_footprint_mb = _process_footprint_mb(mlx.get("pid")) if mlx.get("pid") else None
+    min_free_pct = max(5, int(os.getenv("MAINTENANCE_MEMORY_FREE_MIN_PCT", "15") or "15"))
+    max_mlx_mb = max(1024, int(os.getenv("MLX_MAX_FOOTPRINT_MB", "6144") or "6144"))
+
+    memory_pressure = free_pct is not None and free_pct < min_free_pct
+    oversized_mlx = mlx_footprint_mb is not None and mlx_footprint_mb > max_mlx_mb
+    repaired = []
+    repair_details = []
+
+    if oversized_mlx or (memory_pressure and mlx_footprint_mb and mlx_footprint_mb > 1024):
+        supervisorctl = REPO_DIR / ".venv" / "bin" / "supervisorctl"
+        result = _run_command(
+            [str(supervisorctl), "-c", str(REPO_DIR / "supervisord.conf"), "restart", "mlx-agent"],
+            timeout=90,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stdout or "").strip() or "failed to restart mlx-agent")
+        repaired.append("mlx-agent")
+        reason = (
+            f"footprint {mlx_footprint_mb:.0f}MB exceeded {max_mlx_mb}MB"
+            if oversized_mlx
+            else f"system free memory {free_pct}% below {min_free_pct}%"
+        )
+        repair_details.append(f"restarted mlx-agent to release memory: {reason}")
+
+    service_text = ", ".join(
+        f"{name}={values['rss_mb']:.0f}MB RSS" for name, values in sorted(services.items())
+    )
+    free_text = f"free={free_pct}%" if free_pct is not None else "free=unavailable"
+    mlx_text = (
+        f"mlx_footprint={mlx_footprint_mb:.0f}MB"
+        if mlx_footprint_mb is not None
+        else "mlx_footprint=unavailable"
+    )
+    return {
+        "status": "fixed" if repaired else "ok",
+        "detail": f"{free_text}; {mlx_text}; {service_text}",
+        "repaired": repaired,
+        "repair_details": repair_details,
+        "free_memory_pct": free_pct,
+        "mlx_footprint_mb": mlx_footprint_mb,
+        "services": services,
+    }
+
+
 def _check_cloudflared_and_panel_tunnel():
     cloudflared = shutil.which("cloudflared")
     if not cloudflared:
@@ -1132,6 +1232,7 @@ def main():
     checks = [
         ("conflict_markers", _check_conflict_markers),
         ("dependency_constraints", _check_dependency_constraints),
+        ("runtime_memory", _check_runtime_memory_and_optimize),
         ("panel_tunnel_health", _check_cloudflared_and_panel_tunnel),
         ("runtime_storage", _check_runtime_storage_and_cleanup),
         ("runtime_json", _check_runtime_json_and_repair),

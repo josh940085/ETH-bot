@@ -30,6 +30,8 @@ def main():
     model = (os.getenv("MLX_MODEL", "Qwen/Qwen3-4B-MLX-4bit") or "").strip()
     host = (os.getenv("MLX_AGENT_HOST", "127.0.0.1") or "127.0.0.1").strip()
     port = (os.getenv("MLX_AGENT_PORT", "8080") or "8080").strip()
+    prompt_cache_size = (os.getenv("MLX_PROMPT_CACHE_SIZE", "2") or "2").strip()
+    prompt_cache_bytes = (os.getenv("MLX_PROMPT_CACHE_BYTES", "536870912") or "536870912").strip()
     os.environ.setdefault("HF_HOME", str(REPO_DIR / ".runtime" / "ai" / "huggingface"))
 
     sys.argv = [
@@ -42,6 +44,10 @@ def main():
         port,
         "--chat-template-args",
         '{"enable_thinking":false}',
+        "--prompt-cache-size",
+        prompt_cache_size,
+        "--prompt-cache-bytes",
+        prompt_cache_bytes,
     ]
     runpy.run_module("mlx_lm.server", run_name="__main__")
     return 0

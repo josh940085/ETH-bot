@@ -199,11 +199,16 @@ MLX_MODEL=Qwen/Qwen3-4B-MLX-4bit
 MLX_AGENT_TIMEOUT_SEC=120
 MLX_LEARNING_EVALUATION_HOURS=4
 MLX_LEARNING_MIN_MOVE_PCT=0.25
+MLX_PROMPT_CACHE_SIZE=2
+MLX_PROMPT_CACHE_BYTES=536870912
+MLX_MAX_FOOTPRINT_MB=6144
+MAINTENANCE_MEMORY_FREE_MIN_PCT=15
 STRATEGY_DAILY_REPORT_TIME=23:50
 ```
 
 Telegram 輸入 `/ai 學習狀態` 可查看累積分析、已驗證案例與準確率。
 Bot 每天預設於台北時間 `23:50` 發送策略勝率巡檢，包含近 24 小時、近 7 日與 MLX 分析驗證結果。
+每日系統巡檢也會記錄各服務記憶體與 MLX Metal footprint；只有超過上限或系統記憶體壓力過高時，才會重啟 MLX agent 釋放記憶體。
 
 MLX 依賴只會在 Apple Silicon macOS 安裝；Linux／Intel 環境請在 supervisor 設定停用 `mlx-agent`。
 
