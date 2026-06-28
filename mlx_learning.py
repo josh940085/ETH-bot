@@ -36,6 +36,25 @@ def _connect():
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_outcome (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            closed_at REAL NOT NULL,
+            result INTEGER NOT NULL,
+            close_reason TEXT NOT NULL,
+            close_price REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_report_log (
+            report_date TEXT PRIMARY KEY,
+            sent_at REAL NOT NULL
+        )
+        """
+    )
     connection.commit()
     return connection
 
@@ -194,3 +213,104 @@ def learning_stats():
         "accuracy": accuracy,
         "evaluation_hours": EVALUATION_HOURS,
     }
+
+
+def record_strategy_outcome(result, close_reason="", close_price=0.0, closed_at=None):
+    clean_result = 1 if int(result) > 0 else 0
+    with _LOCK, _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO strategy_outcome (closed_at, result, close_reason, close_price)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                float(closed_at or time.time()),
+                clean_result,
+                str(close_reason or "UNKNOWN").upper()[:32],
+                _number(close_price),
+            ),
+        )
+        connection.commit()
+
+
+def strategy_stats(days=1, now_ts=None):
+    now_ts = float(now_ts or time.time())
+    cutoff = now_ts - max(1.0, float(days)) * 86400
+    with _LOCK, _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN result = 1 THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN result = 0 THEN 1 ELSE 0 END) AS losses
+            FROM strategy_outcome
+            WHERE closed_at >= ?
+            """,
+            (cutoff,),
+        ).fetchone()
+    total = int(row["total"] or 0)
+    wins = int(row["wins"] or 0)
+    losses = int(row["losses"] or 0)
+    return {
+        "total": total,
+        "wins": wins,
+        "losses": losses,
+        "winrate": wins / total * 100 if total else 0.0,
+    }
+
+
+def daily_report_was_sent(report_date):
+    with _LOCK, _connect() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM daily_report_log WHERE report_date = ?",
+            (str(report_date),),
+        ).fetchone()
+    return row is not None
+
+
+def mark_daily_report_sent(report_date, sent_at=None):
+    with _LOCK, _connect() as connection:
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO daily_report_log (report_date, sent_at)
+            VALUES (?, ?)
+            """,
+            (str(report_date), float(sent_at or time.time())),
+        )
+        connection.commit()
+
+
+def build_daily_strategy_report():
+    daily = strategy_stats(days=1)
+    weekly = strategy_stats(days=7)
+    mlx = learning_stats()
+
+    if daily["total"]:
+        daily_line = (
+            f"近24小時: {daily['winrate']:.1f}% "
+            f"（{daily['wins']}勝/{daily['losses']}敗，共{daily['total']}筆）"
+        )
+    else:
+        daily_line = "近24小時: 無已平倉樣本，暫無法判定勝率"
+
+    if weekly["total"]:
+        weekly_line = (
+            f"近7日: {weekly['winrate']:.1f}% "
+            f"（{weekly['wins']}勝/{weekly['losses']}敗，共{weekly['total']}筆）"
+        )
+    else:
+        weekly_line = "近7日: 無已平倉樣本"
+
+    if mlx["evaluated"]:
+        mlx_line = (
+            f"MLX分析: {mlx['accuracy']:.1f}% "
+            f"（成功 {mlx['successful']}/{mlx['evaluated']}，待驗證 {mlx['total'] - mlx['evaluated']}）"
+        )
+    else:
+        mlx_line = f"MLX分析: 尚無已驗證案例（待驗證 {mlx['total']}）"
+
+    warning = ""
+    if 0 < daily["total"] < 5:
+        warning = "\n⚠️ 24小時樣本少於5筆，勝率僅供參考"
+
+    return f"📊 每日策略勝率巡檢\n{daily_line}\n{weekly_line}\n{mlx_line}{warning}"

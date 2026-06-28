@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 from collections import deque
 from pathlib import Path
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode, urlparse, urlunparse
 import xml.etree.ElementTree as ET
 
@@ -44,10 +45,14 @@ from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
 from sklearn.preprocessing import StandardScaler
 from mlx_learning import (
+    build_daily_strategy_report,
     build_learning_context as build_mlx_learning_context,
+    daily_report_was_sent,
     evaluate_pending as evaluate_mlx_learning,
     learning_stats as get_mlx_learning_stats,
+    mark_daily_report_sent,
     record_analysis as record_mlx_analysis,
+    record_strategy_outcome,
 )
 from telegram import (
     REPO_DIR,
@@ -7651,6 +7656,7 @@ def _process_sl_followup_reviews(df_1m, current_price):
 
 
 def _finalize_pending_training_sample(pending_sample, label, close_reason="", close_price=0.0, atr=0.0):
+    record_strategy_outcome(label, close_reason=close_reason, close_price=close_price)
     if not pending_sample or not isinstance(pending_sample, dict):
         _clear_pending_training_sample_state()
         return None
@@ -8243,9 +8249,6 @@ def run_bot():
         f"new_5m={os.getenv('TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M', '1')}"
     )
     # trade_open 移除，改用 active_trade 控制是否可開單
-
-    # ===== 每日報告 =====
-    last_report_time = 0
 
     last_update_id = None
 
@@ -9114,19 +9117,25 @@ def run_bot():
 
             # ===== 更新信號（平滑 + 防洗單記錄）=====
             last_signal = score
-            # ===== 每日報告 =====
-            if time.time() - last_report_time > 3600:  # 每1小時
-                winrate = performance["win"] / performance["total"] if performance["total"] > 0 else 0
-
-                report = (
-                    f"📊 交易報告\n"
-                    f"總交易: {performance['total']}\n"
-                    f"啟動後TP/SL勝率: {winrate:.2%}\n"
-                    f"勝: {performance['win']} / 敗: {performance['loss']}"
-                )
-
-                send_telegram(report)
-                last_report_time = time.time()
+            # ===== 每日策略勝率巡檢（預設台北時間 23:50） =====
+            report_time = str(os.getenv("STRATEGY_DAILY_REPORT_TIME", "23:50") or "23:50").strip()
+            try:
+                report_hour, report_minute = [int(part) for part in report_time.split(":", 1)]
+            except (TypeError, ValueError):
+                report_hour, report_minute = 23, 50
+            report_hour = max(0, min(23, report_hour))
+            report_minute = max(0, min(59, report_minute))
+            report_now = datetime.datetime.now(ZoneInfo("Asia/Taipei"))
+            report_date = report_now.strftime("%Y-%m-%d")
+            if (
+                (report_now.hour, report_now.minute) >= (report_hour, report_minute)
+                and not daily_report_was_sent(report_date)
+                and time.time() - getattr(run_bot, "last_daily_report_attempt_ts", 0.0) >= 300
+            ):
+                run_bot.last_daily_report_attempt_ts = time.time()
+                report = build_daily_strategy_report()
+                if send_telegram(report):
+                    mark_daily_report_sent(report_date)
 
             sync_position_panel(new_price)
             time.sleep(0.8)
