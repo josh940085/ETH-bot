@@ -185,6 +185,8 @@ POSITION_PANEL_REALTIME_PORT=8787
 
 本機 supervisor 會在 `127.0.0.1:8080` 啟動 MLX LM 的 OpenAI-compatible API，
 Telegram `/ai` 指令會優先使用本機模型，失敗時才依設定回退 OpenAI。
+每次分析會保存市場快照，預設 4 小時後依實際價格驗證方向，後續分析會檢索已驗證案例作為經驗。
+學習資料存放於 `.runtime/ai/mlx_agent_learning.sqlite3`，不會自行修改下單程式。
 
 預設模型為 `Qwen/Qwen3-4B-MLX-4bit`，模型快取放在 `.runtime/ai/huggingface`。
 可用以下環境變數調整：
@@ -195,7 +197,11 @@ MLX_AGENT_BASE_URL=http://127.0.0.1:8080/v1
 MLX_AGENT_PORT=8080
 MLX_MODEL=Qwen/Qwen3-4B-MLX-4bit
 MLX_AGENT_TIMEOUT_SEC=120
+MLX_LEARNING_EVALUATION_HOURS=4
+MLX_LEARNING_MIN_MOVE_PCT=0.25
 ```
+
+Telegram 輸入 `/ai 學習狀態` 可查看累積分析、已驗證案例與準確率。
 
 MLX 依賴只會在 Apple Silicon macOS 安裝；Linux／Intel 環境請在 supervisor 設定停用 `mlx-agent`。
 

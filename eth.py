@@ -43,6 +43,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
 from sklearn.preprocessing import StandardScaler
+from mlx_learning import (
+    build_learning_context as build_mlx_learning_context,
+    evaluate_pending as evaluate_mlx_learning,
+    learning_stats as get_mlx_learning_stats,
+    record_analysis as record_mlx_analysis,
+)
 from telegram import (
     REPO_DIR,
     ai_data_path,
@@ -7837,7 +7843,12 @@ if OPENAI_PAID_API_ENABLED and OPENAI_API_KEY:
 else:
     print("🟢 OpenAI 付費 API 已停用，AI 將只使用本地模型與免費 fallback")
 
-def ask_ai_analysis(prompt):
+def ask_ai_analysis(prompt, market_context=None, question=""):
+    market_context = market_context if isinstance(market_context, dict) else {}
+    learning_context = build_mlx_learning_context(market_context)
+    learned_prompt = prompt
+    if learning_context:
+        learned_prompt = f"{prompt}\n\n{learning_context}"
     messages = [
         {
             "role": "system",
@@ -7846,7 +7857,7 @@ def ask_ai_analysis(prompt):
                 "清楚區分事實與推論，不承諾獲利，並用繁體中文簡潔回答。"
             ),
         },
-        {"role": "user", "content": prompt},
+        {"role": "user", "content": learned_prompt},
     ]
     mlx_error = ""
 
@@ -7866,6 +7877,7 @@ def ask_ai_analysis(prompt):
             response.raise_for_status()
             text = _extract_openai_chat_text(response.json())
             if text:
+                record_mlx_analysis(question or prompt, text, market_context)
                 return text
             mlx_error = "本地模型回傳空內容"
         except Exception as exc:
@@ -7893,7 +7905,10 @@ def ask_ai_analysis(prompt):
             )
             response.raise_for_status()
             text = _extract_openai_chat_text(response.json())
-            return text or "AI分析失敗: OpenAI 回傳空內容"
+            if text:
+                record_mlx_analysis(question or prompt, text, market_context)
+                return text
+            return "AI分析失敗: OpenAI 回傳空內容"
         except Exception as exc:
             return f"AI分析失敗: {exc}"
 
@@ -8098,6 +8113,17 @@ def handle_ai_command(text, context=None):
         if not question:
             question = "請根據以下數據判斷是否應該做多或做空，並給出理由與策略"
 
+        if question.lower() in {"stats", "status", "學習", "學習狀態"}:
+            stats = get_mlx_learning_stats()
+            return (
+                "🧠 MLX 學習狀態\n"
+                f"累積分析: {stats['total']}\n"
+                f"已驗證: {stats['evaluated']}\n"
+                f"成功案例: {stats['successful']}\n"
+                f"驗證準確率: {stats['accuracy']:.1f}%\n"
+                f"結果驗證週期: {stats['evaluation_hours']:.0f} 小時"
+            )
+
         # 注入你系統數據（核心升級）
         prompt = f"""
 你是一個專業ETH交易分析師，請根據以下即時市場數據進行分析：
@@ -8122,7 +8148,7 @@ Volume Spike: {context.get('volume_spike')}
 4. 止盈止損建議
 """
 
-        return ask_ai_analysis(prompt)
+        return ask_ai_analysis(prompt, market_context=context, question=question)
 
     if text.startswith("/news"):
         try:
@@ -8431,6 +8457,7 @@ def run_bot():
                     news_text += f"- {preview}\n"
 
             # ===== 真實交易管理（TP/SL） =====
+            evaluate_mlx_learning(price)
             if active_trade["open"]:
                 position_direction = str(active_trade.get("direction") or "")
                 td_position_warning = (
