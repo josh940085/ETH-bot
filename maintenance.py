@@ -13,6 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -24,6 +25,28 @@ DEFAULT_REPORT_PATH = data_path("maintenance_latest_report.json")
 CONFLICT_START_RE = re.compile(r"^<<<<<<< .*$", re.MULTILINE)
 CONFLICT_END_RE = re.compile(r"^>>>>>>> .*$", re.MULTILINE)
 REPORT_PREFIX = "REPORT_JSON="
+CHECK_NAME_ZH = {
+    "conflict_markers": "程式衝突標記",
+    "dependency_constraints": "套件依賴",
+    "runtime_memory": "記憶體使用與優化",
+    "mlx_replacement_readiness": "MLX 取代模型資格",
+    "panel_tunnel_health": "面板連線與隧道",
+    "runtime_storage": "執行資料儲存空間",
+    "runtime_json": "執行狀態 JSON",
+    "entry_confirm_runtime": "進場確認執行狀態",
+    "entry_confirm_candle_id": "進場確認 K 線追蹤",
+    "py_compile": "Python 語法檢查",
+    "import_smoke": "模組載入測試",
+    "telegram_policy": "Telegram 設定",
+    "telegram_watch_risk": "Telegram 發送風險",
+    "model_health": "交易模型健康狀態",
+    "smoke_backtest": "策略快速回測",
+}
+STATUS_ZH = {
+    "ok": "正常",
+    "fixed": "已自動優化",
+    "error": "異常",
+}
 TEXT_SCAN_FILES = (
     "Dockerfile",
     "README.md",
@@ -468,7 +491,7 @@ def _parse_args():
 
 
 def _iso_now():
-    return dt.datetime.now(dt.timezone.utc).isoformat()
+    return dt.datetime.now(ZoneInfo("Asia/Taipei")).isoformat()
 
 
 def _write_json_atomic(path, payload):
@@ -632,11 +655,11 @@ def _check_runtime_memory_and_optimize():
     service_text = ", ".join(
         f"{name}={values['rss_mb']:.0f}MB RSS" for name, values in sorted(services.items())
     )
-    free_text = f"free={free_pct}%" if free_pct is not None else "free=unavailable"
+    free_text = f"系統可用={free_pct}%" if free_pct is not None else "系統可用=無法取得"
     mlx_text = (
-        f"mlx_footprint={mlx_footprint_mb:.0f}MB"
+        f"MLX實際佔用={mlx_footprint_mb:.0f}MB"
         if mlx_footprint_mb is not None
-        else "mlx_footprint=unavailable"
+        else "MLX實際佔用=無法取得"
     )
     return {
         "status": "fixed" if repaired else "ok",
@@ -744,12 +767,22 @@ def _check_mlx_replacement_readiness():
     }
     ready = all(gates.values())
     failed = [name for name, passed in gates.items() if not passed]
+    gate_names = {
+        "structured_output": "結構化輸出",
+        "latency": "推論延遲",
+        "sample_count": "驗證樣本數",
+        "accuracy": "準確率",
+        "shadow_backtest": "影子回測",
+    }
+    failed_zh = "、".join(gate_names.get(name, name) for name in failed) or "無"
     detail = (
-        f"ready={ready}; latency={latency_sec:.2f}s/{max_latency_sec:.2f}s; "
-        f"json={structured_output_ok}; mlx_accuracy={learning_accuracy:.1f}% "
-        f"({learning_successful}/{learning_evaluated}, total={learning_total}); "
-        f"current_backtest={current_win_rate:.1f}% return={current_return:.2f}% "
-        f"trades={current_trades}; blocked={','.join(failed) or 'none'}"
+        f"可直接取代={'是' if ready else '否'}；"
+        f"延遲={latency_sec:.2f}秒（門檻{max_latency_sec:.2f}秒）；"
+        f"JSON格式={'通過' if structured_output_ok else '失敗'}；"
+        f"MLX準確率={learning_accuracy:.1f}%"
+        f"（{learning_successful}/{learning_evaluated}，總案例{learning_total}）；"
+        f"現有回測勝率={current_win_rate:.1f}%、報酬={current_return:.2f}%、"
+        f"交易={current_trades}筆；未通過={failed_zh}"
     )
     return {
         "status": "ok",
@@ -763,9 +796,9 @@ def _check_mlx_replacement_readiness():
         "current_backtest_win_rate_pct": current_win_rate,
         "current_backtest_return_pct": current_return,
         "recommendations": (
-            ["keep current model; MLX has not passed direct-replacement gates"]
+            ["保留現有模型；MLX 尚未通過直接取代門檻。"]
             if not ready
-            else ["MLX passed readiness gates; review shadow results before enabling"]
+            else ["MLX 已通過資格門檻；啟用前仍須人工確認影子回測結果。"]
         ),
     }
 
@@ -1207,9 +1240,9 @@ def _check_smoke_backtest(days, warmup_bars):
             raise RuntimeError("smoke backtest did not produce a summary")
 
     detail = (
-        f"days={days} trades={summary.get('trades', 0)} "
-        f"win_rate={summary.get('win_rate', 0)}% "
-        f"return={summary.get('total_return_pct', 0)}%"
+        f"期間={days}天；交易={summary.get('trades', 0)}筆；"
+        f"勝率={summary.get('win_rate', 0)}%；"
+        f"報酬={summary.get('total_return_pct', 0)}%"
     )
     return {
         "status": "ok",
@@ -1242,20 +1275,25 @@ def _run_check(name, fn):
 
 def _build_notification_text(report):
     header = {
-        "ok": "Daily maintenance OK",
-        "fixed": "Daily maintenance fixed issues",
-        "error": "Daily maintenance found errors",
-    }.get(report.get("status"), "Daily maintenance finished")
+        "ok": "✅ 每日系統巡檢正常",
+        "fixed": "🛠️ 每日系統巡檢已自動優化",
+        "error": "⚠️ 每日系統巡檢發現異常",
+    }.get(report.get("status"), "📋 每日系統巡檢完成")
 
     lines = [
         header,
-        f"time: {report.get('finished_at', '')}",
+        f"完成時間：{report.get('finished_at', '')}",
     ]
     if report.get("auto_fix_count", 0) > 0:
-        lines.append(f"auto_fixes: {report['auto_fix_count']}")
+        lines.append(f"自動修正：{report['auto_fix_count']} 項")
 
     for check in report.get("checks", []):
-        lines.append(f"- {check.get('name')}: {check.get('status')} | {check.get('detail')}")
+        name = str(check.get("name", "") or "")
+        status = str(check.get("status", "") or "")
+        lines.append(
+            f"- {CHECK_NAME_ZH.get(name, name)}："
+            f"{STATUS_ZH.get(status, status)}｜{check.get('detail')}"
+        )
 
     return "\n".join(lines)
 
@@ -1276,24 +1314,25 @@ def _build_fix_detail_texts(report):
             recommendations = check.get("recommendations") if isinstance(check.get("recommendations"), list) else []
 
             if repaired:
-                repair_details = [f"repaired: {', '.join(str(item) for item in repaired)}"]
+                repair_details = [f"已修正：{', '.join(str(item) for item in repaired)}"]
             elif likely_causes or recommendations:
                 repair_details = []
                 for item in likely_causes:
                     text = str(item or "").strip()
                     if text:
-                        repair_details.append(f"likely_cause: {text}")
+                        repair_details.append(f"可能原因：{text}")
                 for item in recommendations:
                     text = str(item or "").strip()
                     if text:
-                        repair_details.append(f"recommendation: {text}")
+                        repair_details.append(f"建議：{text}")
             else:
                 repair_details = [str(check.get("detail", "") or "").strip()]
 
         title = "🛠️ 修正內容" if check_status == "fixed" else "⚠️ 關注項目"
+        check_name = str(check.get("name", "") or "")
         lines = [
-            f"{title} | {check.get('name')}",
-            f"time: {finished_at}",
+            f"{title}｜{CHECK_NAME_ZH.get(check_name, check_name)}",
+            f"完成時間：{finished_at}",
         ]
 
         for item in repair_details:
