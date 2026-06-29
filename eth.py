@@ -8126,6 +8126,8 @@ def handle_ai_command(text, context=None):
                 f"累積分析: {stats['total']}\n"
                 f"已驗證: {stats['evaluated']}\n"
                 f"成功案例: {stats['successful']}\n"
+                f"既有模型匯入: {stats.get('imported', 0)}\n"
+                f"可用學習案例: {stats.get('context_total', stats['total'])}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
                 f"結果驗證週期: {stats['evaluation_hours']:.0f} 小時"
             )

@@ -1,18 +1,29 @@
+import csv
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import threading
 import time
+from pathlib import Path
 
 from runtime_paths import ai_data_path, ensure_parent_dir
 
 
 DB_PATH = ai_data_path("mlx_agent_learning.sqlite3")
-EVALUATION_HOURS = max(1.0, float(os.getenv("MLX_LEARNING_EVALUATION_HOURS", "4")))
+EVALUATION_HOURS = max(0.25, float(os.getenv("MLX_LEARNING_EVALUATION_HOURS", "1")))
 MIN_MOVE_PCT = max(0.05, float(os.getenv("MLX_LEARNING_MIN_MOVE_PCT", "0.25")))
+EVALUATION_INTERVAL_SEC = max(
+    5.0, float(os.getenv("MLX_LEARNING_EVALUATION_INTERVAL_SEC", "15"))
+)
+LEARNING_CONTEXT_LIMIT = max(5, int(os.getenv("MLX_LEARNING_CONTEXT_LIMIT", "12")))
+HISTORY_IMPORT_INTERVAL_SEC = max(
+    60.0, float(os.getenv("MLX_HISTORY_IMPORT_INTERVAL_SEC", "300"))
+)
 _LOCK = threading.Lock()
 _LAST_EVALUATION_TS = 0.0
+_LAST_HISTORY_IMPORT_TS = 0.0
 
 
 def _connect():
@@ -49,6 +60,20 @@ def _connect():
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS historical_example (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            source_key TEXT NOT NULL UNIQUE,
+            imported_at REAL NOT NULL,
+            direction TEXT NOT NULL,
+            response TEXT NOT NULL,
+            market_json TEXT NOT NULL,
+            success INTEGER NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS daily_report_log (
             report_date TEXT PRIMARY KEY,
             sent_at REAL NOT NULL
@@ -57,6 +82,103 @@ def _connect():
     )
     connection.commit()
     return connection
+
+
+def _historical_source_paths():
+    return (
+        ("live_model", Path(ai_data_path("ai_data.csv"))),
+        ("backtest_model", Path(ai_data_path("backtest_ai_data.csv"))),
+    )
+
+
+def _load_backtest_directions():
+    path = DB_PATH.parent.parent / "data" / "backtest_latest_trades.csv"
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        return [
+            str(row.get("direction") or "setup").strip().lower()
+            for row in rows
+            if str(row.get("exit_reason") or "").strip().upper() in {"TP", "SL"}
+        ]
+    except (OSError, csv.Error):
+        return []
+
+
+def import_existing_model_history(force=False):
+    """Import existing classifier samples as retrieval examples for MLX."""
+    global _LAST_HISTORY_IMPORT_TS
+    now_ts = time.time()
+    if not force and now_ts - _LAST_HISTORY_IMPORT_TS < HISTORY_IMPORT_INTERVAL_SEC:
+        return 0
+
+    directions = _load_backtest_directions()
+    prepared = []
+    for source, path in _historical_source_paths():
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+        except (OSError, csv.Error):
+            continue
+
+        for index, row in enumerate(rows):
+            try:
+                success = 1 if int(float(row.get("label", 0))) > 0 else 0
+            except (TypeError, ValueError):
+                continue
+            market = {
+                key: value
+                for key, value in row.items()
+                if key != "label" and value not in (None, "")
+            }
+            if not market:
+                continue
+            canonical = json.dumps(market, ensure_ascii=False, sort_keys=True)
+            source_key = hashlib.sha256(
+                f"{source}:{canonical}:{success}".encode("utf-8")
+            ).hexdigest()
+            direction = (
+                directions[index]
+                if source == "backtest_model" and index < len(directions)
+                else "setup"
+            )
+            result = "成功" if success else "失敗"
+            response = (
+                f"既有{source}訓練案例；此市場結構的交易結果為{result}。"
+                "用於校準相似型態，不代表目前應直接進場。"
+            )
+            prepared.append(
+                (
+                    source,
+                    source_key,
+                    now_ts,
+                    direction,
+                    response,
+                    canonical,
+                    success,
+                )
+            )
+
+    imported = 0
+    if prepared:
+        with _LOCK, _connect() as connection:
+            before = connection.total_changes
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO historical_example
+                    (source, source_key, imported_at, direction, response, market_json, success)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                prepared,
+            )
+            imported = connection.total_changes - before
+            connection.commit()
+    _LAST_HISTORY_IMPORT_TS = now_ts
+    return imported
 
 
 def _number(value, default=0.0):
@@ -114,7 +236,7 @@ def evaluate_pending(current_price, now_ts=None):
     global _LAST_EVALUATION_TS
     price = _number(current_price)
     now_ts = float(now_ts or time.time())
-    if price <= 0 or now_ts - _LAST_EVALUATION_TS < 60:
+    if price <= 0 or now_ts - _LAST_EVALUATION_TS < EVALUATION_INTERVAL_SEC:
         return 0
     _LAST_EVALUATION_TS = now_ts
     cutoff = now_ts - EVALUATION_HOURS * 3600
@@ -148,21 +270,31 @@ def evaluate_pending(current_price, now_ts=None):
         return len(rows)
 
 
-def build_learning_context(market, limit=5):
+def build_learning_context(market, limit=None):
     market = market if isinstance(market, dict) else {}
+    import_existing_model_history()
+    limit = LEARNING_CONTEXT_LIMIT if limit is None else max(0, int(limit))
     with _LOCK, _connect() as connection:
-        rows = connection.execute(
+        analysis_rows = connection.execute(
             """
-            SELECT direction, response, market_json, return_pct, success
+            SELECT direction, response, market_json, return_pct, success, 'analysis' AS source
             FROM analysis_episode
             WHERE evaluated_at IS NOT NULL
             ORDER BY success DESC, evaluated_at DESC
-            LIMIT 30
+            LIMIT 100
+            """
+        ).fetchall()
+        historical_rows = connection.execute(
+            """
+            SELECT direction, response, market_json, NULL AS return_pct, success, source
+            FROM historical_example
+            ORDER BY id DESC
+            LIMIT 500
             """
         ).fetchall()
 
     scored = []
-    for row in rows:
+    for row in [*analysis_rows, *historical_rows]:
         try:
             past_market = json.loads(row["market_json"])
         except (TypeError, ValueError, json.JSONDecodeError):
@@ -176,12 +308,18 @@ def build_learning_context(market, limit=5):
 
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
     examples = []
-    for _, _, row in scored[: max(0, int(limit))]:
+    for _, _, row in scored[:limit]:
         result = "成功" if row["success"] else "失敗"
         response = re.sub(r"\s+", " ", str(row["response"]))[:500]
-        examples.append(
-            f"- {row['direction']}｜{result}｜後續漲跌 {row['return_pct']:+.2f}%｜當時分析：{response}"
-        )
+        if row["return_pct"] is None:
+            examples.append(
+                f"- {row['direction']}｜{result}｜來源 {row['source']}｜案例：{response}"
+            )
+        else:
+            examples.append(
+                f"- {row['direction']}｜{result}｜後續漲跌 {row['return_pct']:+.2f}%"
+                f"｜當時分析：{response}"
+            )
     if not examples:
         return ""
     return (
@@ -192,6 +330,7 @@ def build_learning_context(market, limit=5):
 
 
 def learning_stats():
+    import_existing_model_history()
     with _LOCK, _connect() as connection:
         row = connection.execute(
             """
@@ -202,6 +341,14 @@ def learning_stats():
             FROM analysis_episode
             """
         ).fetchone()
+        historical = connection.execute(
+            """
+            SELECT COUNT(*) AS total, SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successful
+            FROM historical_example
+            """
+        ).fetchone()
+    imported = int(historical["total"] or 0)
+    imported_successful = int(historical["successful"] or 0)
     total = int(row["total"] or 0)
     evaluated = int(row["evaluated"] or 0)
     successful = int(row["successful"] or 0)
@@ -212,6 +359,9 @@ def learning_stats():
         "successful": successful,
         "accuracy": accuracy,
         "evaluation_hours": EVALUATION_HOURS,
+        "imported": imported,
+        "imported_successful": imported_successful,
+        "context_total": total + imported,
     }
 
 
