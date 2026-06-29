@@ -5890,37 +5890,54 @@ def detect_market_regime(df_1h, df_4h):
 
 
 def build_higher_timeframe_context(df_4h, df_1d=None, df_1w=None):
-    def summarize(frame, label):
+    def summarize(frame, label, short_bars, medium_bars, long_bars):
+        empty = {
+            f"{label}_trend": 0,
+            f"{label}_strength_pct": 0.0,
+            f"{label}_short_change_pct": 0.0,
+            f"{label}_medium_change_pct": 0.0,
+            f"{label}_long_change_pct": 0.0,
+            f"{label}_range_pos": 0.5,
+            f"{label}_samples": 0,
+            f"{label}_coverage_pct": 0.0,
+        }
         if frame is None or "close" not in frame.columns:
-            return {
-                f"{label}_trend": 0,
-                f"{label}_strength_pct": 0.0,
-                f"{label}_range_pos": 0.5,
-            }
+            return empty
         completed = frame.iloc[:-1].copy() if len(frame) > 1 else frame.copy()
         closes = pd.to_numeric(completed["close"], errors="coerce").dropna()
         if len(closes) < 4:
-            return {
-                f"{label}_trend": 0,
-                f"{label}_strength_pct": 0.0,
-                f"{label}_range_pos": 0.5,
-            }
+            empty[f"{label}_samples"] = int(len(closes))
+            return empty
+
+        def change_pct(bars):
+            available_bars = min(max(1, int(bars)), len(closes) - 1)
+            prior = float(closes.iloc[-(available_bars + 1)])
+            return (close - prior) / max(abs(prior), 1e-9) * 100
+
         close = float(closes.iloc[-1])
-        baseline = float(closes.tail(min(25, len(closes))).mean())
-        prior = float(closes.iloc[-4])
-        high = float(pd.to_numeric(completed["high"], errors="coerce").tail(min(20, len(completed))).max())
-        low = float(pd.to_numeric(completed["low"], errors="coerce").tail(min(20, len(completed))).min())
+        baseline = float(closes.tail(min(long_bars, len(closes))).mean())
+        range_rows = completed.tail(min(long_bars, len(completed)))
+        high = float(pd.to_numeric(range_rows["high"], errors="coerce").max())
+        low = float(pd.to_numeric(range_rows["low"], errors="coerce").min())
         trend = 1 if close > baseline else -1 if close < baseline else 0
+        short_change = change_pct(short_bars)
+        medium_change = change_pct(medium_bars)
+        long_change = change_pct(long_bars)
         return {
             f"{label}_trend": trend,
-            f"{label}_strength_pct": (close - prior) / max(abs(prior), 1e-9) * 100,
+            f"{label}_strength_pct": medium_change,
+            f"{label}_short_change_pct": short_change,
+            f"{label}_medium_change_pct": medium_change,
+            f"{label}_long_change_pct": long_change,
             f"{label}_range_pos": max(0.0, min(1.0, (close - low) / max(high - low, 1e-9))),
+            f"{label}_samples": int(len(closes)),
+            f"{label}_coverage_pct": min(100.0, len(closes) / max(long_bars + 1, 1) * 100),
         }
 
     context = {}
-    context.update(summarize(df_4h, "four_hour"))
-    context.update(summarize(df_1d, "daily"))
-    context.update(summarize(df_1w, "weekly"))
+    context.update(summarize(df_4h, "four_hour", 6, 42, 180))
+    context.update(summarize(df_1d, "daily", 7, 30, 90))
+    context.update(summarize(df_1w, "weekly", 4, 13, 52))
     candle_value = None
     if df_4h is not None and len(df_4h) > 1 and "time" in df_4h.columns:
         candle_value = df_4h["time"].iloc[-2]
@@ -8385,7 +8402,7 @@ def run_bot():
                 except:
                     pass
             # ===== HTF（方向）=====
-            df_4h = get_kline("4h")
+            df_4h = get_kline("4h", 200)
             df_1h = get_kline("1h")
             df_1d = get_kline("1d", 120)
             df_1w = get_kline("1w", 100)

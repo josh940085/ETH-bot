@@ -102,9 +102,13 @@ def record_higher_timeframe_context(context):
     with _LOCK, _connect() as connection:
         cursor = connection.execute(
             """
-            INSERT OR IGNORE INTO higher_timeframe_observation
+            INSERT INTO higher_timeframe_observation
                 (candle_key, observed_at, context_json)
             VALUES (?, ?, ?)
+            ON CONFLICT(candle_key) DO UPDATE SET
+                observed_at = excluded.observed_at,
+                context_json = excluded.context_json
+            WHERE higher_timeframe_observation.context_json <> excluded.context_json
             """,
             (
                 candle_key,
