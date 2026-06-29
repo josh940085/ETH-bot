@@ -52,6 +52,7 @@ from mlx_learning import (
     learning_stats as get_mlx_learning_stats,
     mark_daily_report_sent,
     record_analysis as record_mlx_analysis,
+    record_higher_timeframe_context,
     record_strategy_outcome,
 )
 from telegram import (
@@ -5887,6 +5888,45 @@ def detect_market_regime(df_1h, df_4h):
 
     return "range"
 
+
+def build_higher_timeframe_context(df_4h, df_1d=None, df_1w=None):
+    def summarize(frame, label):
+        if frame is None or "close" not in frame.columns:
+            return {
+                f"{label}_trend": 0,
+                f"{label}_strength_pct": 0.0,
+                f"{label}_range_pos": 0.5,
+            }
+        completed = frame.iloc[:-1].copy() if len(frame) > 1 else frame.copy()
+        closes = pd.to_numeric(completed["close"], errors="coerce").dropna()
+        if len(closes) < 4:
+            return {
+                f"{label}_trend": 0,
+                f"{label}_strength_pct": 0.0,
+                f"{label}_range_pos": 0.5,
+            }
+        close = float(closes.iloc[-1])
+        baseline = float(closes.tail(min(25, len(closes))).mean())
+        prior = float(closes.iloc[-4])
+        high = float(pd.to_numeric(completed["high"], errors="coerce").tail(min(20, len(completed))).max())
+        low = float(pd.to_numeric(completed["low"], errors="coerce").tail(min(20, len(completed))).min())
+        trend = 1 if close > baseline else -1 if close < baseline else 0
+        return {
+            f"{label}_trend": trend,
+            f"{label}_strength_pct": (close - prior) / max(abs(prior), 1e-9) * 100,
+            f"{label}_range_pos": max(0.0, min(1.0, (close - low) / max(high - low, 1e-9))),
+        }
+
+    context = {}
+    context.update(summarize(df_4h, "four_hour"))
+    context.update(summarize(df_1d, "daily"))
+    context.update(summarize(df_1w, "weekly"))
+    candle_value = None
+    if df_4h is not None and len(df_4h) > 1 and "time" in df_4h.columns:
+        candle_value = df_4h["time"].iloc[-2]
+    context["candle_key"] = f"ETHUSDT:4h:{candle_value}"
+    return context
+
 # =============================
 # FVG
 # =============================
@@ -6857,6 +6897,8 @@ def build_trade_signal_snapshot(
     fee_round_trip_rate=None,
     funding_rate=None,
     derivatives_flow=None,
+    df_1d=None,
+    df_1w=None,
 ):
     sr_analysis = sr_analysis if isinstance(sr_analysis, dict) else {"bias": 0.0, "support_hits": 0, "resistance_hits": 0, "lines": []}
 
@@ -6899,6 +6941,7 @@ def build_trade_signal_snapshot(
 
     price = _safe_float(price, _safe_float(df_5m["close"].iloc[-1], 0.0))
     derivatives_flow = _normalize_derivatives_flow_snapshot(derivatives_flow)
+    higher_timeframe = build_higher_timeframe_context(df_4h, df_1d, df_1w)
     regime = detect_market_regime(df_1h, df_4h)
 
     trend_4h = df_4h["close"].iloc[-1] - df_4h["ma25"].iloc[-1]
@@ -7387,6 +7430,7 @@ def build_trade_signal_snapshot(
         "taker_buy_ratio": taker_buy_ratio,
         "derivatives_pressure": derivatives_pressure,
         "derivatives_flow_stale": bool(derivatives_flow.get("stale", False)),
+        "higher_timeframe": higher_timeframe,
         "support_hits": _safe_int(sr_analysis.get("support_hits"), 0),
         "resistance_hits": _safe_int(sr_analysis.get("resistance_hits"), 0),
     }
@@ -8144,6 +8188,7 @@ def handle_ai_command(text, context=None):
                 f"成功案例: {stats['successful']}\n"
                 f"既有模型匯入: {stats.get('imported', 0)}\n"
                 f"可用學習案例: {stats.get('context_total', stats['total'])}\n"
+                f"高週期觀察: {stats.get('higher_tf_observations', 0)}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
                 f"結果驗證週期: {stats['evaluation_hours']:.0f} 小時"
             )
@@ -8156,6 +8201,8 @@ def handle_ai_command(text, context=None):
 價格: {context.get('price')}
 AI分數: {context.get('score')}
 HTF趨勢: {context.get('htf')}
+日線趨勢: {context.get('daily_trend')}（強度 {context.get('daily_strength_pct')}%）
+週線趨勢: {context.get('weekly_trend')}（強度 {context.get('weekly_strength_pct')}%）
 市場狀態: {context.get('regime')}
 Breakout: {context.get('breakout')}
 Triangle: {context.get('triangle')}
@@ -8315,6 +8362,10 @@ def run_bot():
                         "price": price if 'price' in locals() else None,
                         "score": score if 'score' in locals() else None,
                         "htf": htf if 'htf' in locals() else None,
+                        "daily_trend": higher_tf_context.get("daily_trend") if 'higher_tf_context' in locals() else None,
+                        "daily_strength_pct": higher_tf_context.get("daily_strength_pct") if 'higher_tf_context' in locals() else None,
+                        "weekly_trend": higher_tf_context.get("weekly_trend") if 'higher_tf_context' in locals() else None,
+                        "weekly_strength_pct": higher_tf_context.get("weekly_strength_pct") if 'higher_tf_context' in locals() else None,
                         "regime": regime if 'regime' in locals() else None,
                         "breakout": breakout if 'breakout' in locals() else None,
                         "triangle": triangle if 'triangle' in locals() else None,
@@ -8336,6 +8387,16 @@ def run_bot():
             # ===== HTF（方向）=====
             df_4h = get_kline("4h")
             df_1h = get_kline("1h")
+            df_1d = get_kline("1d", 120)
+            df_1w = get_kline("1w", 100)
+            higher_tf_context = build_higher_timeframe_context(df_4h, df_1d, df_1w)
+            if record_higher_timeframe_context(higher_tf_context):
+                print(
+                    "🧭 已收集高週期資料 | "
+                    f"4H={higher_tf_context['four_hour_trend']:+d} | "
+                    f"日線={higher_tf_context['daily_trend']:+d} | "
+                    f"週線={higher_tf_context['weekly_trend']:+d}"
+                )
 
             # ===== Market Regime =====
             regime = detect_market_regime(df_1h, df_4h)
@@ -8745,6 +8806,8 @@ def run_bot():
                 est_slippage_rate=EST_SLIPPAGE_RATE,
                 est_hold_hours=EST_HOLD_HOURS_FOR_COST,
                 derivatives_flow=derivatives_flow,
+                df_1d=df_1d,
+                df_1w=df_1w,
             )
 
             features = decision["features"]

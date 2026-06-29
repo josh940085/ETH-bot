@@ -74,6 +74,15 @@ def _connect():
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS higher_timeframe_observation (
+            candle_key TEXT PRIMARY KEY,
+            observed_at REAL NOT NULL,
+            context_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS daily_report_log (
             report_date TEXT PRIMARY KEY,
             sent_at REAL NOT NULL
@@ -82,6 +91,29 @@ def _connect():
     )
     connection.commit()
     return connection
+
+
+def record_higher_timeframe_context(context):
+    if not isinstance(context, dict) or not context:
+        return False
+    candle_key = str(context.get("candle_key") or "").strip()
+    if not candle_key:
+        return False
+    with _LOCK, _connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO higher_timeframe_observation
+                (candle_key, observed_at, context_json)
+            VALUES (?, ?, ?)
+            """,
+            (
+                candle_key,
+                time.time(),
+                json.dumps(context, ensure_ascii=False, default=str),
+            ),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
 
 
 def _historical_source_paths():
@@ -300,7 +332,16 @@ def build_learning_context(market, limit=None):
         except (TypeError, ValueError, json.JSONDecodeError):
             past_market = {}
         similarity = 0
-        for key in ("htf", "regime", "breakout", "triangle", "macro", "volume_spike"):
+        for key in (
+            "htf",
+            "daily_trend",
+            "weekly_trend",
+            "regime",
+            "breakout",
+            "triangle",
+            "macro",
+            "volume_spike",
+        ):
             current_value = market.get(key)
             if current_value is not None and str(current_value) == str(past_market.get(key)):
                 similarity += 1
@@ -347,6 +388,9 @@ def learning_stats():
             FROM historical_example
             """
         ).fetchone()
+        higher_tf_observations = connection.execute(
+            "SELECT COUNT(*) AS total FROM higher_timeframe_observation"
+        ).fetchone()
     imported = int(historical["total"] or 0)
     imported_successful = int(historical["successful"] or 0)
     total = int(row["total"] or 0)
@@ -362,6 +406,7 @@ def learning_stats():
         "imported": imported,
         "imported_successful": imported_successful,
         "context_total": total + imported,
+        "higher_tf_observations": int(higher_tf_observations["total"] or 0),
     }
 
 

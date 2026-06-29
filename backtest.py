@@ -154,6 +154,7 @@ def build_frame_map(base_5m):
         "4h": eth.calc_indicators(resample_ohlcv(base_5m, "4h")),
         "12h": eth.calc_indicators(resample_ohlcv(base_5m, "12h")),
         "1d": eth.calc_indicators(resample_ohlcv(base_5m, "1d")),
+        "1w": eth.calc_indicators(resample_ohlcv(base_5m, "7D")),
     }
     return frame_map
 
@@ -712,6 +713,8 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars):
                 event_risk=0,
                 last_signal=last_signal_value,
                 losing_streak=losing_streak,
+                df_1d=frame_now["1d"],
+                df_1w=frame_now["1w"],
             )
 
             eth._update_scaling_market_state(
