@@ -7206,14 +7206,30 @@ def build_trade_signal_snapshot(
                 recent_low_pb = df_15m["low"].tail(10).min()
                 sl = recent_low_pb
                 risk = entry - sl
-                rr = 2.6 if regime.endswith("strong") else 2.0
+                # Backtests show normal trends also need enough extension to cover
+                # false starts and costs; 2.0R was negative across split windows.
+                rr = (
+                    2.6
+                    if regime.endswith("strong")
+                    else max(
+                        2.0,
+                        _safe_float(os.getenv("TRADE_NORMAL_TREND_RR", 2.6), 2.6),
+                    )
+                )
                 tp = entry + risk * rr
             elif score < 0.48:
                 final = "🚀 做空"
                 recent_high_pb = df_15m["high"].tail(10).max()
                 sl = recent_high_pb
                 risk = sl - entry
-                rr = 2.6 if regime.endswith("strong") else 2.0
+                rr = (
+                    2.6
+                    if regime.endswith("strong")
+                    else max(
+                        2.0,
+                        _safe_float(os.getenv("TRADE_NORMAL_TREND_RR", 2.6), 2.6),
+                    )
+                )
                 tp = entry - risk * rr
             elif pullback_long and score >= 0.45:
                 final = "↩️ 反彈做多"
