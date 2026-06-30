@@ -83,6 +83,14 @@ def _connect():
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS auto_analysis_log (
+            period_key TEXT PRIMARY KEY,
+            claimed_at REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS daily_report_log (
             report_date TEXT PRIMARY KEY,
             sent_at REAL NOT NULL
@@ -91,6 +99,31 @@ def _connect():
     )
     connection.commit()
     return connection
+
+
+def claim_auto_analysis(period_key):
+    period_key = str(period_key or "").strip()
+    if not period_key:
+        return False
+    with _LOCK, _connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO auto_analysis_log (period_key, claimed_at)
+            VALUES (?, ?)
+            """,
+            (period_key, time.time()),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
+
+def release_auto_analysis(period_key):
+    with _LOCK, _connect() as connection:
+        connection.execute(
+            "DELETE FROM auto_analysis_log WHERE period_key = ?",
+            (str(period_key or ""),),
+        )
+        connection.commit()
 
 
 def record_higher_timeframe_context(context):
@@ -395,6 +428,9 @@ def learning_stats():
         higher_tf_observations = connection.execute(
             "SELECT COUNT(*) AS total FROM higher_timeframe_observation"
         ).fetchone()
+        auto_analyses = connection.execute(
+            "SELECT COUNT(*) AS total FROM auto_analysis_log"
+        ).fetchone()
     imported = int(historical["total"] or 0)
     imported_successful = int(historical["successful"] or 0)
     total = int(row["total"] or 0)
@@ -411,6 +447,7 @@ def learning_stats():
         "imported_successful": imported_successful,
         "context_total": total + imported,
         "higher_tf_observations": int(higher_tf_observations["total"] or 0),
+        "auto_analyses": int(auto_analyses["total"] or 0),
     }
 
 

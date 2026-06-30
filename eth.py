@@ -45,8 +45,10 @@ from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
 from sklearn.preprocessing import StandardScaler
 from mlx_learning import (
+    EVALUATION_HOURS,
     build_daily_strategy_report,
     build_learning_context as build_mlx_learning_context,
+    claim_auto_analysis,
     daily_report_was_sent,
     evaluate_pending as evaluate_mlx_learning,
     learning_stats as get_mlx_learning_stats,
@@ -54,6 +56,7 @@ from mlx_learning import (
     record_analysis as record_mlx_analysis,
     record_higher_timeframe_context,
     record_strategy_outcome,
+    release_auto_analysis,
 )
 from telegram import (
     REPO_DIR,
@@ -7926,6 +7929,10 @@ if OPENAI_PAID_API_ENABLED and OPENAI_API_KEY:
 else:
     print("🟢 OpenAI 付費 API 已停用，AI 將只使用本地模型與免費 fallback")
 
+
+_MLX_AUTO_ANALYSIS_LOCK = threading.Lock()
+
+
 def ask_ai_analysis(prompt, market_context=None, question=""):
     market_context = market_context if isinstance(market_context, dict) else {}
     learning_context = build_mlx_learning_context(market_context)
@@ -7998,6 +8005,54 @@ def ask_ai_analysis(prompt, market_context=None, question=""):
     if mlx_error:
         return f"AI分析失敗: 本地 MLX agent 無法使用（{mlx_error}）"
     return "AI分析已停用：MLX agent 與 OpenAI 付費 API 均未啟用。"
+
+
+def _start_mlx_auto_analysis(period_key, market_context):
+    if not MLX_AGENT_ENABLED or not _is_truthy(os.getenv("MLX_AUTO_ANALYSIS_ENABLED", "1")):
+        return False
+    if not claim_auto_analysis(period_key):
+        return False
+
+    context = dict(market_context or {})
+
+    def worker():
+        try:
+            with _MLX_AUTO_ANALYSIS_LOCK:
+                prompt = f"""
+你是 ETH 影子交易分析 Agent。根據以下資料預測未來 {EVALUATION_HOURS:.0f} 小時方向，
+只做分析，不下單。
+
+價格: {context.get('price')}
+4H趨勢: {context.get('htf')}
+日線趨勢: {context.get('daily_trend')}，30日變化: {context.get('daily_medium_change_pct')}%
+週線趨勢: {context.get('weekly_trend')}，13週變化: {context.get('weekly_medium_change_pct')}%
+市場狀態: {context.get('regime')}
+突破: {context.get('breakout')}
+宏觀偏向: {context.get('macro')}
+量能放大: {context.get('volume_spike')}
+
+請簡短說明依據，最後必須輸出「結論：做多」、「結論：做空」或「結論：觀望」。
+"""
+                result = ask_ai_analysis(
+                    prompt,
+                    market_context=context,
+                    question=f"auto-shadow:{period_key}",
+                )
+                if str(result).startswith(("AI分析失敗", "AI分析已停用")):
+                    release_auto_analysis(period_key)
+                    print(f"⚠️ MLX 自動影子分析失敗，保留重試: {period_key}")
+                else:
+                    print(f"🧠 MLX 自動影子分析已記錄: {period_key}")
+        except Exception as exc:
+            release_auto_analysis(period_key)
+            print(f"⚠️ MLX 自動影子分析錯誤: {exc}")
+
+    try:
+        threading.Thread(target=worker, daemon=True, name="mlx-auto-analysis").start()
+        return True
+    except Exception:
+        release_auto_analysis(period_key)
+        return False
 
 
 def _build_bot_help_text():
@@ -8206,6 +8261,7 @@ def handle_ai_command(text, context=None):
                 f"既有模型匯入: {stats.get('imported', 0)}\n"
                 f"可用學習案例: {stats.get('context_total', stats['total'])}\n"
                 f"高週期觀察: {stats.get('higher_tf_observations', 0)}\n"
+                f"自動影子分析: {stats.get('auto_analyses', 0)}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
                 f"結果驗證週期: {stats['evaluation_hours']:.0f} 小時"
             )
@@ -8455,6 +8511,29 @@ def run_bot():
                 breakout = 1
             elif price < recent_low:
                 breakout = -1
+
+            completed_1h = df_1h["time"].iloc[-2] if len(df_1h) > 1 else "unknown"
+            auto_market_context = {
+                "price": price,
+                "htf": htf,
+                "daily_trend": higher_tf_context.get("daily_trend"),
+                "daily_medium_change_pct": higher_tf_context.get("daily_medium_change_pct"),
+                "weekly_trend": higher_tf_context.get("weekly_trend"),
+                "weekly_medium_change_pct": higher_tf_context.get("weekly_medium_change_pct"),
+                "regime": regime,
+                "breakout": breakout,
+                "macro": _compute_macro_bias(
+                    sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
+                ),
+                "volume_spike": bool(
+                    df_15m["volume"].iloc[-1]
+                    > df_15m["vol_ma20"].iloc[-1] * 1.5
+                ),
+            }
+            _start_mlx_auto_analysis(
+                f"ETHUSDT:1h:{completed_1h}",
+                auto_market_context,
+            )
 
             _process_sl_followup_reviews(df_1m, price)
             _process_pending_news_evaluations(price)
