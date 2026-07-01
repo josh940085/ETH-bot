@@ -241,11 +241,12 @@ def get_notification_chat_ids():
 	except Exception:
 		pass
 
-	try:
-		if int(str(os.getenv("TELEGRAM_CHAT_ID", "")).strip()) > 0:
-			_append(os.getenv("TELEGRAM_CHAT_ID"))
-	except Exception:
-		pass
+	for env_name in ("TELEGRAM_PRIVATE_CHAT_ID", "TELEGRAM_CHAT_ID"):
+		try:
+			if int(str(os.getenv(env_name, "")).strip()) > 0:
+				_append(os.getenv(env_name))
+		except Exception:
+			pass
 
 	return targets
 

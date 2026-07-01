@@ -256,13 +256,15 @@ def _check_telegram_policy_and_repair():
             "TELEGRAM_MINI_APP_URL must be HTTPS because Telegram WebAppInfo.url requires an HTTPS URL"
         )
 
-    try:
-        env_chat_id = str(int(str(os.getenv("TELEGRAM_CHAT_ID", "")).strip()))
-        if env_chat_id.startswith("-"):
-            raise RuntimeError("TELEGRAM_CHAT_ID must be a private chat id, not a group/channel id")
-    except ValueError:
-        if str(os.getenv("TELEGRAM_CHAT_ID", "") or "").strip():
-            raise RuntimeError("TELEGRAM_CHAT_ID must be a numeric private chat id")
+    for env_name in ("TELEGRAM_PRIVATE_CHAT_ID", "TELEGRAM_CHAT_ID"):
+        raw_chat_id = str(os.getenv(env_name, "") or "").strip()
+        try:
+            env_chat_id = str(int(raw_chat_id))
+            if env_chat_id.startswith("-"):
+                raise RuntimeError(f"{env_name} must be a private chat id, not a group/channel id")
+        except ValueError:
+            if raw_chat_id:
+                raise RuntimeError(f"{env_name} must be a numeric private chat id")
 
     current_commands = _normalize_bot_commands(_telegram_api_request(token, "getMyCommands", "GET"))
     desired_commands = _normalize_bot_commands(TELEGRAM_BOT_COMMANDS)
