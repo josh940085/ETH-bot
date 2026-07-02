@@ -5790,11 +5790,17 @@ if LIVE_RUNTIME_ENABLED:
 # =============================
 def calc_indicators(df):
     df["ma25"] = df["close"].rolling(25).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
 
     ema12 = df["close"].ewm(span=12).mean()
     ema26 = df["close"].ewm(span=26).mean()
     df["macd"] = ema12 - ema26
     df["signal"] = df["macd"].ewm(span=9).mean()
+    delta = df["close"].diff()
+    avg_gain = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False).mean()
+    avg_loss = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False).mean()
+    relative_strength = avg_gain / avg_loss.replace(0, np.nan)
+    df["rsi14"] = (100 - 100 / (1 + relative_strength)).fillna(50.0)
 
     # ===== Volume v2 =====
     df["vol_ma20"] = df["volume"].rolling(20).mean()
@@ -7256,6 +7262,9 @@ def build_trade_signal_snapshot(
     risk_rate = 0.0
     reward_rate = 0.0
     net_edge_rate_est = 0.0
+    rsi_15m = max(0.0, min(100.0, _safe_float(df_15m["rsi14"].iloc[-1], 50.0)))
+    ema50_15m = max(1e-9, _safe_float(df_15m["ema50"].iloc[-1], price))
+    ema50_deviation = (price - ema50_15m) / ema50_15m
 
     pullback_long = bool(regime in ["bear_trend", "bear_trend_strong"] and mid_trend == 1 and (volume_spike or breakout == 1))
     pullback_short = bool(regime in ["bull_trend", "bull_trend_strong"] and mid_trend == -1 and (volume_spike or breakout == -1))
@@ -7444,7 +7453,6 @@ def build_trade_signal_snapshot(
                     conflict_count += 1
                 if conflict_count >= 2 and (score < conflict_long_min_score or net_edge_rate_est < conflict_min_edge_rate):
                     final = "觀望（多單逆向共振不足）"
-
     return {
         "features": features,
         "score": score,
@@ -7484,6 +7492,8 @@ def build_trade_signal_snapshot(
         "risk_rate": risk_rate,
         "reward_rate": reward_rate,
         "net_edge_rate_est": net_edge_rate_est,
+        "rsi_15m": rsi_15m,
+        "ema50_deviation_15m": ema50_deviation,
         "open_interest_change": open_interest_change,
         "mark_premium_rate": mark_premium_rate,
         "funding_rate_live": funding_rate_live,
@@ -8064,6 +8074,7 @@ def _start_mlx_auto_analysis(period_key, market_context):
 即使優勢很小也必須在做多與做空之間選出機率較高的一方。
 
 價格: {context.get('price')}
+15m RSI14: {context.get('rsi_15m')}，EMA50乖離: {context.get('ema50_deviation_15m')}%
 1H K線: {context.get('one_hour_pattern')}，動能方向: {context.get('mid_trend')}
 4H趨勢: {context.get('htf')}
 4H K線: {context.get('four_hour_pattern')}
@@ -8333,6 +8344,7 @@ def handle_ai_command(text, context=None):
                 f"既有模型匯入: {stats.get('imported', 0)}\n"
                 f"可用學習案例: {stats.get('context_total', stats['total'])}\n"
                 f"高週期觀察: {stats.get('higher_tf_observations', 0)}\n"
+                f"歷史變盤案例: {stats.get('turning_points', 0)}\n"
                 f"自動影子分析: {stats.get('auto_analyses', 0)}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
                 f"結果驗證週期: {stats['evaluation_hours']:.0f} 小時"
@@ -8603,6 +8615,7 @@ def run_bot():
             )
             auto_market_context = {
                 "price": price,
+                "analysis_timeframe": "1h",
                 "htf": htf,
                 "mid_trend": mid_trend,
                 "one_hour_pattern": _detect_candlestick_pattern(df_1h)[0],
@@ -8621,6 +8634,23 @@ def run_bot():
                 "volume_spike": bool(
                     df_15m["volume"].iloc[-1]
                     > df_15m["vol_ma20"].iloc[-1] * 1.5
+                ),
+                "rsi_15m": round(_safe_float(df_15m["rsi14"].iloc[-1], 50.0), 2),
+                "ema50_deviation_15m": round(
+                    (
+                        price
+                        / max(_safe_float(df_15m["ema50"].iloc[-1], price), 1e-9)
+                        - 1
+                    )
+                    * 100,
+                    3,
+                ),
+                "rsi_bucket": (
+                    "overbought"
+                    if _safe_float(df_15m["rsi14"].iloc[-1], 50.0) >= 70
+                    else "oversold"
+                    if _safe_float(df_15m["rsi14"].iloc[-1], 50.0) <= 30
+                    else "neutral"
                 ),
                 "atr_15m": round(atr_15m_avg, 4),
                 "range_support_15m": range_support_15m,

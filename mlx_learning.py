@@ -24,6 +24,7 @@ HISTORY_IMPORT_INTERVAL_SEC = max(
 _LOCK = threading.Lock()
 _LAST_EVALUATION_TS = 0.0
 _LAST_HISTORY_IMPORT_TS = 0.0
+_LAST_TURNING_POINTS_MTIME = 0.0
 
 
 def _connect():
@@ -158,6 +159,87 @@ def _historical_source_paths():
         ("live_model", Path(ai_data_path("ai_data.csv"))),
         ("backtest_model", Path(ai_data_path("backtest_ai_data.csv"))),
     )
+
+
+def import_turning_point_history(force=False):
+    global _LAST_TURNING_POINTS_MTIME
+    path = DB_PATH.parent.parent / "data" / "ethusdt_turning_points" / "all_turning_points.csv"
+    if not path.exists():
+        return 0
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return 0
+    if not force and mtime <= _LAST_TURNING_POINTS_MTIME:
+        return 0
+
+    prepared = []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            rows = csv.DictReader(handle)
+            for row in rows:
+                timeframe = str(row.get("timeframe") or "").strip()
+                timestamp = str(row.get("time_utc") or "").strip()
+                pivot_type = str(row.get("type") or "").strip().lower()
+                if not timeframe or not timestamp or pivot_type not in {"high", "low"}:
+                    continue
+                rsi = _number(row.get("rsi"), 50.0)
+                volume_z = _number(row.get("volume_z"), 0.0)
+                direction = "short" if pivot_type == "high" else "long"
+                market = {
+                    "analysis_timeframe": timeframe,
+                    "timeframe": timeframe,
+                    "timestamp": timestamp,
+                    "price": _number(row.get("price")),
+                    "rsi": rsi,
+                    "rsi_bucket": "overbought" if rsi >= 70 else "oversold" if rsi <= 30 else "neutral",
+                    "volume_spike": volume_z >= 2.0,
+                    "volume_z": volume_z,
+                    "pivot_type": pivot_type,
+                    "swing_to_next_pct": _number(row.get("swing_to_next_pct")),
+                    "technical_reasons": str(row.get("technical_reasons") or ""),
+                    "event_reason": str(row.get("event_reason") or ""),
+                }
+                canonical = json.dumps(market, ensure_ascii=False, sort_keys=True)
+                source_key = hashlib.sha256(
+                    f"turning_point:{timeframe}:{timestamp}:{pivot_type}".encode("utf-8")
+                ).hexdigest()
+                response = (
+                    f"{timeframe} 已驗證{('高點反轉' if pivot_type == 'high' else '低點反轉')}；"
+                    f"後續方向應為{('做空' if direction == 'short' else '做多')}；"
+                    f"因素：{market['technical_reasons']}；"
+                    f"至下一轉折幅度 {market['swing_to_next_pct']:+.2f}%。"
+                )
+                prepared.append(
+                    (
+                        "turning_point",
+                        source_key,
+                        time.time(),
+                        direction,
+                        response,
+                        canonical,
+                        1,
+                    )
+                )
+    except (OSError, csv.Error):
+        return 0
+
+    imported = 0
+    if prepared:
+        with _LOCK, _connect() as connection:
+            before = connection.total_changes
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO historical_example
+                    (source, source_key, imported_at, direction, response, market_json, success)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                prepared,
+            )
+            imported = connection.total_changes - before
+            connection.commit()
+    _LAST_TURNING_POINTS_MTIME = mtime
+    return imported
 
 
 def _load_backtest_directions():
@@ -342,6 +424,7 @@ def evaluate_pending(current_price, now_ts=None):
 def build_learning_context(market, limit=None):
     market = market if isinstance(market, dict) else {}
     import_existing_model_history()
+    import_turning_point_history()
     limit = LEARNING_CONTEXT_LIMIT if limit is None else max(0, int(limit))
     with _LOCK, _connect() as connection:
         analysis_rows = connection.execute(
@@ -353,14 +436,36 @@ def build_learning_context(market, limit=None):
             LIMIT 100
             """
         ).fetchall()
-        historical_rows = connection.execute(
+        historical_rows = list(connection.execute(
             """
             SELECT direction, response, market_json, NULL AS return_pct, success, source
             FROM historical_example
+            WHERE source <> 'turning_point'
             ORDER BY id DESC
             LIMIT 500
             """
-        ).fetchall()
+        ).fetchall())
+        for timeframe, row_limit in (
+            ("15m", 150),
+            ("1h", 150),
+            ("4h", 150),
+            ("1d", 100),
+            ("1w", 50),
+            ("1M", 20),
+        ):
+            historical_rows.extend(
+                connection.execute(
+                    """
+                    SELECT direction, response, market_json, NULL AS return_pct, success, source
+                    FROM historical_example
+                    WHERE source = 'turning_point'
+                      AND json_extract(market_json, '$.timeframe') = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (timeframe, row_limit),
+                ).fetchall()
+            )
 
     scored = []
     for row in [*analysis_rows, *historical_rows]:
@@ -378,6 +483,8 @@ def build_learning_context(market, limit=None):
             "triangle",
             "macro",
             "volume_spike",
+            "analysis_timeframe",
+            "rsi_bucket",
         ):
             current_value = market.get(key)
             if current_value is not None and str(current_value) == str(past_market.get(key)):
@@ -409,6 +516,7 @@ def build_learning_context(market, limit=None):
 
 def learning_stats():
     import_existing_model_history()
+    import_turning_point_history()
     with _LOCK, _connect() as connection:
         row = connection.execute(
             """
@@ -424,6 +532,9 @@ def learning_stats():
             SELECT COUNT(*) AS total, SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successful
             FROM historical_example
             """
+        ).fetchone()
+        turning_points = connection.execute(
+            "SELECT COUNT(*) AS total FROM historical_example WHERE source = 'turning_point'"
         ).fetchone()
         higher_tf_observations = connection.execute(
             "SELECT COUNT(*) AS total FROM higher_timeframe_observation"
@@ -446,6 +557,7 @@ def learning_stats():
         "imported": imported,
         "imported_successful": imported_successful,
         "context_total": total + imported,
+        "turning_points": int(turning_points["total"] or 0),
         "higher_tf_observations": int(higher_tf_observations["total"] or 0),
         "auto_analyses": int(auto_analyses["total"] or 0),
     }
