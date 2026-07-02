@@ -7183,6 +7183,9 @@ def build_trade_signal_snapshot(
         score += max(-0.06, min(0.06, derivatives_pressure * 0.045))
         score = max(0.05, min(score, 0.95))
 
+    auxiliary_score = score
+    primary_indicator = "30m_macd"
+
     if _is_truthy(os.getenv("TRADE_USE_CONFLUENCE_PROB_FLOOR", "1")):
         long_confluence = 0.0
         short_confluence = 0.0
@@ -7453,9 +7456,19 @@ def build_trade_signal_snapshot(
                     conflict_count += 1
                 if conflict_count >= 2 and (score < conflict_long_min_score or net_edge_rate_est < conflict_min_edge_rate):
                     final = "觀望（多單逆向共振不足）"
+        if (
+            not final.startswith("觀望")
+            and _is_truthy(os.getenv("TRADE_USE_30M_MACD_PRIMARY", "1"))
+        ):
+            if "做多" in final and mid_trend != 1:
+                final = "觀望（主指標30m MACD未支持做多）"
+            elif "做空" in final and mid_trend != -1:
+                final = "觀望（主指標30m MACD未支持做空）"
     return {
         "features": features,
         "score": score,
+        "auxiliary_score": auxiliary_score,
+        "primary_indicator": primary_indicator,
         "final": final,
         "sl": sl,
         "tp": tp,
