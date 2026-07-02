@@ -25,6 +25,7 @@ _LOCK = threading.Lock()
 _LAST_EVALUATION_TS = 0.0
 _LAST_HISTORY_IMPORT_TS = 0.0
 _LAST_TURNING_POINTS_MTIME = 0.0
+_LAST_CONTRAST_EXAMPLES_MTIME = 0.0
 
 
 def _connect():
@@ -242,6 +243,94 @@ def import_turning_point_history(force=False):
     return imported
 
 
+def import_non_turning_contrast_history(force=False):
+    global _LAST_CONTRAST_EXAMPLES_MTIME
+    path = (
+        DB_PATH.parent.parent
+        / "data"
+        / "ethusdt_turning_points"
+        / "non_turning_contrast_examples.csv"
+    )
+    if not path.exists():
+        return 0
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return 0
+    if not force and mtime <= _LAST_CONTRAST_EXAMPLES_MTIME:
+        return 0
+
+    prepared = []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for row in csv.DictReader(handle):
+                timeframe = str(row.get("timeframe") or "").strip()
+                timestamp = str(row.get("time_utc") or "").strip()
+                direction = str(row.get("continuation_direction") or "").strip().lower()
+                if not timeframe or not timestamp or direction not in {"long", "short"}:
+                    continue
+                market = {
+                    "analysis_timeframe": timeframe,
+                    "timeframe": timeframe,
+                    "timestamp": timestamp,
+                    "price": _number(row.get("price")),
+                    "rsi": _number(row.get("rsi"), 50.0),
+                    "rsi_bucket": str(row.get("rsi_bucket") or "neutral"),
+                    "volume_spike": str(row.get("volume_spike") or "").lower()
+                    in {"1", "true", "yes"},
+                    "volume_z": _number(row.get("volume_z")),
+                    "ema50_deviation_pct": _number(row.get("ema50_deviation_pct")),
+                    "past_return_pct": _number(row.get("past_return_pct")),
+                    "future_return_pct": _number(row.get("future_return_pct")),
+                    "outcome": "non_reversal_continuation",
+                }
+                source_key = hashlib.sha256(
+                    f"non_turning:{timeframe}:{timestamp}".encode("utf-8")
+                ).hexdigest()
+                response = (
+                    f"{timeframe} 已驗證非變盤對照；RSI={market['rsi']:.1f}"
+                    f"（{market['rsi_bucket']}），EMA50乖離"
+                    f"{market['ema50_deviation_pct']:+.2f}%，但沒有反轉；"
+                    f"前段{market['past_return_pct']:+.2f}%，後續"
+                    f"{market['future_return_pct']:+.2f}%，方向延續為"
+                    f"{('做多' if direction == 'long' else '做空')}。"
+                    "不可只因過熱或超賣就逆勢。"
+                )
+                prepared.append(
+                    (
+                        "non_turning_point",
+                        source_key,
+                        time.time(),
+                        direction,
+                        response,
+                        json.dumps(market, ensure_ascii=False, sort_keys=True),
+                        1,
+                    )
+                )
+    except (OSError, csv.Error):
+        return 0
+
+    imported = 0
+    if prepared:
+        with _LOCK, _connect() as connection:
+            before = connection.total_changes
+            connection.execute(
+                "DELETE FROM historical_example WHERE source = 'non_turning_point'"
+            )
+            connection.executemany(
+                """
+                INSERT OR IGNORE INTO historical_example
+                    (source, source_key, imported_at, direction, response, market_json, success)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                prepared,
+            )
+            imported = connection.total_changes - before
+            connection.commit()
+    _LAST_CONTRAST_EXAMPLES_MTIME = mtime
+    return imported
+
+
 def _load_backtest_directions():
     path = DB_PATH.parent.parent / "data" / "backtest_latest_trades.csv"
     if not path.exists():
@@ -425,6 +514,7 @@ def build_learning_context(market, limit=None):
     market = market if isinstance(market, dict) else {}
     import_existing_model_history()
     import_turning_point_history()
+    import_non_turning_contrast_history()
     limit = LEARNING_CONTEXT_LIMIT if limit is None else max(0, int(limit))
     with _LOCK, _connect() as connection:
         analysis_rows = connection.execute(
@@ -440,7 +530,7 @@ def build_learning_context(market, limit=None):
             """
             SELECT direction, response, market_json, NULL AS return_pct, success, source
             FROM historical_example
-            WHERE source <> 'turning_point'
+            WHERE source NOT IN ('turning_point', 'non_turning_point')
             ORDER BY id DESC
             LIMIT 500
             """
@@ -459,6 +549,19 @@ def build_learning_context(market, limit=None):
                     SELECT direction, response, market_json, NULL AS return_pct, success, source
                     FROM historical_example
                     WHERE source = 'turning_point'
+                      AND json_extract(market_json, '$.timeframe') = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (timeframe, row_limit),
+                ).fetchall()
+            )
+            historical_rows.extend(
+                connection.execute(
+                    """
+                    SELECT direction, response, market_json, NULL AS return_pct, success, source
+                    FROM historical_example
+                    WHERE source = 'non_turning_point'
                       AND json_extract(market_json, '$.timeframe') = ?
                     ORDER BY id DESC
                     LIMIT ?
@@ -492,8 +595,28 @@ def build_learning_context(market, limit=None):
         scored.append((similarity, int(row["success"]), row))
 
     scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    turning_scored = [item for item in scored if item[2]["source"] == "turning_point"]
+    contrast_scored = [item for item in scored if item[2]["source"] == "non_turning_point"]
+    other_scored = [
+        item
+        for item in scored
+        if item[2]["source"] not in {"turning_point", "non_turning_point"}
+    ]
+    turning_limit = min(len(turning_scored), max(1, limit // 3)) if limit else 0
+    contrast_limit = min(len(contrast_scored), max(1, limit // 3)) if limit else 0
+    selected = (
+        turning_scored[:turning_limit]
+        + contrast_scored[:contrast_limit]
+        + other_scored[: max(0, limit - turning_limit - contrast_limit)]
+    )
+    if len(selected) < limit:
+        selected_ids = {id(item[2]) for item in selected}
+        selected.extend(
+            item for item in scored if id(item[2]) not in selected_ids
+        )
+        selected = selected[:limit]
     examples = []
-    for _, _, row in scored[:limit]:
+    for _, _, row in selected:
         result = "成功" if row["success"] else "失敗"
         response = re.sub(r"\s+", " ", str(row["response"]))[:500]
         if row["return_pct"] is None:
@@ -517,6 +640,7 @@ def build_learning_context(market, limit=None):
 def learning_stats():
     import_existing_model_history()
     import_turning_point_history()
+    import_non_turning_contrast_history()
     with _LOCK, _connect() as connection:
         row = connection.execute(
             """
@@ -535,6 +659,9 @@ def learning_stats():
         ).fetchone()
         turning_points = connection.execute(
             "SELECT COUNT(*) AS total FROM historical_example WHERE source = 'turning_point'"
+        ).fetchone()
+        contrast_examples = connection.execute(
+            "SELECT COUNT(*) AS total FROM historical_example WHERE source = 'non_turning_point'"
         ).fetchone()
         higher_tf_observations = connection.execute(
             "SELECT COUNT(*) AS total FROM higher_timeframe_observation"
@@ -558,6 +685,7 @@ def learning_stats():
         "imported_successful": imported_successful,
         "context_total": total + imported,
         "turning_points": int(turning_points["total"] or 0),
+        "contrast_examples": int(contrast_examples["total"] or 0),
         "higher_tf_observations": int(higher_tf_observations["total"] or 0),
         "auto_analyses": int(auto_analyses["total"] or 0),
     }

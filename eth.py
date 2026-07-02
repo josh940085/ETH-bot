@@ -8345,6 +8345,7 @@ def handle_ai_command(text, context=None):
                 f"可用學習案例: {stats.get('context_total', stats['total'])}\n"
                 f"高週期觀察: {stats.get('higher_tf_observations', 0)}\n"
                 f"歷史變盤案例: {stats.get('turning_points', 0)}\n"
+                f"非變盤對照: {stats.get('contrast_examples', 0)}\n"
                 f"自動影子分析: {stats.get('auto_analyses', 0)}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
                 f"結果驗證週期: {stats['evaluation_hours']:.0f} 小時"
