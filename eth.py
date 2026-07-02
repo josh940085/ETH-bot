@@ -6037,6 +6037,46 @@ def _calc_support_resistance_levels(df, lookback=60):
     return support, resistance
 
 
+def _build_range_trade_reference(
+    support_15m,
+    resistance_15m,
+    support_1h,
+    resistance_1h,
+    atr,
+):
+    supports = sorted(
+        value
+        for value in (_safe_float(support_15m, 0.0), _safe_float(support_1h, 0.0))
+        if value > 0
+    )
+    resistances = sorted(
+        value
+        for value in (
+            _safe_float(resistance_15m, 0.0),
+            _safe_float(resistance_1h, 0.0),
+        )
+        if value > 0
+    )
+    if not supports or not resistances or supports[-1] >= resistances[0]:
+        return {}
+    support_low, support_high = supports[0], supports[-1]
+    resistance_low, resistance_high = resistances[0], resistances[-1]
+    buffer = max(_safe_float(atr, 0.0) * 0.5, resistance_high * 0.0005)
+    target_buffer = buffer * 0.5
+    return {
+        "support_low": round(support_low, 2),
+        "support_high": round(support_high, 2),
+        "resistance_low": round(resistance_low, 2),
+        "resistance_high": round(resistance_high, 2),
+        "long_entry": round(support_high, 2),
+        "long_tp": round(resistance_low - target_buffer, 2),
+        "long_sl": round(support_low - buffer, 2),
+        "short_entry": round(resistance_low, 2),
+        "short_tp": round(support_high + target_buffer, 2),
+        "short_sl": round(resistance_high + buffer, 2),
+    }
+
+
 def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
     """多週期支撐壓力 + K線型態分析，可直接餵入已準備好的 K 線資料。"""
     tf_cfg = tf_cfg or [
@@ -7933,9 +7973,9 @@ else:
 _MLX_AUTO_ANALYSIS_LOCK = threading.Lock()
 
 
-def ask_ai_analysis(prompt, market_context=None, question=""):
+def ask_ai_analysis(prompt, market_context=None, question="", learning_limit=None):
     market_context = market_context if isinstance(market_context, dict) else {}
-    learning_context = build_mlx_learning_context(market_context)
+    learning_context = build_mlx_learning_context(market_context, limit=learning_limit)
     learned_prompt = prompt
     if learning_context:
         learned_prompt = f"{prompt}\n\n{learning_context}"
@@ -8024,15 +8064,41 @@ def _start_mlx_auto_analysis(period_key, market_context):
 即使優勢很小也必須在做多與做空之間選出機率較高的一方。
 
 價格: {context.get('price')}
+1H K線: {context.get('one_hour_pattern')}，動能方向: {context.get('mid_trend')}
 4H趨勢: {context.get('htf')}
-日線趨勢: {context.get('daily_trend')}，30日變化: {context.get('daily_medium_change_pct')}%
-週線趨勢: {context.get('weekly_trend')}，13週變化: {context.get('weekly_medium_change_pct')}%
+4H K線: {context.get('four_hour_pattern')}
+日線趨勢: {context.get('daily_trend')}，K線: {context.get('daily_pattern')}，30日變化: {context.get('daily_medium_change_pct')}%
+週線趨勢: {context.get('weekly_trend')}，K線: {context.get('weekly_pattern')}，13週變化: {context.get('weekly_medium_change_pct')}%
 市場狀態: {context.get('regime')}
 突破: {context.get('breakout')}
 宏觀偏向: {context.get('macro')}
 量能放大: {context.get('volume_spike')}
+15m ATR參考: {context.get('atr_15m')}
+支撐候選（只能用來組支撐區）: 15m={context.get('range_support_15m')}；1H={context.get('range_support_1h')}
+壓力候選（只能用來組壓力區）: 15m={context.get('range_resistance_15m')}；1H={context.get('range_resistance_1h')}
+多週期支撐壓力:
+{context.get('sr_lines')}
+策略計算的合法震盪參考方案（價位必須照抄）:
+{context.get('range_trade_reference')}
 
-請簡短說明依據，並嚴格用以下格式結尾：
+學習目標：
+1. 分別說明1H、4H、日線、週線K線看到哪些因素支持做多或做空。
+2. 從多週期價位找出目前有效的支撐區與壓力區，不可只給單一模糊價位。
+3. 若市場為震盪，做多應靠近支撐、做空應靠近壓力；SL放在區間外並預留ATR緩衝，
+   TP放在對側區間之前。必須給出具體多空兩套TP/SL與區間失效條件。
+4. 支撐區只能由支撐候選組成，壓力區只能由壓力候選組成，禁止交叉混用。
+5. 價位必須滿足：震盪做多 SL < 進場 < TP；震盪做空 TP < 進場 < SL。
+   多單SL必須低於支撐區下緣；空單SL必須高於壓力區上緣。
+6. 震盪支撐、壓力、進場、TP、SL必須逐字使用「策略計算的合法震盪參考方案」，
+   不可自行交換或另算價位。
+
+請嚴格用以下格式輸出：
+時段判讀：1H=...；4H=...；日線=...；週線=...
+有效支撐區：價格-價格
+有效壓力區：價格-價格
+震盪做多：進場...；TP...；SL...
+震盪做空：進場...；TP...；SL...
+區間失效條件：...
 多方機率：整數%
 空方機率：整數%
 結論：做多 或 結論：做空
@@ -8042,6 +8108,7 @@ def _start_mlx_auto_analysis(period_key, market_context):
                     prompt,
                     market_context=context,
                     question=f"auto-shadow:{period_key}",
+                    learning_limit=4,
                 )
                 if str(result).startswith(("AI分析失敗", "AI分析已停用")):
                     release_auto_analysis(period_key)
@@ -8518,9 +8585,30 @@ def run_bot():
                 breakout = -1
 
             completed_1h = df_1h["time"].iloc[-2] if len(df_1h) > 1 else "unknown"
+            range_support_15m, range_resistance_15m = _calc_support_resistance_levels(
+                df_15m, lookback=60
+            )
+            range_support_1h, range_resistance_1h = _calc_support_resistance_levels(
+                df_1h, lookback=60
+            )
+            atr_15m_avg = float(
+                (df_15m["high"] - df_15m["low"]).tail(14).mean()
+            )
+            range_trade_reference = _build_range_trade_reference(
+                range_support_15m,
+                range_resistance_15m,
+                range_support_1h,
+                range_resistance_1h,
+                atr_15m_avg,
+            )
             auto_market_context = {
                 "price": price,
                 "htf": htf,
+                "mid_trend": mid_trend,
+                "one_hour_pattern": _detect_candlestick_pattern(df_1h)[0],
+                "four_hour_pattern": _detect_candlestick_pattern(df_4h)[0],
+                "daily_pattern": _detect_candlestick_pattern(df_1d)[0],
+                "weekly_pattern": _detect_candlestick_pattern(df_1w)[0],
                 "daily_trend": higher_tf_context.get("daily_trend"),
                 "daily_medium_change_pct": higher_tf_context.get("daily_medium_change_pct"),
                 "weekly_trend": higher_tf_context.get("weekly_trend"),
@@ -8534,6 +8622,14 @@ def run_bot():
                     df_15m["volume"].iloc[-1]
                     > df_15m["vol_ma20"].iloc[-1] * 1.5
                 ),
+                "atr_15m": round(atr_15m_avg, 4),
+                "range_support_15m": range_support_15m,
+                "range_resistance_15m": range_resistance_15m,
+                "range_support_1h": range_support_1h,
+                "range_resistance_1h": range_resistance_1h,
+                "range_trade_reference": range_trade_reference,
+                "sr_bias": _safe_float(sr_analysis.get("bias"), 0.0),
+                "sr_lines": "\n".join(sr_analysis.get("lines") or []),
             }
             _start_mlx_auto_analysis(
                 f"ETHUSDT:1h:{completed_1h}",
