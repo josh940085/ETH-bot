@@ -8019,8 +8019,9 @@ def _start_mlx_auto_analysis(period_key, market_context):
         try:
             with _MLX_AUTO_ANALYSIS_LOCK:
                 prompt = f"""
-你是 ETH 影子交易分析 Agent。根據以下資料預測未來 {EVALUATION_HOURS:.0f} 小時方向，
-只做分析，不下單。
+你是 ETH 影子交易分析 Agent。根據以下資料預測未來 {EVALUATION_HOURS:.0f} 小時方向。
+這是無資金風險的研究分析，不會下單；禁止用「觀望」逃避方向判斷，
+即使優勢很小也必須在做多與做空之間選出機率較高的一方。
 
 價格: {context.get('price')}
 4H趨勢: {context.get('htf')}
@@ -8031,7 +8032,11 @@ def _start_mlx_auto_analysis(period_key, market_context):
 宏觀偏向: {context.get('macro')}
 量能放大: {context.get('volume_spike')}
 
-請簡短說明依據，最後必須輸出「結論：做多」、「結論：做空」或「結論：觀望」。
+請簡短說明依據，並嚴格用以下格式結尾：
+多方機率：整數%
+空方機率：整數%
+結論：做多 或 結論：做空
+多空機率合計必須為 100%，不可輸出觀望。
 """
                 result = ask_ai_analysis(
                     prompt,
