@@ -8083,8 +8083,10 @@ def _start_mlx_auto_analysis(period_key, market_context):
             with _MLX_AUTO_ANALYSIS_LOCK:
                 prompt = f"""
 你是 ETH 影子交易分析 Agent。根據以下資料預測未來 {EVALUATION_HOURS:.0f} 小時方向。
-這是無資金風險的研究分析，不會下單；禁止用「觀望」逃避方向判斷，
-即使優勢很小也必須在做多與做空之間選出機率較高的一方。
+這是無資金風險的研究分析，絕對不會送出真實委託。
+影子開單數量不設上限，可同時建立多筆做多或做空預測，每筆都視為以目前價格建立、
+並在 {EVALUATION_HOURS:.0f} 小時後獨立驗證的影子開單。至少建立一筆；只有存在不同、
+可說明的交易依據時才增加筆數，不可為湊數而重複相同內容。
 
 價格: {context.get('price')}
 15m RSI14: {context.get('rsi_15m')}，EMA50乖離: {context.get('ema50_deviation_15m')}%
@@ -8125,8 +8127,9 @@ def _start_mlx_auto_analysis(period_key, market_context):
 區間失效條件：...
 多方機率：整數%
 空方機率：整數%
-結論：做多 或 結論：做空
-多空機率合計必須為 100%，不可輸出觀望。
+影子開單1：做多或做空；依據=...
+影子開單2：做多或做空；依據=...（依需要繼續列出，筆數不限）
+多空機率合計必須為 100%。不得輸出觀望，不得聲稱已送出真實委託。
 """
                 result = ask_ai_analysis(
                     prompt,

@@ -446,30 +446,58 @@ def _extract_direction(response):
     return "neutral"
 
 
+def _extract_shadow_directions(response):
+    return [
+        {"做多": "long", "做空": "short"}[match]
+        for match in re.findall(
+            r"影子(?:開單|訂單)\s*\d*\s*[：:]\s*(做多|做空)",
+            str(response or ""),
+            flags=re.IGNORECASE,
+        )
+    ]
+
+
 def record_analysis(question, response, market):
     market = market if isinstance(market, dict) else {}
     price = _number(market.get("price"))
     if price <= 0 or not response:
         return None
-    direction = _extract_direction(response)
+    clean_question = str(question or "")[:2000]
+    clean_response = str(response)[:8000]
+    directions = (
+        _extract_shadow_directions(clean_response)
+        if clean_question.startswith("auto-shadow:")
+        else []
+    )
+    if not directions:
+        directions = [_extract_direction(clean_response)]
     with _LOCK, _connect() as connection:
-        cursor = connection.execute(
+        created_at = time.time()
+        market_json = json.dumps(market, ensure_ascii=False, default=str)
+        cursor = connection.executemany(
             """
             INSERT INTO analysis_episode
                 (created_at, entry_price, direction, question, response, market_json)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (
-                time.time(),
-                price,
-                direction,
-                str(question or "")[:2000],
-                str(response)[:8000],
-                json.dumps(market, ensure_ascii=False, default=str),
-            ),
+            [
+                (
+                    created_at,
+                    price,
+                    direction,
+                    (
+                        f"{clean_question}:order:{index}"
+                        if len(directions) > 1
+                        else clean_question
+                    ),
+                    clean_response,
+                    market_json,
+                )
+                for index, direction in enumerate(directions, start=1)
+            ],
         )
         connection.commit()
-        return cursor.lastrowid
+        return cursor.rowcount
 
 
 def evaluate_pending(current_price, now_ts=None):
