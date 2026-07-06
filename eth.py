@@ -8613,7 +8613,7 @@ def run_bot():
             elif price < recent_low:
                 breakout = -1
 
-            completed_1h = df_1h["time"].iloc[-2] if len(df_1h) > 1 else "unknown"
+            completed_15m = df_15m["time"].iloc[-2] if len(df_15m) > 1 else "unknown"
             range_support_15m, range_resistance_15m = _calc_support_resistance_levels(
                 df_15m, lookback=60
             )
@@ -8633,6 +8633,7 @@ def run_bot():
             auto_market_context = {
                 "price": price,
                 "analysis_timeframe": "1h",
+                "sampling_timeframe": "15m",
                 "htf": htf,
                 "mid_trend": mid_trend,
                 "one_hour_pattern": _detect_candlestick_pattern(df_1h)[0],
@@ -8679,7 +8680,7 @@ def run_bot():
                 "sr_lines": "\n".join(sr_analysis.get("lines") or []),
             }
             _start_mlx_auto_analysis(
-                f"ETHUSDT:1h:{completed_1h}",
+                f"ETHUSDT:15m:{completed_15m}",
                 auto_market_context,
             )
 
