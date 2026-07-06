@@ -8082,11 +8082,12 @@ def _start_mlx_auto_analysis(period_key, market_context):
         try:
             with _MLX_AUTO_ANALYSIS_LOCK:
                 prompt = f"""
-你是 ETH 影子交易分析 Agent。根據以下資料預測未來 {EVALUATION_HOURS:.0f} 小時方向。
+你是 ETH 影子交易分析 Agent。根據以下資料建立影子交易預測。
 這是無資金風險的研究分析，絕對不會送出真實委託。
 影子開單數量不設上限，可同時建立多筆做多或做空預測，每筆都視為以目前價格建立、
-並在 {EVALUATION_HOURS:.0f} 小時後獨立驗證的影子開單。至少建立一筆；只有存在不同、
-可說明的交易依據時才增加筆數，不可為湊數而重複相同內容。
+並持續追蹤到 TP 或 SL 其中一個先到。TP 先到才算成功，SL 先到算失敗，
+不再以固定一小時後的漲跌判定。至少建立一筆；只有存在不同、可說明的交易依據時
+才增加筆數，不可為湊數而重複相同內容。
 
 價格: {context.get('price')}
 15m RSI14: {context.get('rsi_15m')}，EMA50乖離: {context.get('ema50_deviation_15m')}%
@@ -8127,9 +8128,10 @@ def _start_mlx_auto_analysis(period_key, market_context):
 區間失效條件：...
 多方機率：整數%
 空方機率：整數%
-影子開單1：做多或做空；依據=...
-影子開單2：做多或做空；依據=...（依需要繼續列出，筆數不限）
+影子開單1：做多或做空；進場={context.get('price')}；TP=數字；SL=數字；依據=...
+影子開單2：做多或做空；進場={context.get('price')}；TP=數字；SL=數字；依據=...（依需要繼續列出，筆數不限）
 多空機率合計必須為 100%。不得輸出觀望，不得聲稱已送出真實委託。
+每筆做多必須 SL < 進場 < TP；每筆做空必須 TP < 進場 < SL。
 """
                 result = ask_ai_analysis(
                     prompt,
@@ -8364,7 +8366,8 @@ def handle_ai_command(text, context=None):
                 f"非變盤對照: {stats.get('contrast_examples', 0)}\n"
                 f"自動影子分析: {stats.get('auto_analyses', 0)}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
-                f"結果驗證週期: {stats['evaluation_hours']:.0f} 小時"
+                "新影子單驗證: TP先到才成功，SL先到即失敗\n"
+                f"舊案例驗證週期: {stats['evaluation_hours']:.0f} 小時"
             )
 
         # 注入你系統數據（核心升級）

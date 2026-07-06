@@ -45,10 +45,20 @@ def _connect():
             response TEXT NOT NULL,
             market_json TEXT NOT NULL,
             return_pct REAL,
-            success INTEGER
+            success INTEGER,
+            tp_price REAL,
+            sl_price REAL
         )
         """
     )
+    existing_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(analysis_episode)")
+    }
+    for column in ("tp_price", "sl_price"):
+        if column not in existing_columns:
+            connection.execute(
+                f"ALTER TABLE analysis_episode ADD COLUMN {column} REAL"
+            )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS strategy_outcome (
@@ -446,15 +456,32 @@ def _extract_direction(response):
     return "neutral"
 
 
-def _extract_shadow_directions(response):
-    return [
-        {"做多": "long", "做空": "short"}[match]
-        for match in re.findall(
-            r"影子(?:開單|訂單)\s*\d*\s*[：:]\s*(做多|做空)",
-            str(response or ""),
-            flags=re.IGNORECASE,
+def _extract_shadow_orders(response, entry_price):
+    orders = []
+    pattern = re.compile(
+        r"影子(?:開單|訂單)\s*\d*\s*[：:]\s*(做多|做空)"
+        r"[^\n]*?TP\s*[=：:]\s*([0-9]+(?:\.[0-9]+)?)"
+        r"[^\n]*?SL\s*[=：:]\s*([0-9]+(?:\.[0-9]+)?)",
+        flags=re.IGNORECASE,
+    )
+    for direction_text, tp_text, sl_text in pattern.findall(str(response or "")):
+        direction = {"做多": "long", "做空": "short"}[direction_text]
+        tp_price = _number(tp_text)
+        sl_price = _number(sl_text)
+        valid = (
+            sl_price < entry_price < tp_price
+            if direction == "long"
+            else tp_price < entry_price < sl_price
         )
-    ]
+        if valid:
+            orders.append(
+                {
+                    "direction": direction,
+                    "tp_price": tp_price,
+                    "sl_price": sl_price,
+                }
+            )
+    return orders
 
 
 def record_analysis(question, response, market):
@@ -464,36 +491,48 @@ def record_analysis(question, response, market):
         return None
     clean_question = str(question or "")[:2000]
     clean_response = str(response)[:8000]
-    directions = (
-        _extract_shadow_directions(clean_response)
+    shadow_orders = (
+        _extract_shadow_orders(clean_response, price)
         if clean_question.startswith("auto-shadow:")
         else []
     )
-    if not directions:
-        directions = [_extract_direction(clean_response)]
+    if clean_question.startswith("auto-shadow:") and not shadow_orders:
+        return 0
+    orders = shadow_orders or [
+        {
+            "direction": _extract_direction(clean_response),
+            "tp_price": None,
+            "sl_price": None,
+        }
+    ]
     with _LOCK, _connect() as connection:
         created_at = time.time()
         market_json = json.dumps(market, ensure_ascii=False, default=str)
         cursor = connection.executemany(
             """
             INSERT INTO analysis_episode
-                (created_at, entry_price, direction, question, response, market_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (
+                    created_at, entry_price, direction, question, response, market_json,
+                    tp_price, sl_price
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     created_at,
                     price,
-                    direction,
+                    order["direction"],
                     (
                         f"{clean_question}:order:{index}"
-                        if len(directions) > 1
+                        if len(orders) > 1
                         else clean_question
                     ),
                     clean_response,
                     market_json,
+                    order["tp_price"],
+                    order["sl_price"],
                 )
-                for index, direction in enumerate(directions, start=1)
+                for index, order in enumerate(orders, start=1)
             ],
         )
         connection.commit()
@@ -512,20 +551,34 @@ def evaluate_pending(current_price, now_ts=None):
     with _LOCK, _connect() as connection:
         rows = connection.execute(
             """
-            SELECT id, entry_price, direction
+            SELECT id, created_at, entry_price, direction, tp_price, sl_price
             FROM analysis_episode
-            WHERE evaluated_at IS NULL AND created_at <= ?
-            """,
-            (cutoff,),
+            WHERE evaluated_at IS NULL
+            """
         ).fetchall()
+        evaluated = 0
         for row in rows:
             move_pct = (price - row["entry_price"]) / row["entry_price"] * 100
-            if row["direction"] == "long":
-                success = move_pct >= MIN_MOVE_PCT
-            elif row["direction"] == "short":
-                success = move_pct <= -MIN_MOVE_PCT
+            if row["tp_price"] is not None and row["sl_price"] is not None:
+                if row["direction"] == "long" and price >= row["tp_price"]:
+                    success = True
+                elif row["direction"] == "long" and price <= row["sl_price"]:
+                    success = False
+                elif row["direction"] == "short" and price <= row["tp_price"]:
+                    success = True
+                elif row["direction"] == "short" and price >= row["sl_price"]:
+                    success = False
+                else:
+                    continue
             else:
-                success = abs(move_pct) < MIN_MOVE_PCT
+                if row["created_at"] > cutoff:
+                    continue
+                if row["direction"] == "long":
+                    success = move_pct >= MIN_MOVE_PCT
+                elif row["direction"] == "short":
+                    success = move_pct <= -MIN_MOVE_PCT
+                else:
+                    success = abs(move_pct) < MIN_MOVE_PCT
             connection.execute(
                 """
                 UPDATE analysis_episode
@@ -534,8 +587,9 @@ def evaluate_pending(current_price, now_ts=None):
                 """,
                 (now_ts, price, move_pct, int(success), row["id"]),
             )
+            evaluated += 1
         connection.commit()
-        return len(rows)
+        return evaluated
 
 
 def build_learning_context(market, limit=None):
