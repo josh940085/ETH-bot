@@ -47,14 +47,15 @@ def _connect():
             return_pct REAL,
             success INTEGER,
             tp_price REAL,
-            sl_price REAL
+            sl_price REAL,
+            activated_at REAL
         )
         """
     )
     existing_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(analysis_episode)")
     }
-    for column in ("tp_price", "sl_price"):
+    for column in ("tp_price", "sl_price", "activated_at"):
         if column not in existing_columns:
             connection.execute(
                 f"ALTER TABLE analysis_episode ADD COLUMN {column} REAL"
@@ -456,16 +457,44 @@ def _extract_direction(response):
     return "neutral"
 
 
-def _extract_shadow_orders(response, entry_price):
+def _extract_shadow_orders(response):
     orders = []
+    text = str(response or "")
     pattern = re.compile(
         r"影子(?:開單|訂單)\s*\d*\s*[：:]\s*(做多|做空)"
+        r"[^\n]*?進場\s*[=：:]\s*([0-9]+(?:\.[0-9]+)?)"
         r"[^\n]*?TP\s*[=：:]\s*([0-9]+(?:\.[0-9]+)?)"
         r"[^\n]*?SL\s*[=：:]\s*([0-9]+(?:\.[0-9]+)?)",
         flags=re.IGNORECASE,
     )
-    for direction_text, tp_text, sl_text in pattern.findall(str(response or "")):
+    parsed = pattern.findall(text)
+    if not parsed:
+        range_plans = {
+            {"做多": "long", "做空": "short"}[direction_text]: (
+                _number(entry_text),
+                _number(tp_text),
+                _number(sl_text),
+            )
+            for direction_text, entry_text, tp_text, sl_text in re.findall(
+                r"震盪(做多|做空)[^\n]*?進場\s*[=：:]?\s*([0-9]+(?:\.[0-9]+)?)"
+                r"[^\n]*?TP\s*[=：:]?\s*([0-9]+(?:\.[0-9]+)?)"
+                r"[^\n]*?SL\s*[=：:]?\s*([0-9]+(?:\.[0-9]+)?)",
+                text,
+                flags=re.IGNORECASE,
+            )
+        }
+        parsed = []
+        for direction_text in re.findall(
+            r"影子(?:開單|訂單)\s*\d*\s*[：:]\s*(做多|做空)",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            direction = {"做多": "long", "做空": "short"}[direction_text]
+            if direction in range_plans:
+                parsed.append((direction_text, *range_plans[direction]))
+    for direction_text, entry_text, tp_text, sl_text in parsed:
         direction = {"做多": "long", "做空": "short"}[direction_text]
+        entry_price = _number(entry_text)
         tp_price = _number(tp_text)
         sl_price = _number(sl_text)
         valid = (
@@ -477,6 +506,7 @@ def _extract_shadow_orders(response, entry_price):
             orders.append(
                 {
                     "direction": direction,
+                    "entry_price": entry_price,
                     "tp_price": tp_price,
                     "sl_price": sl_price,
                 }
@@ -492,7 +522,7 @@ def record_analysis(question, response, market):
     clean_question = str(question or "")[:2000]
     clean_response = str(response)[:8000]
     shadow_orders = (
-        _extract_shadow_orders(clean_response, price)
+        _extract_shadow_orders(clean_response)
         if clean_question.startswith("auto-shadow:")
         else []
     )
@@ -501,6 +531,7 @@ def record_analysis(question, response, market):
     orders = shadow_orders or [
         {
             "direction": _extract_direction(clean_response),
+            "entry_price": price,
             "tp_price": None,
             "sl_price": None,
         }
@@ -513,14 +544,14 @@ def record_analysis(question, response, market):
             INSERT INTO analysis_episode
                 (
                     created_at, entry_price, direction, question, response, market_json,
-                    tp_price, sl_price
+                    tp_price, sl_price, activated_at
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     created_at,
-                    price,
+                    order["entry_price"],
                     order["direction"],
                     (
                         f"{clean_question}:order:{index}"
@@ -531,6 +562,11 @@ def record_analysis(question, response, market):
                     market_json,
                     order["tp_price"],
                     order["sl_price"],
+                    (
+                        created_at
+                        if abs(order["entry_price"] - price) / price <= 0.0005
+                        else None
+                    ),
                 )
                 for index, order in enumerate(orders, start=1)
             ],
@@ -551,7 +587,9 @@ def evaluate_pending(current_price, now_ts=None):
     with _LOCK, _connect() as connection:
         rows = connection.execute(
             """
-            SELECT id, created_at, entry_price, direction, tp_price, sl_price
+            SELECT
+                id, created_at, entry_price, direction, tp_price, sl_price,
+                activated_at
             FROM analysis_episode
             WHERE evaluated_at IS NULL
             """
@@ -560,6 +598,18 @@ def evaluate_pending(current_price, now_ts=None):
         for row in rows:
             move_pct = (price - row["entry_price"]) / row["entry_price"] * 100
             if row["tp_price"] is not None and row["sl_price"] is not None:
+                if row["activated_at"] is None:
+                    entry_reached = (
+                        price <= row["entry_price"]
+                        if row["direction"] == "long"
+                        else price >= row["entry_price"]
+                    )
+                    if not entry_reached:
+                        continue
+                    connection.execute(
+                        "UPDATE analysis_episode SET activated_at = ? WHERE id = ?",
+                        (now_ts, row["id"]),
+                    )
                 if row["direction"] == "long" and price >= row["tp_price"]:
                     success = True
                 elif row["direction"] == "long" and price <= row["sl_price"]:

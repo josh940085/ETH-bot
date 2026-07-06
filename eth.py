@@ -8030,7 +8030,9 @@ def ask_ai_analysis(prompt, market_context=None, question="", learning_limit=Non
             response.raise_for_status()
             text = _extract_openai_chat_text(response.json())
             if text:
-                record_mlx_analysis(question or prompt, text, market_context)
+                recorded = record_mlx_analysis(question or prompt, text, market_context)
+                if str(question).startswith("auto-shadow:") and not recorded:
+                    raise ValueError("MLX 影子開單缺少有效的 TP/SL，未寫入學習資料")
                 return text
             mlx_error = "本地模型回傳空內容"
         except Exception as exc:
@@ -8059,7 +8061,9 @@ def ask_ai_analysis(prompt, market_context=None, question="", learning_limit=Non
             response.raise_for_status()
             text = _extract_openai_chat_text(response.json())
             if text:
-                record_mlx_analysis(question or prompt, text, market_context)
+                recorded = record_mlx_analysis(question or prompt, text, market_context)
+                if str(question).startswith("auto-shadow:") and not recorded:
+                    raise ValueError("影子開單缺少有效的 TP/SL，未寫入學習資料")
                 return text
             return "AI分析失敗: OpenAI 回傳空內容"
         except Exception as exc:
@@ -8084,8 +8088,8 @@ def _start_mlx_auto_analysis(period_key, market_context):
                 prompt = f"""
 你是 ETH 影子交易分析 Agent。根據以下資料建立影子交易預測。
 這是無資金風險的研究分析，絕對不會送出真實委託。
-影子開單數量不設上限，可同時建立多筆做多或做空預測，每筆都視為以目前價格建立、
-並持續追蹤到 TP 或 SL 其中一個先到。TP 先到才算成功，SL 先到算失敗，
+影子開單數量不設上限，可同時建立多筆做多或做空預測。每筆先等待指定進場價觸發，
+成交後持續追蹤到 TP 或 SL 其中一個先到。TP 先到才算成功，SL 先到算失敗，
 不再以固定一小時後的漲跌判定。至少建立一筆；只有存在不同、可說明的交易依據時
 才增加筆數，不可為湊數而重複相同內容。
 
@@ -8128,8 +8132,8 @@ def _start_mlx_auto_analysis(period_key, market_context):
 區間失效條件：...
 多方機率：整數%
 空方機率：整數%
-影子開單1：做多或做空；進場={context.get('price')}；TP=數字；SL=數字；依據=...
-影子開單2：做多或做空；進場={context.get('price')}；TP=數字；SL=數字；依據=...（依需要繼續列出，筆數不限）
+影子開單1：做多或做空；進場=數字；TP=數字；SL=數字；依據=...
+影子開單2：做多或做空；進場=數字；TP=數字；SL=數字；依據=...（依需要繼續列出，筆數不限）
 多空機率合計必須為 100%。不得輸出觀望，不得聲稱已送出真實委託。
 每筆做多必須 SL < 進場 < TP；每筆做空必須 TP < 進場 < SL。
 """
