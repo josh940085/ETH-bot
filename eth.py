@@ -5936,17 +5936,38 @@ def detect_market_regime(df_1h, df_4h):
     return "range"
 
 
-def build_higher_timeframe_context(df_4h, df_1d=None, df_1w=None):
-    def summarize(frame, label, short_bars, medium_bars, long_bars):
+MLX_ANALYSIS_WINDOWS = {
+    "monthly": {"label": "月線全部", "bars": None},
+    "weekly": {"label": "週線2年", "bars": 104},
+    "daily": {"label": "日線1年", "bars": 365},
+    "four_hour": {"label": "4H一個月", "bars": 180},
+    "one_hour": {"label": "1H一週", "bars": 168},
+    "fifteen_min": {"label": "15m一天", "bars": 96},
+}
+
+
+def build_higher_timeframe_context(
+    df_4h,
+    df_1d=None,
+    df_1w=None,
+    df_1h=None,
+    df_15m=None,
+    df_1mth=None,
+):
+    def summarize(frame, label, short_bars, medium_bars, long_bars, window_label=None):
         empty = {
             f"{label}_trend": 0,
             f"{label}_strength_pct": 0.0,
             f"{label}_short_change_pct": 0.0,
             f"{label}_medium_change_pct": 0.0,
             f"{label}_long_change_pct": 0.0,
+            f"{label}_window_change_pct": 0.0,
             f"{label}_range_pos": 0.5,
             f"{label}_samples": 0,
             f"{label}_coverage_pct": 0.0,
+            f"{label}_support": None,
+            f"{label}_resistance": None,
+            f"{label}_window_label": window_label or "",
         }
         if frame is None or "close" not in frame.columns:
             return empty
@@ -5962,29 +5983,49 @@ def build_higher_timeframe_context(df_4h, df_1d=None, df_1w=None):
             return (close - prior) / max(abs(prior), 1e-9) * 100
 
         close = float(closes.iloc[-1])
-        baseline = float(closes.tail(min(long_bars, len(closes))).mean())
-        range_rows = completed.tail(min(long_bars, len(completed)))
+        effective_long_bars = len(closes) - 1 if long_bars is None else int(long_bars)
+        effective_long_bars = max(1, min(effective_long_bars, len(closes)))
+        baseline = float(closes.tail(effective_long_bars).mean())
+        range_rows = completed.tail(min(effective_long_bars, len(completed)))
         high = float(pd.to_numeric(range_rows["high"], errors="coerce").max())
         low = float(pd.to_numeric(range_rows["low"], errors="coerce").min())
         trend = 1 if close > baseline else -1 if close < baseline else 0
         short_change = change_pct(short_bars)
         medium_change = change_pct(medium_bars)
-        long_change = change_pct(long_bars)
+        long_change = change_pct(effective_long_bars)
+        support, resistance = _calc_support_resistance_levels(
+            completed, lookback=min(effective_long_bars, len(completed))
+        )
+        coverage_target = max(effective_long_bars + 1, 1)
+        if long_bars is None:
+            coverage = 100.0 if len(closes) >= 4 else 0.0
+        else:
+            coverage = min(100.0, len(closes) / coverage_target * 100)
         return {
             f"{label}_trend": trend,
             f"{label}_strength_pct": medium_change,
             f"{label}_short_change_pct": short_change,
             f"{label}_medium_change_pct": medium_change,
             f"{label}_long_change_pct": long_change,
+            f"{label}_window_change_pct": long_change,
             f"{label}_range_pos": max(0.0, min(1.0, (close - low) / max(high - low, 1e-9))),
             f"{label}_samples": int(len(closes)),
-            f"{label}_coverage_pct": min(100.0, len(closes) / max(long_bars + 1, 1) * 100),
+            f"{label}_coverage_pct": coverage,
+            f"{label}_support": support,
+            f"{label}_resistance": resistance,
+            f"{label}_window_label": window_label or "",
         }
 
     context = {}
-    context.update(summarize(df_4h, "four_hour", 6, 42, 180))
-    context.update(summarize(df_1d, "daily", 7, 30, 90))
-    context.update(summarize(df_1w, "weekly", 4, 13, 52))
+    context.update(summarize(df_15m, "fifteen_min", 4, 32, 96, "15m一天"))
+    context.update(summarize(df_1h, "one_hour", 24, 72, 168, "1H一週"))
+    context.update(summarize(df_4h, "four_hour", 6, 42, 180, "4H一個月"))
+    context.update(summarize(df_1d, "daily", 7, 90, 365, "日線1年"))
+    context.update(summarize(df_1w, "weekly", 4, 26, 104, "週線2年"))
+    context.update(summarize(df_1mth, "monthly", 1, 12, None, "月線全部"))
+    context["analysis_windows"] = {
+        key: value["label"] for key, value in MLX_ANALYSIS_WINDOWS.items()
+    }
     candle_value = None
     if df_4h is not None and len(df_4h) > 1 and "time" in df_4h.columns:
         candle_value = df_4h["time"].iloc[-2]
@@ -6124,11 +6165,11 @@ def _build_range_trade_reference(
 def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
     """多週期支撐壓力 + K線型態分析，可直接餵入已準備好的 K 線資料。"""
     tf_cfg = tf_cfg or [
-        ("月線", "1M", 80, 1.5),
-        ("周線", "1w", 120, 1.3),
-        ("日線", "1d", 180, 1.1),
+        ("月線全部", "1M", 1500, 1.5),
+        ("周線2年", "1w", 104, 1.3),
+        ("日線1年", "1d", 365, 1.1),
         ("12h", "12h", 160, 1.0),
-        ("4h", "4h", 140, 0.9),
+        ("4h一個月", "4h", 180, 0.9),
     ]
 
     lines = []
@@ -6183,13 +6224,13 @@ def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
 
 
 def analyze_multi_tf_sr(price):
-    """多週期支撐壓力 + K線型態分析（月/週/日/12h/4h）。"""
+    """多週期支撐壓力 + K線型態分析（月線全部/週2年/日1年/12h/4h一個月）。"""
     tf_cfg = [
-        ("月線", "1M", 80, 1.5),
-        ("周線", "1w", 120, 1.3),
-        ("日線", "1d", 180, 1.1),
+        ("月線全部", "1M", 1500, 1.5),
+        ("周線2年", "1w", 104, 1.3),
+        ("日線1年", "1d", 365, 1.1),
         ("12h", "12h", 160, 1.0),
-        ("4h", "4h", 140, 0.9),
+        ("4h一個月", "4h", 180, 0.9),
     ]
     frame_map = {}
     for _, interval, limit, _ in tf_cfg:
@@ -7045,7 +7086,13 @@ def build_trade_signal_snapshot(
 
     price = _safe_float(price, _safe_float(df_5m["close"].iloc[-1], 0.0))
     derivatives_flow = _normalize_derivatives_flow_snapshot(derivatives_flow)
-    higher_timeframe = build_higher_timeframe_context(df_4h, df_1d, df_1w)
+    higher_timeframe = build_higher_timeframe_context(
+        df_4h,
+        df_1d,
+        df_1w,
+        df_1h=df_1h,
+        df_15m=df_15m,
+    )
     regime = detect_market_regime(df_1h, df_4h)
 
     trend_4h = df_4h["close"].iloc[-1] - df_4h["ma25"].iloc[-1]
@@ -8137,7 +8184,12 @@ def _start_mlx_auto_analysis(period_key, market_context):
 4H趨勢: {context.get('htf')}
 4H K線: {context.get('four_hour_pattern')}
 日線趨勢: {context.get('daily_trend')}，K線: {context.get('daily_pattern')}，30日變化: {context.get('daily_medium_change_pct')}%
-週線趨勢: {context.get('weekly_trend')}，K線: {context.get('weekly_pattern')}，13週變化: {context.get('weekly_medium_change_pct')}%
+月線趨勢: {context.get('monthly_trend')}，K線: {context.get('monthly_pattern')}，全部變化: {context.get('monthly_window_change_pct')}%，區間位置: {context.get('monthly_range_pos')}
+週線趨勢: {context.get('weekly_trend')}，K線: {context.get('weekly_pattern')}，2年變化: {context.get('weekly_window_change_pct')}%，區間位置: {context.get('weekly_range_pos')}
+日線1年變化: {context.get('daily_window_change_pct')}%，日線區間位置: {context.get('daily_range_pos')}
+4H一個月變化: {context.get('four_hour_window_change_pct')}%，4H區間位置: {context.get('four_hour_range_pos')}
+1H一週變化: {context.get('one_hour_window_change_pct')}%，1H區間位置: {context.get('one_hour_range_pos')}
+15m一天變化: {context.get('fifteen_min_window_change_pct')}%，15m區間位置: {context.get('fifteen_min_range_pos')}
 市場狀態: {context.get('regime')}
 突破: {context.get('breakout')}
 宏觀偏向: {context.get('macro')}
@@ -8151,7 +8203,7 @@ def _start_mlx_auto_analysis(period_key, market_context):
 {context.get('range_trade_reference')}
 
 學習目標：
-1. 分別說明1H、4H、日線、週線K線看到哪些因素支持做多或做空。
+1. 分別說明15m、1H、4H、日線、週線、月線K線看到哪些因素支持做多或做空。
 2. 從多週期價位找出目前有效的支撐區與壓力區，不可只給單一模糊價位。
 3. 若市場為震盪，做多應靠近支撐、做空應靠近壓力；SL放在區間外並預留ATR緩衝，
    TP放在對側區間之前。必須給出具體多空兩套TP/SL與區間失效條件。
@@ -8162,7 +8214,7 @@ def _start_mlx_auto_analysis(period_key, market_context):
    不可自行交換或另算價位。
 
 請嚴格用以下格式輸出：
-時段判讀：1H=...；4H=...；日線=...；週線=...
+時段判讀：15m=...；1H=...；4H=...；日線=...；週線=...；月線=...
 有效支撐區：價格-價格
 有效壓力區：價格-價格
 震盪做多：進場...；TP...；SL...
@@ -8422,6 +8474,12 @@ AI分數: {context.get('score')}
 HTF趨勢: {context.get('htf')}
 日線趨勢: {context.get('daily_trend')}（強度 {context.get('daily_strength_pct')}%）
 週線趨勢: {context.get('weekly_trend')}（強度 {context.get('weekly_strength_pct')}%）
+月線全部: 趨勢 {context.get('monthly_trend')}，變化 {context.get('monthly_window_change_pct')}%，區間位置 {context.get('monthly_range_pos')}
+週線2年: 趨勢 {context.get('weekly_trend')}，變化 {context.get('weekly_window_change_pct')}%，區間位置 {context.get('weekly_range_pos')}
+日線1年: 趨勢 {context.get('daily_trend')}，變化 {context.get('daily_window_change_pct')}%，區間位置 {context.get('daily_range_pos')}
+4H一個月: 趨勢 {context.get('four_hour_trend')}，變化 {context.get('four_hour_window_change_pct')}%，區間位置 {context.get('four_hour_range_pos')}
+1H一週: 趨勢 {context.get('one_hour_trend')}，變化 {context.get('one_hour_window_change_pct')}%，區間位置 {context.get('one_hour_range_pos')}
+15m一天: 趨勢 {context.get('fifteen_min_trend')}，變化 {context.get('fifteen_min_window_change_pct')}%，區間位置 {context.get('fifteen_min_range_pos')}
 市場狀態: {context.get('regime')}
 Breakout: {context.get('breakout')}
 Triangle: {context.get('triangle')}
@@ -8469,10 +8527,11 @@ if LIVE_RUNTIME_ENABLED:
 # =============================
 def get_kline(interval, limit=100):
     now = time.time()
+    limit = max(1, min(1500, int(limit)))
 
     if interval in KLINE_CACHE:
         data, ts = KLINE_CACHE[interval]
-        if now - ts < KLINE_TTL.get(interval, 10):
+        if now - ts < KLINE_TTL.get(interval, 10) and len(data) >= limit:
             return data
 
     url = "https://fapi.binance.com/fapi/v1/klines"
@@ -8581,10 +8640,6 @@ def run_bot():
                         "price": price if 'price' in locals() else None,
                         "score": score if 'score' in locals() else None,
                         "htf": htf if 'htf' in locals() else None,
-                        "daily_trend": higher_tf_context.get("daily_trend") if 'higher_tf_context' in locals() else None,
-                        "daily_strength_pct": higher_tf_context.get("daily_strength_pct") if 'higher_tf_context' in locals() else None,
-                        "weekly_trend": higher_tf_context.get("weekly_trend") if 'higher_tf_context' in locals() else None,
-                        "weekly_strength_pct": higher_tf_context.get("weekly_strength_pct") if 'higher_tf_context' in locals() else None,
                         "regime": regime if 'regime' in locals() else None,
                         "breakout": breakout if 'breakout' in locals() else None,
                         "triangle": triangle if 'triangle' in locals() else None,
@@ -8596,6 +8651,8 @@ def run_bot():
                         "first_name": command.get("first_name"),
                         "chat_type": command.get("chat_type"),
                     }
+                    if isinstance(locals().get("higher_tf_context"), dict):
+                        context.update(higher_tf_context)
 
                     reply = handle_ai_command(text, context)
 
@@ -8604,18 +8661,11 @@ def run_bot():
                 except:
                     pass
             # ===== HTF（方向）=====
+            df_1mth = get_kline("1M", 1500)
+            df_1w = get_kline("1w", 110)
+            df_1d = get_kline("1d", 370)
             df_4h = get_kline("4h", 200)
-            df_1h = get_kline("1h")
-            df_1d = get_kline("1d", 120)
-            df_1w = get_kline("1w", 100)
-            higher_tf_context = build_higher_timeframe_context(df_4h, df_1d, df_1w)
-            if record_higher_timeframe_context(higher_tf_context):
-                print(
-                    "🧭 已收集高週期資料 | "
-                    f"4H={higher_tf_context['four_hour_trend']:+d} | "
-                    f"日線={higher_tf_context['daily_trend']:+d} | "
-                    f"週線={higher_tf_context['weekly_trend']:+d}"
-                )
+            df_1h = get_kline("1h", 170)
 
             # ===== Market Regime =====
             regime = detect_market_regime(df_1h, df_4h)
@@ -8629,8 +8679,26 @@ def run_bot():
 
             # ===== MID（策略）=====
             df_30m = get_kline("30m")
-            df_15m = get_kline("15m")
+            df_15m = get_kline("15m", 100)
             td_setup_15m = get_td_sequential_setup(df_15m)
+            higher_tf_context = build_higher_timeframe_context(
+                df_4h,
+                df_1d,
+                df_1w,
+                df_1h=df_1h,
+                df_15m=df_15m,
+                df_1mth=df_1mth,
+            )
+            if record_higher_timeframe_context(higher_tf_context):
+                print(
+                    "🧭 已收集MLX多週期資料 | "
+                    f"15m={higher_tf_context['fifteen_min_trend']:+d} | "
+                    f"1H={higher_tf_context['one_hour_trend']:+d} | "
+                    f"4H={higher_tf_context['four_hour_trend']:+d} | "
+                    f"日線={higher_tf_context['daily_trend']:+d} | "
+                    f"週線={higher_tf_context['weekly_trend']:+d} | "
+                    f"月線={higher_tf_context['monthly_trend']:+d}"
+                )
 
             mid_trend = 1 if df_30m["macd"].iloc[-1] > df_30m["signal"].iloc[-1] else -1
             fvg_low, fvg_high = calc_fvg(df_15m)
@@ -8660,10 +8728,10 @@ def run_bot():
 
             completed_15m = df_15m["time"].iloc[-2] if len(df_15m) > 1 else "unknown"
             range_support_15m, range_resistance_15m = _calc_support_resistance_levels(
-                df_15m, lookback=60
+                df_15m, lookback=96
             )
             range_support_1h, range_resistance_1h = _calc_support_resistance_levels(
-                df_1h, lookback=60
+                df_1h, lookback=168
             )
             atr_15m_avg = float(
                 (df_15m["high"] - df_15m["low"]).tail(14).mean()
@@ -8689,6 +8757,22 @@ def run_bot():
                 "daily_medium_change_pct": higher_tf_context.get("daily_medium_change_pct"),
                 "weekly_trend": higher_tf_context.get("weekly_trend"),
                 "weekly_medium_change_pct": higher_tf_context.get("weekly_medium_change_pct"),
+                "monthly_pattern": _detect_candlestick_pattern(df_1mth)[0],
+                "monthly_trend": higher_tf_context.get("monthly_trend"),
+                "monthly_window_change_pct": higher_tf_context.get("monthly_window_change_pct"),
+                "monthly_range_pos": higher_tf_context.get("monthly_range_pos"),
+                "weekly_window_change_pct": higher_tf_context.get("weekly_window_change_pct"),
+                "weekly_range_pos": higher_tf_context.get("weekly_range_pos"),
+                "daily_window_change_pct": higher_tf_context.get("daily_window_change_pct"),
+                "daily_range_pos": higher_tf_context.get("daily_range_pos"),
+                "four_hour_window_change_pct": higher_tf_context.get("four_hour_window_change_pct"),
+                "four_hour_range_pos": higher_tf_context.get("four_hour_range_pos"),
+                "one_hour_trend": higher_tf_context.get("one_hour_trend"),
+                "one_hour_window_change_pct": higher_tf_context.get("one_hour_window_change_pct"),
+                "one_hour_range_pos": higher_tf_context.get("one_hour_range_pos"),
+                "fifteen_min_trend": higher_tf_context.get("fifteen_min_trend"),
+                "fifteen_min_window_change_pct": higher_tf_context.get("fifteen_min_window_change_pct"),
+                "fifteen_min_range_pos": higher_tf_context.get("fifteen_min_range_pos"),
                 "regime": regime,
                 "breakout": breakout,
                 "macro": _compute_macro_bias(
