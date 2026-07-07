@@ -206,10 +206,27 @@ def record_higher_timeframe_context(context):
 
 
 def _historical_source_paths():
-    return (
-        ("live_model", Path(ai_data_path("ai_data.csv"))),
-        ("backtest_model", Path(ai_data_path("backtest_ai_data.csv"))),
-    )
+    ai_dir = Path(ai_data_path("ai_data.csv")).parent
+    data_dir = DB_PATH.parent.parent / "data"
+    paths = []
+    seen = set()
+    for path in [
+        ai_dir / "ai_data.csv",
+        ai_dir / "backtest_ai_data.csv",
+        *ai_dir.glob("*learn*.csv"),
+        *ai_dir.glob("*ai_data*.csv"),
+        *data_dir.glob("*trades.csv"),
+    ]:
+        if not path.exists() or path in seen:
+            continue
+        seen.add(path)
+        stem = re.sub(r"[^a-zA-Z0-9_]+", "_", path.stem).strip("_").lower()
+        if path.parent == ai_dir:
+            source = "model_" + stem
+        else:
+            source = "trade_" + stem
+        paths.append((source[:80], path))
+    return tuple(paths)
 
 
 def import_turning_point_history(force=False):
@@ -397,8 +414,73 @@ def _load_backtest_directions():
         return []
 
 
+def _row_direction(row, fallback="setup"):
+    direction = str(
+        row.get("direction")
+        or row.get("side")
+        or row.get("signal")
+        or row.get("trade_direction")
+        or fallback
+    ).strip().lower()
+    if direction in {"long", "buy", "多", "做多"}:
+        return "long"
+    if direction in {"short", "sell", "空", "做空"}:
+        return "short"
+    return fallback
+
+
+def _row_success(row):
+    if "label" in row and str(row.get("label") or "").strip() != "":
+        try:
+            return 1 if int(float(row.get("label", 0))) > 0 else 0
+        except (TypeError, ValueError):
+            return None
+    exit_reason = str(row.get("exit_reason") or row.get("close_reason") or "").strip().upper()
+    if exit_reason == "TP":
+        return 1
+    if exit_reason == "SL":
+        return 0
+    for key in ("trade_return_pct", "return_pct", "pnl_pct", "profit_pct", "realized_pnl"):
+        if key in row and str(row.get(key) or "").strip() != "":
+            try:
+                return 1 if float(row.get(key) or 0) > 0 else 0
+            except (TypeError, ValueError):
+                continue
+    result = str(row.get("result") or row.get("success") or "").strip().lower()
+    if result in {"1", "true", "win", "wins", "success", "tp", "成功"}:
+        return 1
+    if result in {"0", "false", "loss", "losses", "fail", "failed", "sl", "失敗"}:
+        return 0
+    return None
+
+
+def _market_from_history_row(row):
+    market = {}
+    for key, value in row.items():
+        if value in (None, ""):
+            continue
+        if key == "label":
+            continue
+        numeric = _number(value, None)
+        market[key] = numeric if numeric is not None else str(value)
+    return market
+
+
+def _history_response(source, direction, success, market):
+    result = "成功" if success else "失敗"
+    trade_return = market.get("trade_return_pct", market.get("return_pct", market.get("pnl_pct")))
+    extra = ""
+    if trade_return not in (None, ""):
+        extra = f"，報酬 {float(_number(trade_return, 0.0)):+.2f}%"
+    direction_text = {"long": "做多", "short": "做空"}.get(direction, "型態")
+    return (
+        f"既有模型/回測資料 {source}；{direction_text}案例結果為{result}{extra}。"
+        "已匯入 MLX 學習庫作為相似型態勝率校準，不代表跳過現行風控。"
+    )
+
+
 def import_existing_model_history(force=False):
-    """Import existing classifier samples as retrieval examples for MLX."""
+    """Import existing classifier/backtest/trade samples as retrieval examples for MLX."""
     global _LAST_HISTORY_IMPORT_TS
     now_ts = time.time()
     if not force and now_ts - _LAST_HISTORY_IMPORT_TS < HISTORY_IMPORT_INTERVAL_SEC:
@@ -416,31 +498,22 @@ def import_existing_model_history(force=False):
             continue
 
         for index, row in enumerate(rows):
-            try:
-                success = 1 if int(float(row.get("label", 0))) > 0 else 0
-            except (TypeError, ValueError):
+            success = _row_success(row)
+            if success is None:
                 continue
-            market = {
-                key: value
-                for key, value in row.items()
-                if key != "label" and value not in (None, "")
-            }
+            market = _market_from_history_row(row)
             if not market:
                 continue
             canonical = json.dumps(market, ensure_ascii=False, sort_keys=True)
             source_key = hashlib.sha256(
-                f"{source}:{canonical}:{success}".encode("utf-8")
+                f"{source}:{path.name}:{canonical}:{success}".encode("utf-8")
             ).hexdigest()
             direction = (
                 directions[index]
-                if source == "backtest_model" and index < len(directions)
-                else "setup"
+                if source in {"model_backtest_ai_data", "backtest_model"} and index < len(directions)
+                else _row_direction(row, "setup")
             )
-            result = "成功" if success else "失敗"
-            response = (
-                f"既有{source}訓練案例；此市場結構的交易結果為{result}。"
-                "用於校準相似型態，不代表目前應直接進場。"
-            )
+            response = _history_response(source, direction, success, market)
             prepared.append(
                 (
                     source,
@@ -471,11 +544,152 @@ def import_existing_model_history(force=False):
     return imported
 
 
+def _similarity_weight(current, past):
+    if not isinstance(current, dict) or not isinstance(past, dict):
+        return 0.0
+    numeric_weight = 0.0
+    numeric_score = 0.0
+    for key, current_value in current.items():
+        if key not in past:
+            continue
+        current_number = _number(current_value, None)
+        past_number = _number(past.get(key), None)
+        if current_number is None or past_number is None:
+            continue
+        scale = max(abs(current_number), abs(past_number), 1.0)
+        distance = min(3.0, abs(current_number - past_number) / scale)
+        weight = 1.0 / (1.0 + distance)
+        numeric_score += weight
+        numeric_weight += 1.0
+
+    categorical_hits = 0.0
+    categorical_total = 0.0
+    for key in (
+        "direction",
+        "htf",
+        "mid_trend",
+        "macd",
+        "breakout",
+        "regime",
+        "triangle",
+        "event_risk",
+        "volume_spike",
+        "analysis_timeframe",
+        "timeframe",
+        "rsi_bucket",
+    ):
+        if key not in current or key not in past:
+            continue
+        categorical_total += 1.0
+        if str(current.get(key)).strip().lower() == str(past.get(key)).strip().lower():
+            categorical_hits += 1.0
+
+    if numeric_weight <= 0 and categorical_total <= 0:
+        return 0.0
+    numeric_part = numeric_score / numeric_weight if numeric_weight else 0.0
+    categorical_part = categorical_hits / categorical_total if categorical_total else 0.0
+    if numeric_weight and categorical_total:
+        return 0.78 * numeric_part + 0.22 * categorical_part
+    return numeric_part or categorical_part
+
+
+def _candidate_rows_for_replacement(limit):
+    with _LOCK, _connect() as connection:
+        history_rows = connection.execute(
+            """
+            SELECT source, direction, market_json, success, NULL AS return_pct, imported_at AS ts
+            FROM historical_example
+            WHERE source NOT IN ('turning_point', 'non_turning_point')
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(100, int(limit)),),
+        ).fetchall()
+        analysis_rows = connection.execute(
+            """
+            SELECT 'analysis_episode' AS source, direction, market_json, success, return_pct, evaluated_at AS ts
+            FROM analysis_episode
+            WHERE evaluated_at IS NOT NULL
+            ORDER BY evaluated_at DESC
+            LIMIT ?
+            """,
+            (max(50, int(limit // 4)),),
+        ).fetchall()
+    return [*history_rows, *analysis_rows]
+
+
+def predict_replacement_probability(features, direction="setup", limit=900):
+    """Low-latency MLX learning-store replacement for the old sklearn probability."""
+    import_existing_model_history()
+    current = dict(features or {})
+    clean_direction = _row_direction({"direction": direction}, "setup")
+    current["direction"] = clean_direction
+
+    scored = []
+    source_summary = {}
+    for row in _candidate_rows_for_replacement(limit):
+        if clean_direction in {"long", "short"} and str(row["direction"] or "").lower() not in {
+            clean_direction,
+            "setup",
+        }:
+            continue
+        past_market = _json_loads_safe(row["market_json"], {})
+        if not isinstance(past_market, dict):
+            continue
+        past_market.setdefault("direction", str(row["direction"] or "setup").lower())
+        weight = _similarity_weight(current, past_market)
+        if weight <= 0:
+            continue
+        source = str(row["source"] or "unknown")
+        if source.startswith("trade_"):
+            weight *= 1.25
+        elif source == "analysis_episode":
+            weight *= 1.15
+        scored.append((weight, int(row["success"] or 0), source))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    top = scored[: max(25, min(250, int(limit // 3)))]
+    prior_weight = 12.0
+    weighted_success = prior_weight * 0.5
+    total_weight = prior_weight
+    for weight, success, source in top:
+        weighted_success += weight * success
+        total_weight += weight
+        item = source_summary.setdefault(source, {"samples": 0, "weight": 0.0, "wins": 0.0})
+        item["samples"] += 1
+        item["weight"] += weight
+        item["wins"] += weight * success
+
+    probability = weighted_success / total_weight if total_weight > 0 else 0.5
+    confidence = min(1.0, max(0.0, (total_weight - prior_weight) / 80.0))
+    if confidence < 0.25:
+        probability = 0.5 + (probability - 0.5) * (confidence / 0.25)
+    sources = []
+    for source, item in source_summary.items():
+        source_weight = item["weight"]
+        sources.append(
+            {
+                "source": source,
+                "samples": int(item["samples"]),
+                "weight": round(source_weight, 4),
+                "winrate": (item["wins"] / source_weight * 100) if source_weight else 0.0,
+            }
+        )
+    sources.sort(key=lambda item: item["weight"], reverse=True)
+    return {
+        "probability": max(0.05, min(0.95, float(probability))),
+        "sample_count": len(top),
+        "effective_weight": max(0.0, total_weight - prior_weight),
+        "confidence": confidence,
+        "sources": sources[:8],
+    }
+
+
 def _number(value, default=0.0):
     try:
         return float(value)
     except (TypeError, ValueError):
-        return float(default)
+        return None if default is None else float(default)
 
 
 def _extract_direction(response):

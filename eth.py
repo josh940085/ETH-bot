@@ -53,6 +53,7 @@ from mlx_learning import (
     evaluate_pending as evaluate_mlx_learning,
     learning_stats as get_mlx_learning_stats,
     mark_daily_report_sent,
+    predict_replacement_probability as predict_mlx_replacement_probability,
     record_analysis as record_mlx_analysis,
     record_actual_trade_open,
     record_higher_timeframe_context,
@@ -6296,6 +6297,19 @@ ONLINE_MODEL_FULL_WEIGHT_SAMPLES = max(
     ONLINE_MODEL_MIN_SAMPLES + 16,
     _safe_int(os.getenv("ONLINE_MODEL_FULL_WEIGHT_SAMPLES", 120), 120),
 )
+MLX_REPLACE_MODEL_ENABLED = _is_truthy(os.getenv("MLX_REPLACE_MODEL_ENABLED", "1"))
+MLX_REPLACE_MODEL_MIN_SAMPLES = max(
+    20,
+    _safe_int(os.getenv("MLX_REPLACE_MODEL_MIN_SAMPLES", 60), 60),
+)
+MLX_REPLACE_MODEL_MIN_WEIGHT = max(
+    5.0,
+    _safe_float(os.getenv("MLX_REPLACE_MODEL_MIN_WEIGHT", 20.0), 20.0),
+)
+MLX_REPLACE_MODEL_MAX_SWING = min(
+    0.40,
+    max(0.05, _safe_float(os.getenv("MLX_REPLACE_MODEL_MAX_SWING", 0.28), 0.28)),
+)
 MODEL_RETRAIN_INTERVAL_SEC = max(120.0, _safe_float(os.getenv("MODEL_RETRAIN_INTERVAL_SEC", 300), 300))
 AI_LOG_FLUSH_SIZE = max(1, _safe_int(os.getenv("AI_LOG_FLUSH_SIZE", 1), 1))
 BACKTEST_SAMPLE_WEIGHT = min(1.0, max(0.05, _safe_float(os.getenv("BACKTEST_AI_SAMPLE_WEIGHT", 0.35), 0.35)))
@@ -7004,7 +7018,7 @@ def _predict_estimator_probability(estimator, frame):
         return None
 
 
-def _predict_trade_probability(features):
+def _predict_legacy_trade_probability(features):
     normalized = _normalize_feature_payload(features)
     X_raw = pd.DataFrame([normalized])
 
@@ -7044,11 +7058,39 @@ def _predict_trade_probability(features):
     return 0.5
 
 
+def _predict_mlx_learning_probability(features, direction="setup"):
+    if not MLX_REPLACE_MODEL_ENABLED:
+        return None
+    try:
+        result = predict_mlx_replacement_probability(
+            _normalize_feature_payload(features),
+            direction=direction,
+        )
+    except Exception as exc:
+        print(f"⚠️ MLX learning replacement probability failed: {exc}")
+        return None
+    if not isinstance(result, dict):
+        return None
+    sample_count = _safe_int(result.get("sample_count"), 0)
+    effective_weight = _safe_float(result.get("effective_weight"), 0.0)
+    if sample_count < MLX_REPLACE_MODEL_MIN_SAMPLES or effective_weight < MLX_REPLACE_MODEL_MIN_WEIGHT:
+        return None
+    probability = max(0.05, min(0.95, _safe_float(result.get("probability"), 0.5)))
+    return 0.5 + max(-MLX_REPLACE_MODEL_MAX_SWING, min(MLX_REPLACE_MODEL_MAX_SWING, probability - 0.5))
+
+
+def _predict_trade_probability(features, direction="setup"):
+    mlx_prob = _predict_mlx_learning_probability(features, direction=direction)
+    if mlx_prob is not None:
+        return mlx_prob
+    return _predict_legacy_trade_probability(features)
+
+
 def _predict_directional_trade_bias(features):
     long_features = _build_directional_learning_features(features, "long")
     short_features = _build_directional_learning_features(features, "short")
-    long_prob = _predict_trade_probability(long_features)
-    short_prob = _predict_trade_probability(short_features)
+    long_prob = _predict_trade_probability(long_features, direction="long")
+    short_prob = _predict_trade_probability(short_features, direction="short")
 
     long_edge = max(0.0, long_prob - 0.5)
     short_edge = max(0.0, short_prob - 0.5)
