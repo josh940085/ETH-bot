@@ -245,38 +245,26 @@ def _safe_int_env(name: str, default: int) -> int:
 
 
 SHORT_TRADE_MAX_HOLD_SEC = max(3600.0, _safe_float_env("SHORT_TRADE_MAX_HOLD_SEC", 24 * 3600))
-LONG_TRADE_MAX_HOLD_SEC = max(SHORT_TRADE_MAX_HOLD_SEC, _safe_float_env("LONG_TRADE_MAX_HOLD_SEC", 7 * 24 * 3600))
 MLX_AGENT_TIMEOUT_SEC = _safe_int_env("MLX_AGENT_TIMEOUT_SEC", 120)
 
 
 def _normalize_trade_time_horizon(value) -> str:
-    text = str(value or "").strip().lower()
-    if text in {"long", "long_term", "long-term", "swing", "position", "長線", "波段"}:
-        return "long"
+    # Live execution is short-term only. Longer-term words may still appear in
+    # trend context, but they must not extend position lifetime.
     return "short"
 
 
 def _infer_trade_time_horizon(final="", regime="", htf=0, mid_trend=0, daily_min_trade=False) -> str:
-    """Classify a new position for max-hold control.
-
-    Current live entries are mostly intraday. Only explicit long/swing wording is
-    treated as long-term; otherwise default to short so stale positions cannot
-    remain open indefinitely.
-    """
-    if daily_min_trade:
-        return "short"
-    text = f"{final or ''} {regime or ''}".lower()
-    if any(token in text for token in ("長線", "波段", "long-term", "long term", "swing")):
-        return "long"
+    """All executable positions are short-term; HTF data is trend context only."""
     return "short"
 
 
 def _trade_max_hold_sec(horizon=None) -> float:
-    return LONG_TRADE_MAX_HOLD_SEC if _normalize_trade_time_horizon(horizon) == "long" else SHORT_TRADE_MAX_HOLD_SEC
+    return SHORT_TRADE_MAX_HOLD_SEC
 
 
 def _trade_time_horizon_label(horizon=None) -> str:
-    return "長線" if _normalize_trade_time_horizon(horizon) == "long" else "短線"
+    return "短線"
 
 
 def _safe_float_env_names(names, default: float) -> float:
