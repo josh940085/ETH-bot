@@ -24,6 +24,7 @@ import requests
 os.environ.setdefault("ETH_BOT_DISABLE_LIVE", "1")
 
 import eth
+from mlx_learning import build_trade_factor_tags
 
 
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
@@ -188,12 +189,39 @@ def _summarize_grouped_trades(df, column):
     return grouped
 
 
+def _summarize_mlx_factors(df):
+    if "mlx_factor_tags" not in df.columns or df.empty:
+        return {}
+    expanded = []
+    for _, row in df.iterrows():
+        try:
+            factors = json.loads(row.get("mlx_factor_tags") or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            factors = []
+        if not isinstance(factors, list):
+            continue
+        for factor in factors:
+            clean = str(factor).strip()
+            if clean:
+                expanded.append(
+                    {
+                        "factor": clean,
+                        "trade_return": row.get("trade_return", 0.0),
+                    }
+                )
+    if not expanded:
+        return {}
+    factor_df = pd.DataFrame(expanded)
+    return _summarize_grouped_trades(factor_df, "factor")
+
+
 def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded):
     if not trades:
         return {
             "symbol": symbol,
             "start": start_dt.isoformat(),
             "end": end_dt.isoformat(),
+            "strategy_version": eth.STRATEGY_VERSION,
             "model_loaded": bool(model_loaded),
             "trades": 0,
             "wins": 0,
@@ -216,6 +244,8 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded):
             "avg_net_edge_rate_pct": 0.0,
             "by_regime": {},
             "by_direction": {},
+            "by_strategy_version": {},
+            "by_mlx_factor": {},
         }
 
     df = pd.DataFrame(trades)
@@ -238,6 +268,7 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded):
         "symbol": symbol,
         "start": start_dt.isoformat(),
         "end": end_dt.isoformat(),
+        "strategy_version": eth.STRATEGY_VERSION,
         "model_loaded": bool(model_loaded),
         "trades": int(len(df)),
         "wins": wins,
@@ -260,6 +291,8 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded):
         "avg_net_edge_rate_pct": round(float(net_edge.mean()), 3) if not net_edge.dropna().empty else 0.0,
         "by_regime": _summarize_grouped_trades(df, "regime"),
         "by_direction": _summarize_grouped_trades(df, "direction"),
+        "by_strategy_version": _summarize_grouped_trades(df, "strategy_version"),
+        "by_mlx_factor": _summarize_mlx_factors(df),
     }
 
 
@@ -318,12 +351,22 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
     max_size, min_size = eth._derive_scaling_bounds(size)
     raw_features = decision.get("features") if isinstance(decision.get("features"), dict) else {}
     learn_features = eth._build_directional_learning_features(raw_features, direction)
+    decision_for_mlx = dict(decision)
+    decision_for_mlx["price"] = float(entry)
+    mlx_market = eth._build_actual_trade_mlx_market(
+        decision_for_mlx,
+        direction,
+        source="backtest",
+    )
+    mlx_factor_tags = build_trade_factor_tags(mlx_market, direction)
 
     return {
         "opened_at": ts.isoformat(),
         "open_ts": float(ts.timestamp()),
         "direction": direction,
         "signal": signal,
+        "strategy_version": eth.STRATEGY_VERSION,
+        "mlx_factor_tags": list(mlx_factor_tags),
         "entry": float(entry),
         "avg_entry": float(entry),
         "tp": float(decision["tp"]),
@@ -556,6 +599,8 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "closed_at": ts.isoformat(),
         "direction": open_trade["direction"],
         "signal": open_trade["signal"],
+        "strategy_version": str(open_trade.get("strategy_version", eth.STRATEGY_VERSION)),
+        "mlx_factor_tags": json.dumps(open_trade.get("mlx_factor_tags") or [], ensure_ascii=False),
         "entry": round(float(open_trade["entry"]), 4),
         "avg_entry": round(float(open_trade["avg_entry"]), 4),
         "exit": round(float(exit_price), 4),
@@ -783,6 +828,7 @@ def main():
     print("Backtest Summary")
     print(f"Symbol: {summary['symbol']}")
     print(f"Window: {summary['start']} -> {summary['end']}")
+    print(f"Strategy version: {summary.get('strategy_version')}")
     print(f"5m bars: {len(base_5m)}")
     print(f"Model loaded: {summary['model_loaded']}")
     print(f"Trades: {summary['trades']}")
@@ -795,6 +841,19 @@ def main():
     print(f"Avg RR/AI edge: {summary['avg_rr_at_entry']}/{summary['avg_net_edge_rate_pct']}%")
     print(f"Long/Short: {summary['long_trades']}/{summary['short_trades']}")
     print(f"Exit reasons: {json.dumps(summary['exit_reason_counts'], ensure_ascii=False)}")
+    top_factors = sorted(
+        (summary.get("by_mlx_factor") or {}).items(),
+        key=lambda item: (item[1].get("trades", 0), item[1].get("win_rate", 0.0)),
+        reverse=True,
+    )[:5]
+    if top_factors:
+        print(
+            "Top MLX factors: "
+            + " | ".join(
+                f"{name} {payload.get('win_rate')}%/{payload.get('trades')}筆"
+                for name, payload in top_factors
+            )
+        )
 
     if args.trades_out:
         out_path = Path(args.trades_out)

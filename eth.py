@@ -6253,6 +6253,7 @@ BACKTEST_DATA_PATH = ai_data_path("backtest_ai_data.csv")
 ONLINE_SCALER_PATH = ai_data_path("online_scaler.pkl")
 ONLINE_MODEL_META_PATH = ai_data_path("online_model_meta.json")
 AI_LEARNING_PIPELINE_VERSION = 2
+STRATEGY_VERSION = str(os.getenv("ETH_BOT_STRATEGY_VERSION", "mlx-actual-v1")).strip() or "mlx-actual-v1"
 AI_LEARNING_META_PATH = ai_data_path("ai_learning_meta.json")
 MODEL_FEATURE_COLUMNS = [
     "htf",
@@ -6570,6 +6571,7 @@ def _build_actual_trade_mlx_market(decision, direction, source, daily_min_trade=
     market["source"] = source
     market["daily_min_trade"] = bool(daily_min_trade)
     market["primary_reason"] = "每日最低一單" if daily_min_trade else "實單策略觸發"
+    market["strategy_version"] = STRATEGY_VERSION
     features = decision.get("features")
     if isinstance(features, dict):
         market["features"] = dict(features)
@@ -7957,7 +7959,12 @@ def _process_sl_followup_reviews(df_1m, current_price):
 
 
 def _finalize_pending_training_sample(pending_sample, label, close_reason="", close_price=0.0, atr=0.0):
-    record_strategy_outcome(label, close_reason=close_reason, close_price=close_price)
+    record_strategy_outcome(
+        label,
+        close_reason=close_reason,
+        close_price=close_price,
+        strategy_version=STRATEGY_VERSION,
+    )
     if not pending_sample or not isinstance(pending_sample, dict):
         _clear_pending_training_sample_state()
         return None
@@ -8584,6 +8591,13 @@ def handle_ai_command(text, context=None):
                     f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['total']})"
                     for item in reason_stats[:5]
                 )
+            version_stats = stats.get("strategy_versions") or []
+            version_line = "尚無版本統計"
+            if version_stats:
+                version_line = "；".join(
+                    f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['evaluated']})"
+                    for item in version_stats[:5]
+                )
             sl_stats = sl_review_summary(limit=3)
             sl_line = (
                 f"累積 {sl_stats['total']} 筆；近{sl_stats['recent_checked']}筆需重審 "
@@ -8612,6 +8626,7 @@ def handle_ai_command(text, context=None):
                 f"因子勝率: {factor_line}\n"
                 f"主因勝率: {reason_line}\n"
                 f"盤型勝率: {regime_line}\n"
+                f"策略版本: {version_line}\n"
                 f"SL檢討: {sl_line}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
                 "新影子單驗證: TP先到才成功，SL先到即失敗\n"
@@ -8807,6 +8822,7 @@ def run_bot():
 
                     # AI / 新聞指令
                     context = {
+                        "strategy_version": STRATEGY_VERSION,
                         "price": price if 'price' in locals() else None,
                         "score": score if 'score' in locals() else None,
                         "htf": htf if 'htf' in locals() else None,
@@ -8914,6 +8930,7 @@ def run_bot():
                 atr_15m_avg,
             )
             auto_market_context = {
+                "strategy_version": STRATEGY_VERSION,
                 "price": price,
                 "analysis_timeframe": "1h",
                 "sampling_timeframe": "15m",

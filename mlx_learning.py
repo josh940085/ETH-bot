@@ -62,6 +62,7 @@ def _connect():
         "market_regime": "TEXT",
         "shadow_grade": "TEXT",
         "factor_json": "TEXT",
+        "strategy_version": "TEXT",
     }
     real_columns = {"confidence": "REAL"}
     for column in ("tp_price", "sl_price", "activated_at"):
@@ -90,6 +91,13 @@ def _connect():
         )
         """
     )
+    strategy_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(strategy_outcome)")
+    }
+    if "strategy_version" not in strategy_columns:
+        connection.execute(
+            "ALTER TABLE strategy_outcome ADD COLUMN strategy_version TEXT"
+        )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS historical_example (
@@ -642,6 +650,18 @@ def _grade_shadow_order(market, order, factors):
     return "C"
 
 
+def build_trade_factor_tags(market, direction, structured_payload=None):
+    """Public wrapper used by backtests and live records for MLX-style factor tags."""
+    market = market if isinstance(market, dict) else {}
+    payload = structured_payload if isinstance(structured_payload, dict) else {}
+    return _build_factor_tags(market, direction, payload)
+
+
+def classify_trade_market_regime(market):
+    market = market if isinstance(market, dict) else {}
+    return _classify_market_regime(market)
+
+
 def _extract_shadow_orders(response):
     orders = []
     text = str(response or "")
@@ -734,9 +754,9 @@ def record_analysis(question, response, market):
                 (
                     created_at, entry_price, direction, question, response, market_json,
                     tp_price, sl_price, activated_at, structured_json, primary_reason,
-                    confidence, market_regime, shadow_grade, factor_json
+                    confidence, market_regime, shadow_grade, factor_json, strategy_version
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 _analysis_insert_row(
@@ -835,9 +855,9 @@ def record_actual_trade_open(
                 (
                     created_at, entry_price, direction, question, response, market_json,
                     tp_price, sl_price, activated_at, structured_json, primary_reason,
-                    confidence, market_regime, shadow_grade, factor_json
+                    confidence, market_regime, shadow_grade, factor_json, strategy_version
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             row,
         )
@@ -880,6 +900,24 @@ def backfill_analysis_metadata(limit=2000, force=False):
         return 0
     _LAST_METADATA_BACKFILL_TS = now_ts
     with _LOCK, _connect() as connection:
+        connection.execute(
+            """
+            UPDATE analysis_episode
+            SET strategy_version = 'pre-version-tracking'
+            WHERE strategy_version IS NULL
+               OR strategy_version = ''
+               OR strategy_version = 'unknown'
+            """
+        )
+        connection.execute(
+            """
+            UPDATE strategy_outcome
+            SET strategy_version = 'pre-version-tracking'
+            WHERE strategy_version IS NULL
+               OR strategy_version = ''
+               OR strategy_version = 'unknown'
+            """
+        )
         rows = connection.execute(
             """
             SELECT id, direction, question, response, market_json, entry_price, tp_price, sl_price
@@ -890,6 +928,8 @@ def backfill_analysis_metadata(limit=2000, force=False):
                OR market_regime = ''
                OR primary_reason IS NULL
                OR primary_reason = ''
+               OR strategy_version IS NULL
+               OR strategy_version = ''
                OR (question LIKE 'auto-shadow:%' AND (shadow_grade IS NULL OR shadow_grade = ''))
             ORDER BY id DESC
             LIMIT ?
@@ -924,7 +964,8 @@ def backfill_analysis_metadata(limit=2000, force=False):
                     confidence = COALESCE(confidence, ?),
                     market_regime = COALESCE(NULLIF(market_regime, ''), ?),
                     shadow_grade = COALESCE(NULLIF(shadow_grade, ''), ?),
-                    factor_json = COALESCE(NULLIF(factor_json, ''), ?)
+                    factor_json = COALESCE(NULLIF(factor_json, ''), ?),
+                    strategy_version = COALESCE(NULLIF(strategy_version, ''), ?)
                 WHERE id = ?
                 """,
                 (
@@ -934,6 +975,7 @@ def backfill_analysis_metadata(limit=2000, force=False):
                     regime,
                     shadow_grade,
                     json.dumps(factors, ensure_ascii=False),
+                    str(market.get("strategy_version") or "pre-version-tracking"),
                     row["id"],
                 ),
             )
@@ -979,6 +1021,7 @@ def _analysis_insert_row(
         market_regime,
         grade,
         json.dumps(factors, ensure_ascii=False),
+        str(market.get("strategy_version") or ""),
     )
 
 
@@ -1229,6 +1272,19 @@ def learning_stats():
             WHERE question LIKE 'actual-trade:%'
             """
         ).fetchone()
+        version_rows = connection.execute(
+            """
+            SELECT
+                COALESCE(NULLIF(strategy_version, ''), 'pre-version-tracking') AS name,
+                COUNT(*) AS total,
+                SUM(CASE WHEN evaluated_at IS NOT NULL THEN 1 ELSE 0 END) AS evaluated,
+                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS wins
+            FROM analysis_episode
+            GROUP BY COALESCE(NULLIF(strategy_version, ''), 'pre-version-tracking')
+            ORDER BY total DESC
+            LIMIT 8
+            """
+        ).fetchall()
     imported = int(historical["total"] or 0)
     imported_successful = int(historical["successful"] or 0)
     total = int(row["total"] or 0)
@@ -1253,11 +1309,31 @@ def learning_stats():
         "actual_trades": int(actual_trades["total"] or 0),
         "actual_trades_evaluated": int(actual_trades["evaluated"] or 0),
         "actual_trades_successful": int(actual_trades["successful"] or 0),
+        "strategy_versions": _version_rows_to_summary(version_rows),
         "top_factors": factor_performance(limit=5),
         "primary_reasons": primary_reason_stats(limit=5),
         "shadow_grades": shadow_grade_stats(),
         "market_regimes": market_regime_stats(limit=5),
     }
+
+
+def _version_rows_to_summary(rows):
+    result = []
+    for row in rows:
+        total = int(row["total"] or 0)
+        evaluated = int(row["evaluated"] or 0)
+        wins = int(row["wins"] or 0)
+        result.append(
+            {
+                "name": str(row["name"] or "pre-version-tracking"),
+                "total": total,
+                "evaluated": evaluated,
+                "wins": wins,
+                "losses": max(0, evaluated - wins),
+                "winrate": wins / evaluated * 100 if evaluated else 0.0,
+            }
+        )
+    return result
 
 
 def _rate_summary(rows, key_name="name", limit=8):
@@ -1413,19 +1489,27 @@ def sl_review_summary(limit=5):
     }
 
 
-def record_strategy_outcome(result, close_reason="", close_price=0.0, closed_at=None):
+def record_strategy_outcome(
+    result,
+    close_reason="",
+    close_price=0.0,
+    closed_at=None,
+    strategy_version="",
+):
     clean_result = 1 if int(result) > 0 else 0
     with _LOCK, _connect() as connection:
         connection.execute(
             """
-            INSERT INTO strategy_outcome (closed_at, result, close_reason, close_price)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO strategy_outcome
+                (closed_at, result, close_reason, close_price, strategy_version)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
                 float(closed_at or time.time()),
                 clean_result,
                 str(close_reason or "UNKNOWN").upper()[:32],
                 _number(close_price),
+                str(strategy_version or ""),
             ),
         )
         connection.commit()
@@ -1547,6 +1631,13 @@ def build_daily_strategy_report():
         f"實單分析: {actual_total}筆；已驗證 {actual_eval}；"
         f"成功 {actual_success}"
     )
+    version_items = mlx.get("strategy_versions") or []
+    version_line = "策略版本: 尚無版本統計"
+    if version_items:
+        version_line = "策略版本: " + "；".join(
+            f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['evaluated']})"
+            for item in version_items[:3]
+        )
     sl_line = (
         f"SL檢討: 累積 {sl_summary['total']} 筆；"
         f"近{sl_summary['recent_checked']}筆需重審 {sl_summary['revalidation']} 筆"
@@ -1559,5 +1650,6 @@ def build_daily_strategy_report():
     return (
         "📊 每日策略勝率巡檢\n"
         f"{daily_line}\n{weekly_line}\n{mlx_line}\n"
-        f"{factor_line}\n{reason_line}\n{regime_line}\n{grade_line}\n{actual_line}\n{sl_line}{warning}"
+        f"{factor_line}\n{reason_line}\n{regime_line}\n{grade_line}\n"
+        f"{actual_line}\n{version_line}\n{sl_line}{warning}"
     )
