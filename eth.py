@@ -244,7 +244,39 @@ def _safe_int_env(name: str, default: int) -> int:
         return int(default)
 
 
+SHORT_TRADE_MAX_HOLD_SEC = max(3600.0, _safe_float_env("SHORT_TRADE_MAX_HOLD_SEC", 24 * 3600))
+LONG_TRADE_MAX_HOLD_SEC = max(SHORT_TRADE_MAX_HOLD_SEC, _safe_float_env("LONG_TRADE_MAX_HOLD_SEC", 7 * 24 * 3600))
 MLX_AGENT_TIMEOUT_SEC = _safe_int_env("MLX_AGENT_TIMEOUT_SEC", 120)
+
+
+def _normalize_trade_time_horizon(value) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"long", "long_term", "long-term", "swing", "position", "長線", "波段"}:
+        return "long"
+    return "short"
+
+
+def _infer_trade_time_horizon(final="", regime="", htf=0, mid_trend=0, daily_min_trade=False) -> str:
+    """Classify a new position for max-hold control.
+
+    Current live entries are mostly intraday. Only explicit long/swing wording is
+    treated as long-term; otherwise default to short so stale positions cannot
+    remain open indefinitely.
+    """
+    if daily_min_trade:
+        return "short"
+    text = f"{final or ''} {regime or ''}".lower()
+    if any(token in text for token in ("長線", "波段", "long-term", "long term", "swing")):
+        return "long"
+    return "short"
+
+
+def _trade_max_hold_sec(horizon=None) -> float:
+    return LONG_TRADE_MAX_HOLD_SEC if _normalize_trade_time_horizon(horizon) == "long" else SHORT_TRADE_MAX_HOLD_SEC
+
+
+def _trade_time_horizon_label(horizon=None) -> str:
+    return "長線" if _normalize_trade_time_horizon(horizon) == "long" else "短線"
 
 
 def _safe_float_env_names(names, default: float) -> float:
@@ -728,22 +760,24 @@ def _perform_manual_close():
     active_trade["reduce_count"] = 0
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
+    active_trade["time_horizon"] = "short"
     _set_break_even_state(False)
     _clear_pending_training_sample_state()
     sync_position_panel(current)
     return current, binance_close_msg
 
 
-def _close_trade_at_max_hold(current_price, candle_high=0.0, candle_low=0.0):
+def _close_trade_at_max_hold(current_price, candle_high=0.0, candle_low=0.0, max_hold_label="24h"):
     """Close an expired position at market; retain local state if Binance close fails."""
     current_price = _safe_float(current_price, _safe_float(active_trade.get("entry"), 0.0))
     direction = str(active_trade.get("direction") or "long").lower()
+    label = str(max_hold_label or "時間上限")
     close_msg = ""
     if _get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             qty = _get_active_trade_position_qty()
             if qty <= 0:
-                return False, "⚠️ 24h 到期但無法取得 Binance 持倉數量，保留本地持倉並重試"
+                return False, f"⚠️ {label} 到期但無法取得 Binance 持倉數量，保留本地持倉並重試"
             dual_side = _is_binance_dual_side_mode()
             position_side = "LONG" if direction == "long" else "SHORT"
             close_side = "SELL" if direction == "long" else "BUY"
@@ -754,14 +788,14 @@ def _close_trade_at_max_hold(current_price, candle_high=0.0, candle_low=0.0):
             else:
                 params["reduceOnly"] = "true"
             _binance_futures_signed_request("POST", "/fapi/v1/order", params)
-            close_msg = f"✅ Binance 24h 到期市價平倉已送出 qty={qty:.3f}"
+            close_msg = f"✅ Binance {label} 到期市價平倉已送出 qty={qty:.3f}"
         except Exception as e:
-            return False, f"⚠️ Binance 24h 到期平倉失敗: {e}"
+            return False, f"⚠️ Binance {label} 到期平倉失敗: {e}"
 
     record_position_close("MAX_HOLD", current_price, candle_high, candle_low)
     _reset_active_trade_state()
     sync_position_panel(current_price)
-    return True, close_msg or ("✅ 模擬持倉已於 24h 上限結束" if not _is_real_copy_enabled() else "✅ 24h 到期持倉已結束")
+    return True, close_msg or (f"✅ 模擬持倉已於 {label} 上限結束" if not _is_real_copy_enabled() else f"✅ {label} 到期持倉已結束")
 
 
 def _handle_control_callback(raw_text, fallback_chat_id=None):
@@ -924,6 +958,8 @@ def _load_position_panel_state():
             "break_even_active": False,
             "break_even_target": 0.0,
             "break_even_ts": 0,
+            "time_horizon": "short",
+            "max_hold_sec": SHORT_TRADE_MAX_HOLD_SEC,
         }
 
     try:
@@ -962,6 +998,8 @@ def _load_position_panel_state():
             "break_even_active": False,
             "break_even_target": 0.0,
             "break_even_ts": 0,
+            "time_horizon": "short",
+            "max_hold_sec": SHORT_TRADE_MAX_HOLD_SEC,
         }
 
     close_hits = raw.get("close_hits")
@@ -1002,6 +1040,8 @@ def _load_position_panel_state():
         "break_even_active": bool(raw.get("break_even_active", False)),
         "break_even_target": float(raw.get("break_even_target", 0.0) or 0.0),
         "break_even_ts": int(raw.get("break_even_ts", 0) or 0),
+        "time_horizon": _normalize_trade_time_horizon(raw.get("time_horizon")),
+        "max_hold_sec": float(raw.get("max_hold_sec", _trade_max_hold_sec(raw.get("time_horizon"))) or 0.0),
     }
 
 
@@ -3863,6 +3903,7 @@ def sync_active_trade_from_binance(send_notice=False):
     prev_open_time = _safe_float(active_trade.get("open_time"), 0.0)
     active_trade["open_time"] = prev_open_time if preserve_local_state and prev_open_time > 0 else time.time()
     active_trade["tp_sl_adjusted_4h"] = bool(active_trade.get("tp_sl_adjusted_4h", False)) if preserve_local_state else False
+    active_trade["time_horizon"] = _normalize_trade_time_horizon(active_trade.get("time_horizon") if preserve_local_state else "short")
     if preserve_local_state and bool(active_trade.get("break_even_active", False)):
         _sync_break_even_state_from_sl(direction, entry_price, sl, preserve_existing=True)
     else:
@@ -4409,6 +4450,8 @@ def sync_position_panel(current_price=None):
             "size_ratio": round(size_ratio, 4),
             "capital_usage_ratio": round(capital_usage_ratio, 4),
             "open_since_ts": _safe_int(active_trade.get("open_time"), int(time.time())),
+            "time_horizon": _normalize_trade_time_horizon(active_trade.get("time_horizon")),
+            "max_hold_sec": round(_trade_max_hold_sec(active_trade.get("time_horizon")), 2),
             "max_size": max_size,
             "min_size": min_size,
             "scale_add_room": scale_add_room,
@@ -4472,6 +4515,8 @@ def sync_position_panel(current_price=None):
             "size_ratio": 0.0,
             "capital_usage_ratio": 0.0,
             "open_since_ts": 0,
+            "time_horizon": _normalize_trade_time_horizon(active_trade.get("time_horizon")),
+            "max_hold_sec": round(_trade_max_hold_sec(active_trade.get("time_horizon")), 2),
             "max_size": round(_safe_float(active_trade.get("max_size"), 1.0), 4),
             "min_size": round(_safe_float(active_trade.get("min_size"), 0.1), 4),
             "scale_add_room": 0.0,
@@ -5643,6 +5688,7 @@ active_trade = {
     "scale_add_pause_ts": 0.0,
     "open_time": None,
     "tp_sl_adjusted_4h": False,
+    "time_horizon": "short",
 }
 
 
@@ -5667,6 +5713,7 @@ def _reset_active_trade_state():
     active_trade["scale_add_pause_ts"] = 0.0
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
+    active_trade["time_horizon"] = "short"
     _clear_pending_training_sample_state()
 
 
@@ -5692,8 +5739,10 @@ def restore_active_trade_from_panel():
     if direction not in {"long", "short"} or entry <= 0 or tp <= 0 or sl <= 0 or size <= 0:
         return
 
+    restored_horizon = _normalize_trade_time_horizon(raw.get("time_horizon"))
+    restore_max_age_sec = max(48 * 3600, _trade_max_hold_sec(restored_horizon) + 24 * 3600)
     state_ts = _safe_int(raw.get("ts"), 0)
-    if state_ts > 0 and (time.time() - state_ts) > 48 * 3600:
+    if state_ts > 0 and (time.time() - state_ts) > restore_max_age_sec:
         return
 
     active_trade["direction"] = direction
@@ -5719,6 +5768,7 @@ def restore_active_trade_from_panel():
     active_trade["scale_add_pause_ts"] = _safe_float(raw.get("scale_add_pause_ts"), 0.0)
     active_trade["open_time"] = _safe_float(raw.get("open_since_ts"), state_ts or time.time())
     active_trade["tp_sl_adjusted_4h"] = bool(raw.get("tp_sl_adjusted_4h", False))
+    active_trade["time_horizon"] = restored_horizon
     stored_be_active = bool(raw.get("break_even_active", False))
     stored_be_target = _safe_float(raw.get("break_even_target"), 0.0)
     stored_be_ts = _safe_float(raw.get("break_even_ts"), 0.0)
@@ -8826,36 +8876,50 @@ def run_bot():
                 candle_high = float(df_1m["high"].iloc[-1]) if len(df_1m) > 0 else current
                 candle_low = float(df_1m["low"].iloc[-1]) if len(df_1m) > 0 else current
                 open_ts = _safe_float(active_trade.get("open_time"), 0.0)
-                if open_ts > 0 and time.time() - open_ts >= 24 * 3600:
+                trade_horizon = _normalize_trade_time_horizon(active_trade.get("time_horizon"))
+                max_hold_sec = _trade_max_hold_sec(trade_horizon)
+                held_sec = time.time() - open_ts if open_ts > 0 else 0.0
+                if open_ts > 0 and held_sec >= max_hold_sec:
                     held_direction = str(active_trade.get("direction") or "long")
                     held_entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
                     profitable = (
                         (held_direction == "long" and current > held_entry)
                         or (held_direction == "short" and current < held_entry)
                     )
-                    if not profitable:
-                        if time.time() - getattr(run_bot, "last_max_hold_loss_notice_ts", 0.0) > 3600:
-                            print("⏱️ 持倉已超過 24 小時但尚未盈利，依規則維持 TP/SL，不強制平倉")
-                            run_bot.last_max_hold_loss_notice_ts = time.time()
-                    else:
-                        closed, close_msg = _close_trade_at_max_hold(current, candle_high, candle_low)
-                        if closed:
+                    horizon_label = _trade_time_horizon_label(trade_horizon)
+                    max_hold_hours = max_hold_sec / 3600.0
+                    max_hold_text = "7天" if max_hold_sec >= 7 * 24 * 3600 else "24小時"
+                    closed, close_msg = _close_trade_at_max_hold(
+                        current,
+                        candle_high,
+                        candle_low,
+                        max_hold_label=f"{horizon_label}{max_hold_text}",
+                    )
+                    if closed:
+                        if profitable:
                             performance["win"] += 1
-                            performance["total"] += 1
-                            pending_training_sample = _finalize_pending_training_sample(
-                                pending_training_sample, 1, close_reason="MAX_HOLD", close_price=current, atr=atr,
-                            )
-                            last_signal_cache = None
-                            _send_trade_notification(
-                                _build_trade_close_message("MAX_HOLD", held_direction, current, candle_high, candle_low)
-                                + "\n⏱️ 持倉超過 24 小時且仍有盈利，已結束。\n" + close_msg,
-                                priority=True,
-                            )
-                        elif time.time() - getattr(run_bot, "last_max_hold_error_ts", 0.0) > 300:
-                            print(close_msg)
-                            _send_trade_notification(close_msg, priority=True)
-                            run_bot.last_max_hold_error_ts = time.time()
-                        continue
+                            outcome_label = 1
+                            outcome_text = "盈利"
+                        else:
+                            performance["loss"] += 1
+                            outcome_label = 0
+                            outcome_text = "未盈利"
+                        performance["total"] += 1
+                        pending_training_sample = _finalize_pending_training_sample(
+                            pending_training_sample, outcome_label, close_reason="MAX_HOLD", close_price=current, atr=atr,
+                        )
+                        last_signal_cache = None
+                        _send_trade_notification(
+                            _build_trade_close_message("MAX_HOLD", held_direction, current, candle_high, candle_low)
+                            + f"\n⏱️ {horizon_label}持倉已達 {max_hold_text} 上限（{held_sec/3600.0:.1f}/{max_hold_hours:.1f}h），{outcome_text}也結束。\n"
+                            + close_msg,
+                            priority=True,
+                        )
+                    elif time.time() - getattr(run_bot, "last_max_hold_error_ts", 0.0) > 300:
+                        print(close_msg)
+                        _send_trade_notification(close_msg, priority=True)
+                        run_bot.last_max_hold_error_ts = time.time()
+                    continue
                 has_valid_tp_sl = _has_valid_tp_sl(active_trade)
 
                 if active_trade["direction"] == "long":
@@ -8890,6 +8954,7 @@ def run_bot():
                         active_trade["reduce_count"] = 0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
+                        active_trade["time_horizon"] = "short"
                         _set_break_even_state(False)
                         last_signal_cache = None
                         losing_streak += 1
@@ -8921,6 +8986,7 @@ def run_bot():
                         active_trade["reduce_count"] = 0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
+                        active_trade["time_horizon"] = "short"
                         _set_break_even_state(False)
                         last_signal_cache = None
                         losing_streak = 0
@@ -8963,6 +9029,7 @@ def run_bot():
                         active_trade["reduce_count"] = 0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
+                        active_trade["time_horizon"] = "short"
                         _set_break_even_state(False)
                         last_signal_cache = None
                         losing_streak += 1
@@ -8994,6 +9061,7 @@ def run_bot():
                         active_trade["reduce_count"] = 0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
+                        active_trade["time_horizon"] = "short"
                         _set_break_even_state(False)
                         last_signal_cache = None
                         losing_streak = 0
@@ -9392,6 +9460,13 @@ def run_bot():
                 active_trade["scale_add_pause_ts"] = 0.0
                 active_trade["open_time"] = time.time()
                 active_trade["tp_sl_adjusted_4h"] = False
+                active_trade["time_horizon"] = _infer_trade_time_horizon(
+                    final=final,
+                    regime=regime,
+                    htf=htf,
+                    mid_trend=mid_trend,
+                    daily_min_trade=daily_min_trade,
+                )
                 _set_break_even_state(False)
                 # 注意：active_trade["open"] 尚未設為 True，等待跟單確認後再設定
 
