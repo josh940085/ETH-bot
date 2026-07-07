@@ -8299,25 +8299,25 @@ def _start_mlx_auto_analysis(period_key, market_context):
 
 請先輸出一段嚴格 JSON，不可省略欄位，格式如下：
 ```json
-{
+{{
   "direction": "做多或做空",
   "primary_reason": "趨勢/支撐壓力/震盪/突破/新聞/量能/多週期衝突",
   "confidence": 0.0,
   "market_regime": "trend/range/breakout/fake_breakout_risk/news_driven/high_tf_conflict/higher_tf_transition",
   "support_zone": [支撐下緣數字, 支撐上緣數字],
   "resistance_zone": [壓力下緣數字, 壓力上緣數字],
-  "range_long": {"entry": 數字, "tp": 數字, "sl": 數字, "invalidation": "文字"},
-  "range_short": {"entry": 數字, "tp": 數字, "sl": 數字, "invalidation": "文字"},
+  "range_long": {{"entry": 數字, "tp": 數字, "sl": 數字, "invalidation": "文字"}},
+  "range_short": {{"entry": 數字, "tp": 數字, "sl": 數字, "invalidation": "文字"}},
   "factors": ["最多8個因素"],
-  "timeframe_view": {
+  "timeframe_view": {{
     "15m": "做多/做空因素",
     "1h": "做多/做空因素",
     "4h": "做多/做空因素",
     "1d": "做多/做空因素",
     "1w": "做多/做空因素",
     "1M": "做多/做空因素"
-  }
-}
+  }}
+}}
 ```
 confidence 請用 0 到 1 的小數；direction 不可輸出觀望。
 
@@ -8646,7 +8646,7 @@ Volume Spike: {context.get('volume_spike')}
 請輸出：
 先輸出嚴格 JSON：
 ```json
-{
+{{
   "direction": "做多/做空/觀望",
   "primary_reason": "趨勢/支撐壓力/震盪/突破/新聞/量能/多週期衝突",
   "confidence": 0.0,
@@ -8657,7 +8657,7 @@ Volume Spike: {context.get('volume_spike')}
   "tp": 數字,
   "sl": 數字,
   "factors": ["最多8個因素"]
-}
+}}
 ```
 再輸出：
 1. 當前市場結構
