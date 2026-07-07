@@ -67,6 +67,18 @@ JSON_AUTO_FIX_DEFAULTS = {
         "ts": 0,
     },
 }
+UNNECESSARY_FILE_NAMES = {".DS_Store"}
+UNNECESSARY_DIR_NAMES = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+UNNECESSARY_FILE_SUFFIXES = {".pyc", ".pyo"}
+UNNECESSARY_TMP_MIN_AGE_SEC = max(
+    60,
+    int(float(os.getenv("MAINTENANCE_TMP_FILE_MIN_AGE_SEC", "3600") or "3600")),
+)
+UNNECESSARY_CLEANUP_SKIP_DIRS = {
+    ".git",
+    ".venv",
+    "node_modules",
+}
 ENTRY_CONFIRM_FUNCTION_RE = re.compile(
     r"def _get_entry_confirm_candle_id\(df_5m\):\n"
     r"(?:    .*\n)+?"
@@ -853,6 +865,138 @@ def _gzip_file_atomic(path: Path):
     return gz_path
 
 
+def _is_safe_cleanup_path(path: Path):
+    try:
+        resolved = path.resolve(strict=False)
+        repo = REPO_DIR.resolve(strict=True)
+    except Exception:
+        return False
+    try:
+        relative = resolved.relative_to(repo)
+    except ValueError:
+        return False
+    return not (relative.parts and relative.parts[0] in UNNECESSARY_CLEANUP_SKIP_DIRS)
+
+
+def _relative_repo_path(path: Path):
+    try:
+        return str(path.resolve(strict=False).relative_to(REPO_DIR.resolve(strict=True)))
+    except Exception:
+        return path.name
+
+
+def _remove_unnecessary_path(path: Path):
+    if not _is_safe_cleanup_path(path) or not path.exists():
+        return 0
+
+    size_bytes = 0
+    if path.is_symlink():
+        try:
+            size_bytes = path.lstat().st_size
+        except OSError:
+            size_bytes = 0
+        path.unlink()
+        return size_bytes
+
+    if path.is_dir():
+        for child in path.rglob("*"):
+            try:
+                if child.is_file() or child.is_symlink():
+                    size_bytes += child.stat().st_size
+            except OSError:
+                continue
+        shutil.rmtree(path)
+        return size_bytes
+
+    try:
+        size_bytes = path.stat().st_size
+    except OSError:
+        size_bytes = 0
+    path.unlink()
+    return size_bytes
+
+
+def _collect_unnecessary_runtime_paths():
+    now_ts = dt.datetime.now(dt.timezone.utc).timestamp()
+    targets = []
+    seen = set()
+
+    for root, dir_names, file_names in os.walk(REPO_DIR):
+        root_path = Path(root)
+        try:
+            relative_root = root_path.resolve(strict=False).relative_to(REPO_DIR.resolve(strict=True))
+        except Exception:
+            relative_root = Path()
+        if not relative_root.parts:
+            dir_names[:] = [
+                name for name in dir_names
+                if name not in UNNECESSARY_CLEANUP_SKIP_DIRS
+            ]
+
+        for dir_name in list(dir_names):
+            if dir_name not in UNNECESSARY_DIR_NAMES:
+                continue
+            path = root_path / dir_name
+            if path in seen:
+                continue
+            seen.add(path)
+            targets.append(path)
+            dir_names.remove(dir_name)
+
+        for file_name in file_names:
+            path = root_path / file_name
+            if file_name in UNNECESSARY_FILE_NAMES or path.suffix in UNNECESSARY_FILE_SUFFIXES:
+                if path not in seen:
+                    seen.add(path)
+                    targets.append(path)
+                continue
+
+            if path.suffix == ".tmp":
+                try:
+                    age_sec = now_ts - path.stat().st_mtime
+                except OSError:
+                    continue
+                if age_sec >= UNNECESSARY_TMP_MIN_AGE_SEC and path not in seen:
+                    seen.add(path)
+                    targets.append(path)
+
+    return sorted(targets, key=lambda item: (len(item.parts), str(item)))
+
+
+def _cleanup_unnecessary_runtime_files():
+    removed_paths = []
+    total_bytes = 0
+
+    for path in _collect_unnecessary_runtime_paths():
+        rel_path = _relative_repo_path(path)
+        removed_bytes = _remove_unnecessary_path(path)
+        if not removed_bytes and not path.exists():
+            removed_bytes = 0
+        removed_paths.append(rel_path)
+        total_bytes += max(0, int(removed_bytes))
+
+    repaired = ["unnecessary_generated_files"] if removed_paths else []
+    repair_details = []
+    if removed_paths:
+        sample = removed_paths[:10]
+        repair_details.append(
+            {
+                "target": "unnecessary_generated_files",
+                "action": "delete_unnecessary_generated_file",
+                "count": len(removed_paths),
+                "freed_mb": round(total_bytes / 1024 / 1024, 3),
+                "sample": sample,
+                "content": (
+                    f"已刪除 {len(removed_paths)} 個可再生暫存/快取檔，"
+                    f"釋放 {round(total_bytes / 1024 / 1024, 3)} MB；"
+                    f"樣本：{', '.join(sample)}"
+                ),
+            }
+        )
+
+    return repaired, repair_details, total_bytes, len(removed_paths)
+
+
 def _check_runtime_storage_and_cleanup():
     targets = [
         data_path("news_predictions.jsonl.1"),
@@ -860,6 +1004,7 @@ def _check_runtime_storage_and_cleanup():
     checked = []
     repaired = []
     repair_details = []
+    compressed_count = 0
 
     for raw_path in targets:
         path = Path(raw_path)
@@ -875,6 +1020,7 @@ def _check_runtime_storage_and_cleanup():
             continue
 
         compressed = _gzip_file_atomic(path)
+        compressed_count += 1
         repaired.append(path.name)
         repair_details.append(
             {
@@ -885,6 +1031,10 @@ def _check_runtime_storage_and_cleanup():
             }
         )
 
+    cleanup_repaired, cleanup_details, cleanup_bytes, cleanup_count = _cleanup_unnecessary_runtime_files()
+    repaired.extend(cleanup_repaired)
+    repair_details.extend(cleanup_details)
+
     total_log_bytes = 0
     log_dir = data_path("..", "logs").resolve()
     if log_dir.exists():
@@ -892,10 +1042,13 @@ def _check_runtime_storage_and_cleanup():
 
     detail = (
         f"checked={len(checked)} "
-        f"logs_mb={round(total_log_bytes / 1024 / 1024, 1)}"
+        f"logs_mb={round(total_log_bytes / 1024 / 1024, 1)} "
+        f"compressed_old_files={compressed_count} "
+        f"deleted_unnecessary={cleanup_count} "
+        f"freed_mb={round(cleanup_bytes / 1024 / 1024, 1)}"
     )
     if repaired:
-        detail += f"; compressed {len(repaired)} old runtime files"
+        detail += f"; cleanup_batches={len(cleanup_repaired)}"
 
     return {
         "status": "fixed" if repaired else "ok",
@@ -904,6 +1057,8 @@ def _check_runtime_storage_and_cleanup():
         "repaired": repaired,
         "repair_details": repair_details,
         "log_size_mb": round(total_log_bytes / 1024 / 1024, 1),
+        "deleted_unnecessary_count": cleanup_count,
+        "freed_unnecessary_mb": round(cleanup_bytes / 1024 / 1024, 3),
     }
 
 
@@ -1397,7 +1552,6 @@ def main():
         ("runtime_memory", _check_runtime_memory_and_optimize),
         ("mlx_replacement_readiness", _check_mlx_replacement_readiness),
         ("panel_tunnel_health", _check_cloudflared_and_panel_tunnel),
-        ("runtime_storage", _check_runtime_storage_and_cleanup),
         ("runtime_json", _check_runtime_json_and_repair),
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
@@ -1406,6 +1560,7 @@ def main():
         ("telegram_policy", _check_telegram_policy_and_repair),
         ("telegram_watch_risk", _check_telegram_watch_risk),
         ("model_health", _check_models_and_repair),
+        ("runtime_storage", _check_runtime_storage_and_cleanup),
     ]
     if not args.skip_smoke_backtest:
         checks.append(
