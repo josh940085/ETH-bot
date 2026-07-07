@@ -761,6 +761,118 @@ def record_analysis(question, response, market):
         return cursor.rowcount
 
 
+def record_actual_trade_open(
+    direction,
+    entry_price,
+    tp_price,
+    sl_price,
+    market,
+    reason_text="",
+    opened_at=None,
+    source="live_trade",
+):
+    market = market if isinstance(market, dict) else {}
+    direction = str(direction or "").strip().lower()
+    if direction not in {"long", "short"}:
+        return None
+    entry = _number(entry_price)
+    tp = _number(tp_price)
+    sl = _number(sl_price)
+    if entry <= 0:
+        return None
+    opened_at = float(opened_at or time.time())
+    market = dict(market)
+    market["price"] = entry
+    market["actual_trade"] = True
+    market["actual_trade_source"] = str(source or "live_trade")
+    direction_text = "做多" if direction == "long" else "做空"
+    payload = {
+        "direction": direction_text,
+        "primary_reason": str(market.get("primary_reason") or "實單策略觸發"),
+        "confidence": _number(market.get("ai_prob"), _number(market.get("confidence"), 0.0)),
+        "market_regime": _classify_market_regime(market),
+        "entry_zone": [entry, entry],
+        "tp": tp,
+        "sl": sl,
+        "factors": _build_factor_tags(market, direction, {}),
+        "source": source,
+    }
+    response = (
+        "```json\n"
+        + json.dumps(payload, ensure_ascii=False, default=str)
+        + "\n```\n"
+        + f"實際開單：{direction_text}；進場={entry:.4f}；TP={tp:.4f}；SL={sl:.4f}；"
+        + f"依據={str(reason_text or '策略觸發')[:1000]}"
+    )
+    structured_payload, primary_reason, confidence = _extract_structured_payload(response)
+    market_regime = _classify_market_regime(market)
+    order = {
+        "direction": direction,
+        "entry_price": entry,
+        "tp_price": tp if tp > 0 else None,
+        "sl_price": sl if sl > 0 else None,
+    }
+    with _LOCK, _connect() as connection:
+        market_json = json.dumps(market, ensure_ascii=False, default=str)
+        row = _analysis_insert_row(
+            opened_at,
+            f"actual-trade:{source}:{int(opened_at)}",
+            response,
+            market_json,
+            market,
+            structured_payload,
+            primary_reason,
+            confidence,
+            market_regime,
+            order,
+            1,
+            1,
+            entry,
+        )
+        cursor = connection.execute(
+            """
+            INSERT INTO analysis_episode
+                (
+                    created_at, entry_price, direction, question, response, market_json,
+                    tp_price, sl_price, activated_at, structured_json, primary_reason,
+                    confidence, market_regime, shadow_grade, factor_json
+                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            row,
+        )
+        connection.commit()
+        return int(cursor.lastrowid)
+
+
+def update_actual_trade_outcome(episode_id, close_price, success, closed_at=None):
+    episode_id = int(_number(episode_id, 0))
+    close_price = _number(close_price)
+    if episode_id <= 0 or close_price <= 0:
+        return False
+    closed_at = float(closed_at or time.time())
+    with _LOCK, _connect() as connection:
+        row = connection.execute(
+            "SELECT entry_price FROM analysis_episode WHERE id = ?",
+            (episode_id,),
+        ).fetchone()
+        if not row:
+            return False
+        return_pct = (close_price - _number(row["entry_price"])) / max(
+            _number(row["entry_price"]), 1e-9
+        ) * 100
+        connection.execute(
+            """
+            UPDATE analysis_episode
+            SET evaluated_at = ?, exit_price = ?, return_pct = ?, success = ?
+            WHERE id = ?
+            """,
+            (closed_at, close_price, return_pct, 1 if int(success) > 0 else 0, episode_id),
+        )
+        connection.commit()
+        return True
+
+
 def backfill_analysis_metadata(limit=2000, force=False):
     global _LAST_METADATA_BACKFILL_TS
     now_ts = time.time()
@@ -1107,6 +1219,16 @@ def learning_stats():
         sl_reviews = connection.execute(
             "SELECT COUNT(*) AS total FROM sl_review_event"
         ).fetchone()
+        actual_trades = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN evaluated_at IS NOT NULL THEN 1 ELSE 0 END) AS evaluated,
+                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successful
+            FROM analysis_episode
+            WHERE question LIKE 'actual-trade:%'
+            """
+        ).fetchone()
     imported = int(historical["total"] or 0)
     imported_successful = int(historical["successful"] or 0)
     total = int(row["total"] or 0)
@@ -1128,6 +1250,9 @@ def learning_stats():
         "auto_analyses": int(auto_analyses["total"] or 0),
         "structured_analyses": int(structured["total"] or 0),
         "sl_reviews": int(sl_reviews["total"] or 0),
+        "actual_trades": int(actual_trades["total"] or 0),
+        "actual_trades_evaluated": int(actual_trades["evaluated"] or 0),
+        "actual_trades_successful": int(actual_trades["successful"] or 0),
         "top_factors": factor_performance(limit=5),
         "primary_reasons": primary_reason_stats(limit=5),
         "shadow_grades": shadow_grade_stats(),
@@ -1415,6 +1540,13 @@ def build_daily_strategy_report():
             f"{item['name']}級 {item['winrate']:.1f}%({item['wins']}/{item['total']})"
             for item in grades
         )
+    actual_total = int(mlx.get("actual_trades", 0))
+    actual_eval = int(mlx.get("actual_trades_evaluated", 0))
+    actual_success = int(mlx.get("actual_trades_successful", 0))
+    actual_line = (
+        f"實單分析: {actual_total}筆；已驗證 {actual_eval}；"
+        f"成功 {actual_success}"
+    )
     sl_line = (
         f"SL檢討: 累積 {sl_summary['total']} 筆；"
         f"近{sl_summary['recent_checked']}筆需重審 {sl_summary['revalidation']} 筆"
@@ -1427,5 +1559,5 @@ def build_daily_strategy_report():
     return (
         "📊 每日策略勝率巡檢\n"
         f"{daily_line}\n{weekly_line}\n{mlx_line}\n"
-        f"{factor_line}\n{reason_line}\n{regime_line}\n{grade_line}\n{sl_line}{warning}"
+        f"{factor_line}\n{reason_line}\n{regime_line}\n{grade_line}\n{actual_line}\n{sl_line}{warning}"
     )

@@ -54,11 +54,13 @@ from mlx_learning import (
     learning_stats as get_mlx_learning_stats,
     mark_daily_report_sent,
     record_analysis as record_mlx_analysis,
+    record_actual_trade_open,
     record_higher_timeframe_context,
     record_sl_review,
     record_strategy_outcome,
     release_auto_analysis,
     sl_review_summary,
+    update_actual_trade_outcome,
 )
 from telegram import (
     REPO_DIR,
@@ -6516,6 +6518,7 @@ def _sanitize_pending_training_sample(sample):
         "learn_features": _normalize_feature_payload(learn_features),
         "direction": direction,
         "entry_ts": entry_ts,
+        "mlx_episode_id": _safe_int(sample.get("mlx_episode_id"), 0),
     }
 
 
@@ -6536,6 +6539,44 @@ def _save_pending_training_sample_state(sample):
     return clean
 
 
+def _build_actual_trade_mlx_market(decision, direction, source, daily_min_trade=False):
+    decision = decision if isinstance(decision, dict) else {}
+    higher_timeframe = decision.get("higher_timeframe")
+    market = dict(higher_timeframe) if isinstance(higher_timeframe, dict) else {}
+    for key in (
+        "price",
+        "score",
+        "ai_prob",
+        "ai_long_prob",
+        "ai_short_prob",
+        "htf",
+        "mid_trend",
+        "daily_trend",
+        "weekly_trend",
+        "regime",
+        "breakout",
+        "triangle",
+        "macro_bias",
+        "volume_spike",
+        "rsi_15m",
+        "derivatives_pressure",
+        "support_hits",
+        "resistance_hits",
+    ):
+        if key in decision:
+            market[key] = decision.get(key)
+    market["macro"] = decision.get("macro_bias", market.get("macro"))
+    market["direction"] = direction
+    market["source"] = source
+    market["daily_min_trade"] = bool(daily_min_trade)
+    market["primary_reason"] = "每日最低一單" if daily_min_trade else "實單策略觸發"
+    features = decision.get("features")
+    if isinstance(features, dict):
+        market["features"] = dict(features)
+        market.setdefault("sr_bias", features.get("multi_tf_sr_bias"))
+    return market
+
+
 def _maybe_backfill_pending_training_sample(
     pending_sample,
     df_4h,
@@ -6554,11 +6595,16 @@ def _maybe_backfill_pending_training_sample(
     last_signal=None,
     losing_streak=0,
 ):
-    if pending_sample or not active_trade.get("open"):
+    if not active_trade.get("open"):
+        return pending_sample
+    if pending_sample and _safe_int(pending_sample.get("mlx_episode_id"), 0) > 0:
         return pending_sample
 
     direction = _normalize_trade_direction(active_trade.get("direction"))
-    open_ts = _safe_float(active_trade.get("open_time"), 0.0)
+    open_ts = _safe_float(
+        pending_sample.get("entry_ts") if isinstance(pending_sample, dict) else None,
+        _safe_float(active_trade.get("open_time"), 0.0),
+    )
     if open_ts <= 0 or direction not in {"long", "short"}:
         return pending_sample
 
@@ -6583,12 +6629,37 @@ def _maybe_backfill_pending_training_sample(
         features = decision.get("features")
         if not isinstance(features, dict):
             return pending_sample
+        mlx_episode_id = record_actual_trade_open(
+            direction=direction,
+            entry_price=_safe_float(active_trade.get("avg_entry", active_trade.get("entry")), price),
+            tp_price=_safe_float(active_trade.get("tp"), 0.0),
+            sl_price=_safe_float(active_trade.get("sl"), 0.0),
+            market=_build_actual_trade_mlx_market(
+                decision,
+                direction,
+                source="restored_position",
+            ),
+            reason_text="重啟後依目前持倉狀態補建實單分析",
+            opened_at=open_ts,
+            source="restored_position",
+        )
+        existing_features = (
+            pending_sample.get("features")
+            if isinstance(pending_sample, dict) and isinstance(pending_sample.get("features"), dict)
+            else features
+        )
+        existing_learn_features = (
+            pending_sample.get("learn_features")
+            if isinstance(pending_sample, dict) and isinstance(pending_sample.get("learn_features"), dict)
+            else _build_directional_learning_features(existing_features, direction)
+        )
         rebuilt = _save_pending_training_sample_state(
             {
-                "features": dict(features),
-                "learn_features": _build_directional_learning_features(features, direction),
+                "features": dict(existing_features),
+                "learn_features": dict(existing_learn_features),
                 "direction": direction,
                 "entry_ts": open_ts,
+                "mlx_episode_id": _safe_int(mlx_episode_id, 0),
             }
         )
         if rebuilt:
@@ -7892,6 +7963,17 @@ def _finalize_pending_training_sample(pending_sample, label, close_reason="", cl
         return None
 
     direction = _normalize_trade_direction(pending_sample.get("direction"))
+    mlx_episode_id = _safe_int(pending_sample.get("mlx_episode_id"), 0)
+    if mlx_episode_id > 0:
+        try:
+            update_actual_trade_outcome(
+                mlx_episode_id,
+                close_price,
+                1 if int(label) > 0 else 0,
+                closed_at=time.time(),
+            )
+        except Exception as exc:
+            print(f"⚠️ MLX實單結果回寫失敗: {exc}")
     sample_features = pending_sample.get("learn_features")
 
     if not isinstance(sample_features, dict):
@@ -8523,6 +8605,9 @@ def handle_ai_command(text, context=None):
                 f"歷史變盤案例: {stats.get('turning_points', 0)}\n"
                 f"非變盤對照: {stats.get('contrast_examples', 0)}\n"
                 f"自動影子分析: {stats.get('auto_analyses', 0)}\n"
+                f"實單分析: {stats.get('actual_trades', 0)} 筆"
+                f"（已驗證 {stats.get('actual_trades_evaluated', 0)}，"
+                f"成功 {stats.get('actual_trades_successful', 0)}）\n"
                 f"影子單分級: {grade_line}\n"
                 f"因子勝率: {factor_line}\n"
                 f"主因勝率: {reason_line}\n"
@@ -9650,16 +9735,32 @@ def run_bot():
                     send_private_telegram(copy_msg, priority=True)
                     if copy_ok:
                         learn_features = _build_directional_learning_features(features, direction)
+                        active_trade["open"] = True
+                        _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
+                        sync_active_trade_from_binance(send_notice=False)
+                        mlx_episode_id = record_actual_trade_open(
+                            direction=direction,
+                            entry_price=_safe_float(active_trade.get("avg_entry", active_trade.get("entry")), entry),
+                            tp_price=_safe_float(active_trade.get("tp"), tp or 0.0),
+                            sl_price=_safe_float(active_trade.get("sl"), sl or 0.0),
+                            market=_build_actual_trade_mlx_market(
+                                decision,
+                                direction,
+                                source="copy_trade",
+                                daily_min_trade=daily_min_trade,
+                            ),
+                            reason_text=reason_text,
+                            opened_at=now_ts,
+                            source="copy_trade",
+                        )
                         pending_training_sample = {
                             "features": dict(features),
                             "learn_features": dict(learn_features),
                             "direction": direction,
                             "entry_ts": now_ts,
+                            "mlx_episode_id": _safe_int(mlx_episode_id, 0),
                         }
                         pending_training_sample = _save_pending_training_sample_state(pending_training_sample)
-                        active_trade["open"] = True
-                        _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
-                        sync_active_trade_from_binance(send_notice=False)
                     else:
                         # 開單失敗，清除本地倉位狀態，避免面板顯示假倉位
                         pending_training_sample = None
@@ -9668,11 +9769,27 @@ def run_bot():
                 else:
                     # 未開啟跟單，僅本地追蹤
                     learn_features = _build_directional_learning_features(features, direction)
+                    mlx_episode_id = record_actual_trade_open(
+                        direction=direction,
+                        entry_price=entry,
+                        tp_price=tp or 0.0,
+                        sl_price=sl or 0.0,
+                        market=_build_actual_trade_mlx_market(
+                            decision,
+                            direction,
+                            source="local_tracking",
+                            daily_min_trade=daily_min_trade,
+                        ),
+                        reason_text=reason_text,
+                        opened_at=now_ts,
+                        source="local_tracking",
+                    )
                     pending_training_sample = {
                         "features": dict(features),
                         "learn_features": dict(learn_features),
                         "direction": direction,
                         "entry_ts": now_ts,
+                        "mlx_episode_id": _safe_int(mlx_episode_id, 0),
                     }
                     pending_training_sample = _save_pending_training_sample_state(pending_training_sample)
                     active_trade["open"] = True
