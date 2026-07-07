@@ -55,8 +55,10 @@ from mlx_learning import (
     mark_daily_report_sent,
     record_analysis as record_mlx_analysis,
     record_higher_timeframe_context,
+    record_sl_review,
     record_strategy_outcome,
     release_auto_analysis,
+    sl_review_summary,
 )
 from telegram import (
     REPO_DIR,
@@ -8213,7 +8215,31 @@ def _start_mlx_auto_analysis(period_key, market_context):
 6. 震盪支撐、壓力、進場、TP、SL必須逐字使用「策略計算的合法震盪參考方案」，
    不可自行交換或另算價位。
 
-請嚴格用以下格式輸出：
+請先輸出一段嚴格 JSON，不可省略欄位，格式如下：
+```json
+{
+  "direction": "做多或做空",
+  "primary_reason": "趨勢/支撐壓力/震盪/突破/新聞/量能/多週期衝突",
+  "confidence": 0.0,
+  "market_regime": "trend/range/breakout/fake_breakout_risk/news_driven/high_tf_conflict/higher_tf_transition",
+  "support_zone": [支撐下緣數字, 支撐上緣數字],
+  "resistance_zone": [壓力下緣數字, 壓力上緣數字],
+  "range_long": {"entry": 數字, "tp": 數字, "sl": 數字, "invalidation": "文字"},
+  "range_short": {"entry": 數字, "tp": 數字, "sl": 數字, "invalidation": "文字"},
+  "factors": ["最多8個因素"],
+  "timeframe_view": {
+    "15m": "做多/做空因素",
+    "1h": "做多/做空因素",
+    "4h": "做多/做空因素",
+    "1d": "做多/做空因素",
+    "1w": "做多/做空因素",
+    "1M": "做多/做空因素"
+  }
+}
+```
+confidence 請用 0 到 1 的小數；direction 不可輸出觀望。
+
+JSON 後再嚴格用以下格式輸出：
 時段判讀：15m=...；1H=...；4H=...；日線=...；週線=...；月線=...
 有效支撐區：價格-價格
 有效壓力區：價格-價格
@@ -8448,17 +8474,60 @@ def handle_ai_command(text, context=None):
 
         if question.lower() in {"stats", "status", "學習", "學習狀態"}:
             stats = get_mlx_learning_stats()
+            top_factors = stats.get("top_factors") or []
+            factor_line = "尚無已驗證因子"
+            if top_factors:
+                factor_line = "；".join(
+                    f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+                    for item in top_factors[:5]
+                )
+            grade_stats = stats.get("shadow_grades") or []
+            grade_line = "尚無已驗證分級"
+            if grade_stats:
+                grade_line = "；".join(
+                    f"{item['name']}級 {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+                    for item in grade_stats
+                )
+            regime_stats = stats.get("market_regimes") or []
+            regime_line = "尚無已驗證盤型"
+            if regime_stats:
+                regime_line = "；".join(
+                    f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+                    for item in regime_stats[:5]
+                )
+            reason_stats = stats.get("primary_reasons") or []
+            reason_line = "尚無已驗證主因"
+            if reason_stats:
+                reason_line = "；".join(
+                    f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+                    for item in reason_stats[:5]
+                )
+            sl_stats = sl_review_summary(limit=3)
+            sl_line = (
+                f"累積 {sl_stats['total']} 筆；近{sl_stats['recent_checked']}筆需重審 "
+                f"{sl_stats['revalidation']} 筆"
+            )
+            if sl_stats["top_issues"]:
+                sl_line += "；常見問題 " + "、".join(
+                    f"{issue}({count})" for issue, count in sl_stats["top_issues"]
+                )
             return (
                 "🧠 MLX 學習狀態\n"
                 f"累積分析: {stats['total']}\n"
                 f"已驗證: {stats['evaluated']}\n"
                 f"成功案例: {stats['successful']}\n"
+                f"結構化分析: {stats.get('structured_analyses', 0)}\n"
                 f"既有模型匯入: {stats.get('imported', 0)}\n"
                 f"可用學習案例: {stats.get('context_total', stats['total'])}\n"
                 f"高週期觀察: {stats.get('higher_tf_observations', 0)}\n"
                 f"歷史變盤案例: {stats.get('turning_points', 0)}\n"
                 f"非變盤對照: {stats.get('contrast_examples', 0)}\n"
                 f"自動影子分析: {stats.get('auto_analyses', 0)}\n"
+                f"影子單分級: {grade_line}\n"
+                f"因子勝率: {factor_line}\n"
+                f"主因勝率: {reason_line}\n"
+                f"盤型勝率: {regime_line}\n"
+                f"SL檢討: {sl_line}\n"
                 f"驗證準確率: {stats['accuracy']:.1f}%\n"
                 "新影子單驗證: TP先到才成功，SL先到即失敗\n"
                 f"舊案例驗證週期: {stats['evaluation_hours']:.0f} 小時"
@@ -8490,6 +8559,22 @@ Volume Spike: {context.get('volume_spike')}
 {question}
 
 請輸出：
+先輸出嚴格 JSON：
+```json
+{
+  "direction": "做多/做空/觀望",
+  "primary_reason": "趨勢/支撐壓力/震盪/突破/新聞/量能/多週期衝突",
+  "confidence": 0.0,
+  "market_regime": "trend/range/breakout/fake_breakout_risk/news_driven/high_tf_conflict/higher_tf_transition",
+  "support_zone": [支撐下緣數字, 支撐上緣數字],
+  "resistance_zone": [壓力下緣數字, 壓力上緣數字],
+  "entry_zone": [進場下緣數字, 進場上緣數字],
+  "tp": 數字,
+  "sl": 數字,
+  "factors": ["最多8個因素"]
+}
+```
+再輸出：
 1. 當前市場結構
 2. 是否建議做多/做空/觀望
 3. 進場區間
@@ -8778,6 +8863,9 @@ def run_bot():
                 "macro": _compute_macro_bias(
                     sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
                 ),
+                "derivatives_pressure": _safe_float(
+                    derivatives_flow.get("derivatives_pressure"), 0.0
+                ),
                 "volume_spike": bool(
                     df_15m["volume"].iloc[-1]
                     > df_15m["vol_ma20"].iloc[-1] * 1.5
@@ -9019,6 +9107,7 @@ def run_bot():
                                 "td_exhaustion": td_setup_15m["up_9"],
                             },
                         )
+                        record_sl_review(sl_review)
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["position_qty"] = 0.0
@@ -9094,6 +9183,7 @@ def run_bot():
                                 "td_exhaustion": td_setup_15m["down_9"],
                             },
                         )
+                        record_sl_review(sl_review)
                         active_trade["open"] = False
                         active_trade["size"] = 0.0
                         active_trade["position_qty"] = 0.0

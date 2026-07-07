@@ -26,6 +26,7 @@ _LAST_EVALUATION_TS = 0.0
 _LAST_HISTORY_IMPORT_TS = 0.0
 _LAST_TURNING_POINTS_MTIME = 0.0
 _LAST_CONTRAST_EXAMPLES_MTIME = 0.0
+_LAST_METADATA_BACKFILL_TS = 0.0
 
 
 def _connect():
@@ -55,10 +56,28 @@ def _connect():
     existing_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(analysis_episode)")
     }
+    text_columns = {
+        "structured_json": "TEXT",
+        "primary_reason": "TEXT",
+        "market_regime": "TEXT",
+        "shadow_grade": "TEXT",
+        "factor_json": "TEXT",
+    }
+    real_columns = {"confidence": "REAL"}
     for column in ("tp_price", "sl_price", "activated_at"):
         if column not in existing_columns:
             connection.execute(
                 f"ALTER TABLE analysis_episode ADD COLUMN {column} REAL"
+            )
+    for column, column_type in text_columns.items():
+        if column not in existing_columns:
+            connection.execute(
+                f"ALTER TABLE analysis_episode ADD COLUMN {column} {column_type}"
+            )
+    for column, column_type in real_columns.items():
+        if column not in existing_columns:
+            connection.execute(
+                f"ALTER TABLE analysis_episode ADD COLUMN {column} {column_type}"
             )
     connection.execute(
         """
@@ -107,6 +126,18 @@ def _connect():
         CREATE TABLE IF NOT EXISTS daily_report_log (
             report_date TEXT PRIMARY KEY,
             sent_at REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS sl_review_event (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL NOT NULL,
+            direction TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            issue_json TEXT NOT NULL,
+            review_json TEXT NOT NULL
         )
         """
     )
@@ -457,6 +488,160 @@ def _extract_direction(response):
     return "neutral"
 
 
+def _json_loads_safe(value, default=None):
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {} if default is None else default
+
+
+def _extract_structured_payload(response):
+    text = str(response or "")
+    payload = {}
+    block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    candidates = []
+    if block:
+        candidates.append(block.group(1))
+    first = text.find("{")
+    last = text.rfind("}")
+    if 0 <= first < last:
+        candidates.append(text[first : last + 1])
+    for candidate in candidates:
+        try:
+            loaded = json.loads(candidate)
+            if isinstance(loaded, dict):
+                payload = loaded
+                break
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+
+    if not payload:
+        reason_match = re.search(r"(?:主因|primary_reason)[：:\s]+([^\n；;]+)", text)
+        confidence_match = re.search(r"(?:信心|confidence)[：:\s]+([0-9]+(?:\.[0-9]+)?)", text)
+        if reason_match:
+            payload["primary_reason"] = reason_match.group(1).strip()
+        if confidence_match:
+            confidence = _number(confidence_match.group(1), 0.0)
+            payload["confidence"] = confidence / 100 if confidence > 1 else confidence
+
+    reason = str(payload.get("primary_reason") or payload.get("主因") or "").strip()
+    confidence = _number(payload.get("confidence", payload.get("信心", 0.0)), 0.0)
+    if confidence > 1:
+        confidence /= 100
+    confidence = max(0.0, min(1.0, confidence))
+    if not reason:
+        text_lower = text.lower()
+        for candidate in ("支撐壓力", "震盪", "突破", "趨勢", "新聞", "量能"):
+            if candidate in text_lower or candidate in text:
+                reason = candidate
+                break
+    return payload, reason[:64], confidence
+
+
+def _classify_market_regime(market):
+    regime = str(market.get("regime") or "").strip()
+    breakout = int(_number(market.get("breakout"), 0))
+    macro = _number(market.get("macro"), _number(market.get("macro_bias"), 0.0))
+    volume_spike = bool(market.get("volume_spike"))
+    htf = int(_number(market.get("htf"), _number(market.get("four_hour_trend"), 0)))
+    one_hour = int(_number(market.get("one_hour_trend"), 0))
+    daily = int(_number(market.get("daily_trend"), 0))
+    weekly = int(_number(market.get("weekly_trend"), 0))
+    if abs(macro) >= 0.55:
+        return "news_driven"
+    if breakout and volume_spike:
+        return "breakout"
+    if breakout and not volume_spike:
+        return "fake_breakout_risk"
+    if htf and daily and htf != daily:
+        return "high_tf_conflict"
+    if one_hour and htf and daily and len({one_hour, htf, daily}) == 1:
+        return "trend"
+    if regime:
+        return regime
+    if weekly and daily and weekly != daily:
+        return "higher_tf_transition"
+    return "range"
+
+
+def _build_factor_tags(market, direction, structured_payload=None):
+    direction_sign = 1 if direction == "long" else -1 if direction == "short" else 0
+    tags = []
+
+    def add_directional(name, value, threshold=0.0):
+        signed = _number(value, 0.0) * direction_sign
+        if direction_sign == 0:
+            return
+        if signed > threshold:
+            tags.append(f"{name}:同向")
+        elif signed < -threshold:
+            tags.append(f"{name}:逆向")
+        else:
+            tags.append(f"{name}:中性")
+
+    add_directional("30m_MACD", market.get("mid_trend"), 0.0)
+    add_directional("4H趨勢", market.get("htf", market.get("four_hour_trend")), 0.0)
+    add_directional("1H趨勢", market.get("one_hour_trend"), 0.0)
+    add_directional("日線趨勢", market.get("daily_trend"), 0.0)
+    add_directional("週線趨勢", market.get("weekly_trend"), 0.0)
+    add_directional("支撐壓力", market.get("sr_bias"), 0.10)
+    add_directional("新聞宏觀", market.get("macro", market.get("macro_bias")), 0.20)
+    add_directional("衍生品", market.get("derivatives_pressure"), 0.10)
+
+    rsi_bucket = str(market.get("rsi_bucket") or "").strip()
+    if rsi_bucket:
+        tags.append(f"RSI:{rsi_bucket}")
+    if bool(market.get("volume_spike")):
+        tags.append("量能:放大")
+    if _number(market.get("breakout"), 0.0) != 0:
+        tags.append("突破:存在")
+    for key, label in (
+        ("fifteen_min_range_pos", "15m區間"),
+        ("one_hour_range_pos", "1H區間"),
+        ("four_hour_range_pos", "4H區間"),
+        ("daily_range_pos", "日線區間"),
+        ("weekly_range_pos", "週線區間"),
+    ):
+        pos = _number(market.get(key), -1.0)
+        if 0 <= pos <= 0.25:
+            tags.append(f"{label}:近下緣")
+        elif pos >= 0.75:
+            tags.append(f"{label}:近上緣")
+
+    if isinstance(structured_payload, dict):
+        raw_factors = structured_payload.get("factors") or structured_payload.get("因素")
+        if isinstance(raw_factors, list):
+            for factor in raw_factors[:8]:
+                clean = str(factor).strip()
+                if clean:
+                    tags.append(f"MLX:{clean[:32]}")
+    return list(dict.fromkeys(tags))
+
+
+def _grade_shadow_order(market, order, factors):
+    direction = order.get("direction")
+    entry = _number(order.get("entry_price"))
+    tp = _number(order.get("tp_price"))
+    sl = _number(order.get("sl_price"))
+    if entry <= 0 or tp <= 0 or sl <= 0:
+        return "C"
+    risk = abs(entry - sl)
+    reward = abs(tp - entry)
+    rr = reward / max(risk, 1e-9)
+    aligned = sum(1 for factor in factors if factor.endswith(":同向"))
+    reversed_count = sum(1 for factor in factors if factor.endswith(":逆向"))
+    range_edge_ok = (
+        any("近下緣" in factor for factor in factors)
+        if direction == "long"
+        else any("近上緣" in factor for factor in factors)
+    )
+    if rr >= 1.6 and aligned >= 3 and reversed_count <= 1 and range_edge_ok:
+        return "A"
+    if rr >= 1.2 and aligned >= 2 and reversed_count <= 2:
+        return "B"
+    return "C"
+
+
 def _extract_shadow_orders(response):
     orders = []
     text = str(response or "")
@@ -528,6 +713,10 @@ def record_analysis(question, response, market):
     )
     if clean_question.startswith("auto-shadow:") and not shadow_orders:
         return 0
+    structured_payload, primary_reason, confidence = _extract_structured_payload(
+        clean_response
+    )
+    market_regime = _classify_market_regime(market)
     orders = shadow_orders or [
         {
             "direction": _extract_direction(clean_response),
@@ -544,35 +733,141 @@ def record_analysis(question, response, market):
             INSERT INTO analysis_episode
                 (
                     created_at, entry_price, direction, question, response, market_json,
-                    tp_price, sl_price, activated_at
+                    tp_price, sl_price, activated_at, structured_json, primary_reason,
+                    confidence, market_regime, shadow_grade, factor_json
                 )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
-                (
+                _analysis_insert_row(
                     created_at,
-                    order["entry_price"],
-                    order["direction"],
-                    (
-                        f"{clean_question}:order:{index}"
-                        if len(orders) > 1
-                        else clean_question
-                    ),
+                    clean_question,
                     clean_response,
                     market_json,
-                    order["tp_price"],
-                    order["sl_price"],
-                    (
-                        created_at
-                        if abs(order["entry_price"] - price) / price <= 0.0005
-                        else None
-                    ),
+                    market,
+                    structured_payload,
+                    primary_reason,
+                    confidence,
+                    market_regime,
+                    order,
+                    index,
+                    len(orders),
+                    price,
                 )
                 for index, order in enumerate(orders, start=1)
             ],
         )
         connection.commit()
         return cursor.rowcount
+
+
+def backfill_analysis_metadata(limit=2000, force=False):
+    global _LAST_METADATA_BACKFILL_TS
+    now_ts = time.time()
+    if not force and now_ts - _LAST_METADATA_BACKFILL_TS < 300:
+        return 0
+    _LAST_METADATA_BACKFILL_TS = now_ts
+    with _LOCK, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, direction, question, response, market_json, entry_price, tp_price, sl_price
+            FROM analysis_episode
+            WHERE factor_json IS NULL
+               OR factor_json = ''
+               OR market_regime IS NULL
+               OR market_regime = ''
+               OR primary_reason IS NULL
+               OR primary_reason = ''
+               OR (question LIKE 'auto-shadow:%' AND (shadow_grade IS NULL OR shadow_grade = ''))
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+        updated = 0
+        for row in rows:
+            market = _json_loads_safe(row["market_json"], {})
+            if not isinstance(market, dict):
+                market = {}
+            payload, reason, confidence = _extract_structured_payload(row["response"])
+            regime = _classify_market_regime(market)
+            factors = _build_factor_tags(market, row["direction"], payload)
+            shadow_grade = ""
+            if str(row["question"] or "").startswith("auto-shadow:"):
+                shadow_grade = _grade_shadow_order(
+                    market,
+                    {
+                        "direction": row["direction"],
+                        "entry_price": row["entry_price"],
+                        "tp_price": row["tp_price"],
+                        "sl_price": row["sl_price"],
+                    },
+                    factors,
+                )
+            connection.execute(
+                """
+                UPDATE analysis_episode
+                SET structured_json = COALESCE(NULLIF(structured_json, ''), ?),
+                    primary_reason = COALESCE(NULLIF(primary_reason, ''), ?),
+                    confidence = COALESCE(confidence, ?),
+                    market_regime = COALESCE(NULLIF(market_regime, ''), ?),
+                    shadow_grade = COALESCE(NULLIF(shadow_grade, ''), ?),
+                    factor_json = COALESCE(NULLIF(factor_json, ''), ?)
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    reason,
+                    confidence,
+                    regime,
+                    shadow_grade,
+                    json.dumps(factors, ensure_ascii=False),
+                    row["id"],
+                ),
+            )
+            updated += 1
+        connection.commit()
+        return updated
+
+
+def _analysis_insert_row(
+    created_at,
+    clean_question,
+    clean_response,
+    market_json,
+    market,
+    structured_payload,
+    primary_reason,
+    confidence,
+    market_regime,
+    order,
+    index,
+    order_count,
+    price,
+):
+    factors = _build_factor_tags(market, order["direction"], structured_payload)
+    grade = (
+        _grade_shadow_order(market, order, factors)
+        if clean_question.startswith("auto-shadow:")
+        else ""
+    )
+    return (
+        created_at,
+        order["entry_price"],
+        order["direction"],
+        f"{clean_question}:order:{index}" if order_count > 1 else clean_question,
+        clean_response,
+        market_json,
+        order["tp_price"],
+        order["sl_price"],
+        created_at if abs(order["entry_price"] - price) / price <= 0.0005 else None,
+        json.dumps(structured_payload, ensure_ascii=False, default=str),
+        primary_reason,
+        confidence,
+        market_regime,
+        grade,
+        json.dumps(factors, ensure_ascii=False),
+    )
 
 
 def evaluate_pending(current_price, now_ts=None):
@@ -773,6 +1068,7 @@ def learning_stats():
     import_existing_model_history()
     import_turning_point_history()
     import_non_turning_contrast_history()
+    backfill_analysis_metadata()
     with _LOCK, _connect() as connection:
         row = connection.execute(
             """
@@ -801,6 +1097,16 @@ def learning_stats():
         auto_analyses = connection.execute(
             "SELECT COUNT(*) AS total FROM auto_analysis_log"
         ).fetchone()
+        structured = connection.execute(
+            """
+            SELECT
+                SUM(CASE WHEN structured_json IS NOT NULL AND structured_json <> '{}' THEN 1 ELSE 0 END) AS total
+            FROM analysis_episode
+            """
+        ).fetchone()
+        sl_reviews = connection.execute(
+            "SELECT COUNT(*) AS total FROM sl_review_event"
+        ).fetchone()
     imported = int(historical["total"] or 0)
     imported_successful = int(historical["successful"] or 0)
     total = int(row["total"] or 0)
@@ -820,6 +1126,165 @@ def learning_stats():
         "contrast_examples": int(contrast_examples["total"] or 0),
         "higher_tf_observations": int(higher_tf_observations["total"] or 0),
         "auto_analyses": int(auto_analyses["total"] or 0),
+        "structured_analyses": int(structured["total"] or 0),
+        "sl_reviews": int(sl_reviews["total"] or 0),
+        "top_factors": factor_performance(limit=5),
+        "primary_reasons": primary_reason_stats(limit=5),
+        "shadow_grades": shadow_grade_stats(),
+        "market_regimes": market_regime_stats(limit=5),
+    }
+
+
+def _rate_summary(rows, key_name="name", limit=8):
+    summary = {}
+    for row in rows:
+        key = str(row[key_name] or "").strip()
+        if not key:
+            continue
+        item = summary.setdefault(key, {"name": key, "total": 0, "wins": 0})
+        item["total"] += 1
+        item["wins"] += 1 if int(row["success"] or 0) > 0 else 0
+    result = []
+    for item in summary.values():
+        total = item["total"]
+        wins = item["wins"]
+        item["losses"] = total - wins
+        item["winrate"] = wins / total * 100 if total else 0.0
+        result.append(item)
+    result.sort(key=lambda item: (item["total"], item["winrate"]), reverse=True)
+    return result[:limit]
+
+
+def factor_performance(limit=8, min_samples=1):
+    with _LOCK, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT factor_json, success
+            FROM analysis_episode
+            WHERE evaluated_at IS NOT NULL
+              AND factor_json IS NOT NULL
+              AND factor_json <> ''
+            ORDER BY evaluated_at DESC
+            LIMIT 2000
+            """
+        ).fetchall()
+    expanded = []
+    for row in rows:
+        factors = _json_loads_safe(row["factor_json"], [])
+        if not isinstance(factors, list):
+            continue
+        for factor in factors:
+            expanded.append({"name": str(factor), "success": row["success"]})
+    stats = _rate_summary(expanded, limit=max(limit * 3, limit))
+    return [item for item in stats if item["total"] >= min_samples][:limit]
+
+
+def primary_reason_stats(limit=6):
+    with _LOCK, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT primary_reason AS name, success
+            FROM analysis_episode
+            WHERE evaluated_at IS NOT NULL
+              AND primary_reason IS NOT NULL
+              AND primary_reason <> ''
+            ORDER BY evaluated_at DESC
+            LIMIT 1000
+            """
+        ).fetchall()
+    return _rate_summary(rows, limit=limit)
+
+
+def market_regime_stats(limit=6):
+    with _LOCK, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT market_regime AS name, success
+            FROM analysis_episode
+            WHERE evaluated_at IS NOT NULL
+              AND market_regime IS NOT NULL
+              AND market_regime <> ''
+            ORDER BY evaluated_at DESC
+            LIMIT 1000
+            """
+        ).fetchall()
+    return _rate_summary(rows, limit=limit)
+
+
+def shadow_grade_stats():
+    with _LOCK, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT shadow_grade AS name, success
+            FROM analysis_episode
+            WHERE evaluated_at IS NOT NULL
+              AND shadow_grade IS NOT NULL
+              AND shadow_grade <> ''
+            ORDER BY evaluated_at DESC
+            LIMIT 1000
+            """
+        ).fetchall()
+    return _rate_summary(rows, limit=3)
+
+
+def record_sl_review(review):
+    if not isinstance(review, dict) or not review:
+        return False
+    direction = str(review.get("direction") or "unknown")[:16]
+    verdict = str(review.get("verdict") or "")[:128]
+    issues = review.get("issues")
+    if not isinstance(issues, list):
+        issues = []
+    with _LOCK, _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO sl_review_event
+                (created_at, direction, verdict, issue_json, review_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                float(review.get("ts") or time.time()),
+                direction,
+                verdict,
+                json.dumps(issues, ensure_ascii=False),
+                json.dumps(review, ensure_ascii=False, default=str),
+            ),
+        )
+        connection.commit()
+    return True
+
+
+def sl_review_summary(limit=5):
+    with _LOCK, _connect() as connection:
+        total = connection.execute(
+            "SELECT COUNT(*) AS total FROM sl_review_event"
+        ).fetchone()
+        rows = connection.execute(
+            """
+            SELECT verdict, issue_json
+            FROM sl_review_event
+            ORDER BY created_at DESC
+            LIMIT 500
+            """
+        ).fetchall()
+    issue_counts = {}
+    revalidation = 0
+    for row in rows:
+        if "需重新確認" in str(row["verdict"] or ""):
+            revalidation += 1
+        issues = _json_loads_safe(row["issue_json"], [])
+        if not isinstance(issues, list):
+            continue
+        for issue in issues:
+            clean = str(issue).strip()
+            if clean:
+                issue_counts[clean] = issue_counts.get(clean, 0) + 1
+    top_issues = sorted(issue_counts.items(), key=lambda item: item[1], reverse=True)[:limit]
+    return {
+        "total": int(total["total"] or 0),
+        "recent_checked": len(rows),
+        "revalidation": revalidation,
+        "top_issues": top_issues,
     }
 
 
@@ -892,6 +1357,11 @@ def build_daily_strategy_report():
     daily = strategy_stats(days=1)
     weekly = strategy_stats(days=7)
     mlx = learning_stats()
+    top_factors = factor_performance(limit=3)
+    reasons = primary_reason_stats(limit=3)
+    regimes = market_regime_stats(limit=3)
+    grades = shadow_grade_stats()
+    sl_summary = sl_review_summary(limit=3)
 
     if daily["total"]:
         daily_line = (
@@ -921,4 +1391,41 @@ def build_daily_strategy_report():
     if 0 < daily["total"] < 5:
         warning = "\n⚠️ 24小時樣本少於5筆，勝率僅供參考"
 
-    return f"📊 每日策略勝率巡檢\n{daily_line}\n{weekly_line}\n{mlx_line}{warning}"
+    factor_line = "因子勝率: 尚無已驗證因子"
+    if top_factors:
+        factor_line = "因子勝率: " + "；".join(
+            f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+            for item in top_factors
+        )
+    reason_line = "主因勝率: 尚無已驗證主因"
+    if reasons:
+        reason_line = "主因勝率: " + "；".join(
+            f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+            for item in reasons
+        )
+    regime_line = "盤型勝率: 尚無已驗證盤型"
+    if regimes:
+        regime_line = "盤型勝率: " + "；".join(
+            f"{item['name']} {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+            for item in regimes
+        )
+    grade_line = "影子單分級: 尚無已驗證分級"
+    if grades:
+        grade_line = "影子單分級: " + "；".join(
+            f"{item['name']}級 {item['winrate']:.1f}%({item['wins']}/{item['total']})"
+            for item in grades
+        )
+    sl_line = (
+        f"SL檢討: 累積 {sl_summary['total']} 筆；"
+        f"近{sl_summary['recent_checked']}筆需重審 {sl_summary['revalidation']} 筆"
+    )
+    if sl_summary["top_issues"]:
+        sl_line += "；常見問題 " + "、".join(
+            f"{issue}({count})" for issue, count in sl_summary["top_issues"]
+        )
+
+    return (
+        "📊 每日策略勝率巡檢\n"
+        f"{daily_line}\n{weekly_line}\n{mlx_line}\n"
+        f"{factor_line}\n{reason_line}\n{regime_line}\n{grade_line}\n{sl_line}{warning}"
+    )
