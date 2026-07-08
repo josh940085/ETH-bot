@@ -1719,14 +1719,15 @@ def _process_binance_host_learning(price, market_context=None):
             if inserted:
                 learned += inserted
                 direction, strength = _infer_binance_host_direction(post.get("text"))
-                state["latest_signal"] = {
-                    "direction": direction,
-                    "strength": strength,
-                    "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
-                    "source_url": source,
-                    "text_preview": str(post.get("text") or "")[:160],
-                    "learned_at": now_ts,
-                }
+                if direction in {"long", "short"} and strength > 0:
+                    state["latest_signal"] = {
+                        "direction": direction,
+                        "strength": strength,
+                        "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
+                        "source_url": source,
+                        "text_preview": str(post.get("text") or "")[:160],
+                        "learned_at": now_ts,
+                    }
             if learned >= max_posts:
                 break
         if learned >= max_posts:
@@ -1787,14 +1788,15 @@ def _process_binance_host_live_learning(price, market_context=None):
             if inserted:
                 learned += inserted
                 direction, strength = _infer_binance_host_direction(segment.get("text"))
-                state["latest_signal"] = {
-                    "direction": direction,
-                    "strength": strength,
-                    "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
-                    "source_url": source,
-                    "text_preview": str(segment.get("text") or "")[:160],
-                    "learned_at": now_ts,
-                }
+                if direction in {"long", "short"} and strength > 0:
+                    state["latest_signal"] = {
+                        "direction": direction,
+                        "strength": strength,
+                        "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
+                        "source_url": source,
+                        "text_preview": str(segment.get("text") or "")[:160],
+                        "learned_at": now_ts,
+                    }
             if max_segments > 0 and learned >= max_segments:
                 break
         if max_segments > 0 and learned >= max_segments:
