@@ -4362,6 +4362,17 @@ def _format_tp_sl_win_rate_line(performance_stats=None, *, min_startup_samples=N
     return f"TP/SL勝率: 樣本不足（啟動後 {startup_total}/{min_samples}）"
 
 
+def _format_direction_color_text(text):
+    text = str(text or "中性")
+    bullish_markers = ("強多", "多頭", "偏多", "利多", "上漲", "做多", "買盤")
+    bearish_markers = ("強空", "空頭", "偏空", "利空", "下跌", "做空", "賣壓")
+    if any(marker in text for marker in bullish_markers):
+        return f"🔴 {text}"
+    if any(marker in text for marker in bearish_markers):
+        return f"🟢 {text}"
+    return f"⚪ {text}"
+
+
 def _recent_sl_guard_reason(final, score, net_edge_rate_est, risk_rate, macro_bias, mid_trend, sr_bias):
     if not _is_truthy(os.getenv("TRADE_RECENT_SL_GUARD_ENABLED", "1")):
         return ""
@@ -9727,6 +9738,8 @@ def run_bot():
             }
 
             regime_text = regime_map.get(regime, regime)
+            colored_regime_text = _format_direction_color_text(regime_text)
+            colored_macro_text = _format_direction_color_text(macro_text)
 
             # 九轉只作為反向開倉的保守濾網，不以單一訊號自動反手。
             td_entry_block_reason = ""
@@ -9776,8 +9789,8 @@ def run_bot():
                 f"🤖 AI信號：{display_signal}\n"
                 f"📊 信心值: {ai_prob:.2f}\n"
                 f"📈 {_format_tp_sl_win_rate_line(performance)}\n"
-                f"🌍 市場狀態: {regime_text}\n"
-                f"📰 時事判斷: {macro_text}\n"
+                f"🌍 市場狀態: {colored_regime_text}\n"
+                f"📰 時事判斷: {colored_macro_text}\n"
                 f"{news_text}"
                 f"🧠 判斷依據: {reason_text}"
             )
