@@ -6167,6 +6167,80 @@ def _build_range_trade_reference(
     }
 
 
+def _count_consecutive_level_tests(df, level, side, *, tolerance=0.0015):
+    level = _safe_float(level, 0.0)
+    if df is None or level <= 0 or len(df) == 0:
+        return 0
+
+    tol = max(level * max(_safe_float(tolerance, 0.0), 0.0), 1e-9)
+    count = 0
+    rows = df.tail(len(df))
+    for _, row in rows.iloc[::-1].iterrows():
+        high = _safe_float(row.get("high"), 0.0)
+        low = _safe_float(row.get("low"), 0.0)
+        close = _safe_float(row.get("close"), 0.0)
+        if high <= 0 or low <= 0 or close <= 0:
+            break
+
+        if side == "support":
+            touched = low <= level + tol and close >= level - tol
+            broken_away = close < level - tol or low > level + tol
+        else:
+            touched = high >= level - tol and close <= level + tol
+            broken_away = close > level + tol or high < level - tol
+
+        if touched:
+            count += 1
+            continue
+        if broken_away:
+            break
+        break
+    return count
+
+
+def analyze_repeated_level_tests(price, df_5m, df_15m, support, resistance, atr=0.0):
+    price = max(_safe_float(price, 0.0), 0.0)
+    atr = max(_safe_float(atr, 0.0), 0.0)
+    if price <= 0:
+        return {
+            "support_tests": 0,
+            "resistance_tests": 0,
+            "pressure": 0.0,
+            "near_support": False,
+            "near_resistance": False,
+        }
+
+    support = _safe_float(support, 0.0)
+    resistance = _safe_float(resistance, 0.0)
+    tolerance = max(0.0015, min(0.006, atr / max(price, 1e-9) * 0.65))
+
+    support_tests = 0
+    resistance_tests = 0
+    if support > 0:
+        support_tests += _count_consecutive_level_tests(df_5m, support, "support", tolerance=tolerance)
+        support_tests += _count_consecutive_level_tests(df_15m, support, "support", tolerance=tolerance)
+    if resistance > 0:
+        resistance_tests += _count_consecutive_level_tests(df_5m, resistance, "resistance", tolerance=tolerance)
+        resistance_tests += _count_consecutive_level_tests(df_15m, resistance, "resistance", tolerance=tolerance)
+
+    near_support = support > 0 and abs(price - support) / price <= tolerance * 1.5
+    near_resistance = resistance > 0 and abs(resistance - price) / price <= tolerance * 1.5
+    pressure = (resistance_tests - support_tests) * 0.035
+    if not near_support and support_tests > 0:
+        pressure = min(pressure + support_tests * 0.012, pressure)
+    if not near_resistance and resistance_tests > 0:
+        pressure = max(pressure - resistance_tests * 0.012, pressure)
+
+    return {
+        "support_tests": support_tests,
+        "resistance_tests": resistance_tests,
+        "pressure": pressure,
+        "near_support": near_support,
+        "near_resistance": near_resistance,
+        "tolerance_rate": tolerance,
+    }
+
+
 def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
     """多週期支撐壓力 + K線型態分析，可直接餵入已準備好的 K 線資料。"""
     tf_cfg = tf_cfg or [
@@ -7238,6 +7312,17 @@ def build_trade_signal_snapshot(
 
     recent_high_15 = df_15m["high"].tail(20).max()
     recent_low_15 = df_15m["low"].tail(20).min()
+    repeated_level_tests = analyze_repeated_level_tests(
+        price,
+        df_5m.tail(80),
+        df_15m.tail(48),
+        recent_low_15,
+        recent_high_15,
+        atr=atr,
+    )
+    repeated_support_tests = _safe_int(repeated_level_tests.get("support_tests"), 0)
+    repeated_resistance_tests = _safe_int(repeated_level_tests.get("resistance_tests"), 0)
+    repeated_test_pressure = _safe_float(repeated_level_tests.get("pressure"), 0.0)
     triangle = detect_triangle(df_15m)
 
     vol_now = df_15m["volume"].iloc[-1]
@@ -7296,6 +7381,9 @@ def build_trade_signal_snapshot(
         "multi_tf_sr_bias": _safe_float(sr_analysis.get("bias"), 0.0),
         "multi_tf_support_hits": _safe_int(sr_analysis.get("support_hits"), 0),
         "multi_tf_resistance_hits": _safe_int(sr_analysis.get("resistance_hits"), 0),
+        "repeated_support_tests": repeated_support_tests,
+        "repeated_resistance_tests": repeated_resistance_tests,
+        "repeated_test_pressure": repeated_test_pressure,
         "open_interest_change": open_interest_change,
         "mark_premium_rate": mark_premium_rate,
         "funding_rate_live": funding_rate_live,
@@ -7321,6 +7409,7 @@ def build_trade_signal_snapshot(
             rule_score += 0.25
         elif breakout == -1:
             rule_score -= 0.25
+        rule_score += max(-0.25, min(0.25, repeated_test_pressure))
         rule_score += macro_bias * 0.1
         if triangle == 1:
             rule_score += 0.05
@@ -7336,6 +7425,14 @@ def build_trade_signal_snapshot(
         confluence += 0.9
     elif breakout == -score_direction:
         confluence -= 0.9
+    if score_direction == 1 and repeated_resistance_tests >= 2:
+        confluence += min(1.2, repeated_resistance_tests * 0.25)
+    elif score_direction == -1 and repeated_support_tests >= 2:
+        confluence += min(1.2, repeated_support_tests * 0.25)
+    elif score_direction == 1 and repeated_support_tests >= 2:
+        confluence -= min(0.8, repeated_support_tests * 0.18)
+    elif score_direction == -1 and repeated_resistance_tests >= 2:
+        confluence -= min(0.8, repeated_resistance_tests * 0.18)
     confluence += 0.7 if htf == score_direction else -0.4
     score += confluence * 0.06
 
@@ -7379,6 +7476,7 @@ def build_trade_signal_snapshot(
 
     sr_bias = _safe_float(sr_analysis.get("bias"), 0.0)
     score += max(-0.14, min(0.14, sr_bias * 0.10))
+    score += max(-0.18, min(0.18, repeated_test_pressure))
     score = max(0.05, min(score, 0.95))
 
     if abs(derivatives_pressure) >= 0.10:
@@ -7419,6 +7517,10 @@ def build_trade_signal_snapshot(
             long_confluence += 0.4
         elif sr_bias < -0.10:
             short_confluence += 0.4
+        if repeated_resistance_tests >= 2:
+            long_confluence += min(1.5, repeated_resistance_tests * 0.3)
+        if repeated_support_tests >= 2:
+            short_confluence += min(1.5, repeated_support_tests * 0.3)
         if derivatives_pressure > 0.12:
             long_confluence += 0.4
         elif derivatives_pressure < -0.12:
@@ -7718,6 +7820,9 @@ def build_trade_signal_snapshot(
         "higher_timeframe": higher_timeframe,
         "support_hits": _safe_int(sr_analysis.get("support_hits"), 0),
         "resistance_hits": _safe_int(sr_analysis.get("resistance_hits"), 0),
+        "repeated_support_tests": repeated_support_tests,
+        "repeated_resistance_tests": repeated_resistance_tests,
+        "repeated_test_pressure": repeated_test_pressure,
     }
 
 
@@ -9462,6 +9567,9 @@ def run_bot():
             open_interest_change = _safe_float(decision.get("open_interest_change"), 0.0)
             net_edge_rate_est = _safe_float(decision.get("net_edge_rate_est"), 0.0)
             risk_rate = _safe_float(decision.get("risk_rate"), 0.0)
+            repeated_support_tests = _safe_int(decision.get("repeated_support_tests"), 0)
+            repeated_resistance_tests = _safe_int(decision.get("repeated_resistance_tests"), 0)
+            repeated_test_pressure = _safe_float(decision.get("repeated_test_pressure"), 0.0)
             entry = price
             daily_min_trade = _daily_min_trade_due()
             if daily_min_trade:
@@ -9566,6 +9674,10 @@ def run_bot():
             reason.append(
                 f"多週期SR偏置（{_safe_float(sr_analysis.get('bias'), 0.0):+.2f} | 支撐{_safe_int(sr_analysis.get('support_hits'), 0)} / 壓力{_safe_int(sr_analysis.get('resistance_hits'), 0)}）"
             )
+            if repeated_support_tests >= 2 or repeated_resistance_tests >= 2:
+                reason.append(
+                    f"連續測試壓力（支撐{repeated_support_tests} / 壓力{repeated_resistance_tests} | 方向壓力{repeated_test_pressure:+.2f}）"
+                )
 
             # ===== 市場狀態中文轉換 =====
             regime_map = {
@@ -9694,10 +9806,22 @@ def run_bot():
             # ===== 多週期壓力/支撐阻擋：靠近關鍵反向區域先觀望 =====
             support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
             resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
-            if not daily_min_trade and "做多" in final and resistance_hits >= 2 and score < 0.72:
+            if (
+                not daily_min_trade
+                and "做多" in final
+                and resistance_hits >= 2
+                and repeated_resistance_tests < 2
+                and score < 0.72
+            ):
                 pending_entry_confirmation = None
                 continue
-            if not daily_min_trade and "做空" in final and support_hits >= 2 and score > 0.28:
+            if (
+                not daily_min_trade
+                and "做空" in final
+                and support_hits >= 2
+                and repeated_support_tests < 2
+                and score > 0.28
+            ):
                 pending_entry_confirmation = None
                 continue
 
