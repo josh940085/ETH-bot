@@ -10718,15 +10718,14 @@ def run_bot():
                 )
             if content_override.get("usable"):
                 override_dir_text = "偏多" if content_override.get("direction") == "long" else "偏空"
-                override_source = "直播" if content_override.get("source_type") == "live" else "公開觀點"
                 if content_override.get("applied") and content_override.get("mode") == "primary":
-                    override_state = "MLX主播策略主訊號"
+                    override_state = "MLX主訊號"
                 elif content_override.get("applied"):
-                    override_state = "MLX主播策略覆蓋"
+                    override_state = "MLX覆蓋"
                 else:
-                    override_state = "只學習未覆蓋"
+                    override_state = "MLX學習未覆蓋"
                 reason.append(
-                    f"藍歌{override_source}{override_dir_text}（{override_state} | 強度{_safe_int(content_override.get('strength'), 0)} | 品質{_safe_float(content_override.get('quality'), 0.0):.2f} | 驗證{_safe_float(content_override.get('validation_accuracy'), 0.0):.1f}%/{_safe_int(content_override.get('validation_evaluated'), 0)}筆 | 衝突{_safe_int(content_override.get('conflicts'), 0)}）"
+                    f"MLX{override_dir_text}（{override_state} | 強度{_safe_int(content_override.get('strength'), 0)} | 品質{_safe_float(content_override.get('quality'), 0.0):.2f} | 驗證{_safe_float(content_override.get('validation_accuracy'), 0.0):.1f}%/{_safe_int(content_override.get('validation_evaluated'), 0)}筆 | 衝突{_safe_int(content_override.get('conflicts'), 0)}）"
                 )
 
             # ===== 市場狀態中文轉換 =====
