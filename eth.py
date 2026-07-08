@@ -8487,7 +8487,7 @@ def build_trade_signal_snapshot(
             ai_short_prob = max(ai_short_prob, prob_floor)
             ai_prob = min(ai_prob, max(0.10, score))
 
-    primary_indicator = "mlx_host_strategy" if content_override.get("applied") else "auxiliary_technical_stack"
+    primary_indicator = "mlx_host_strategy" if content_override.get("applied") else "logic_signal"
 
     if _is_truthy(os.getenv("TRADE_USE_CONFLUENCE_PROB_FLOOR", "1")):
         long_confluence = 0.0
@@ -8765,7 +8765,7 @@ def build_trade_signal_snapshot(
                     final = "觀望（多單逆向共振不足）"
         if (
             not final.startswith("觀望")
-            and _is_truthy(os.getenv("TRADE_USE_30M_MACD_PRIMARY", "1"))
+            and _is_truthy(os.getenv("TRADE_USE_30M_MACD_PRIMARY", "0"))
             and not content_override.get("applied")
         ):
             if "做多" in final and mid_trend != 1:
