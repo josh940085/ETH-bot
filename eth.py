@@ -1897,12 +1897,30 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
         if _safe_int(resistance_hits, 0) >= 1:
             supports += 1
 
-    max_conflicts = max(0, _safe_int(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_CONFLICTS", 1), 1))
+    primary_mode = _is_truthy(os.getenv("TRADE_HOST_CONTENT_PRIMARY_MODE", "1"))
+    default_max_conflicts = 2 if primary_mode else 1
+    max_conflicts = max(
+        0,
+        _safe_int(
+            os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_CONFLICTS", default_max_conflicts),
+            default_max_conflicts,
+        ),
+    )
     strength = _safe_int(signal.get("strength"), 0)
     confidence = max(0.0, min(0.90, _safe_float(signal.get("confidence"), 0.0)))
     freshness = max(0.0, min(1.0, _safe_float(signal.get("freshness"), 0.0)))
     quality = confidence + min(0.30, strength * 0.04) + freshness * 0.12 + supports * 0.03 - conflicts * 0.08
-    min_quality = max(0.40, min(0.85, _safe_float(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MIN_QUALITY", 0.62), 0.62)))
+    default_min_quality = 0.54 if primary_mode else 0.62
+    min_quality = max(
+        0.40,
+        min(
+            0.85,
+            _safe_float(
+                os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MIN_QUALITY", default_min_quality),
+                default_min_quality,
+            ),
+        ),
+    )
     applied = conflicts <= max_conflicts and quality >= min_quality
 
     payload = dict(signal)
@@ -1910,6 +1928,7 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
         {
             "usable": True,
             "applied": applied,
+            "mode": "primary" if primary_mode else "override",
             "conflicts": conflicts,
             "supports": supports,
             "quality": round(quality, 3),
@@ -7020,7 +7039,7 @@ ONLINE_MODEL_FULL_WEIGHT_SAMPLES = max(
     ONLINE_MODEL_MIN_SAMPLES + 16,
     _safe_int(os.getenv("ONLINE_MODEL_FULL_WEIGHT_SAMPLES", 120), 120),
 )
-MLX_REPLACE_MODEL_ENABLED = _is_truthy(os.getenv("MLX_REPLACE_MODEL_ENABLED", "1"))
+MLX_REPLACE_MODEL_ENABLED = _is_truthy(os.getenv("MLX_REPLACE_MODEL_ENABLED", "0"))
 MLX_REPLACE_MODEL_MIN_SAMPLES = max(
     20,
     _safe_int(os.getenv("MLX_REPLACE_MODEL_MIN_SAMPLES", 60), 60),
@@ -8133,6 +8152,7 @@ def build_trade_signal_snapshot(
         score += max(-0.06, min(0.06, derivatives_pressure * 0.045))
         score = max(0.05, min(score, 0.95))
 
+    auxiliary_score = score
     raw_content_override = _load_binance_host_content_override_signal()
     content_override = _assess_host_content_override(
         raw_content_override,
@@ -8147,12 +8167,34 @@ def build_trade_signal_snapshot(
     if content_override.get("applied"):
         override_direction = str(content_override.get("direction") or "")
         override_quality = max(0.0, min(1.0, _safe_float(content_override.get("quality"), 0.0)))
-        max_swing = max(0.08, min(0.32, _safe_float(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_SCORE_SWING", 0.22), 0.22)))
+        primary_mode = content_override.get("mode") == "primary"
+        max_swing_default = 0.34 if primary_mode else 0.22
+        max_swing = max(
+            0.08,
+            min(
+                0.40,
+                _safe_float(
+                    os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_SCORE_SWING", max_swing_default),
+                    max_swing_default,
+                ),
+            ),
+        )
         target_score = 0.5 + (max_swing * override_quality if override_direction == "long" else -max_swing * override_quality)
-        blend = max(0.15, min(0.75, _safe_float(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_BLEND", 0.55), 0.55)))
-        score = score * (1.0 - blend) + target_score * blend
+        if primary_mode:
+            aux_cap = max(
+                0.0,
+                min(
+                    0.10,
+                    _safe_float(os.getenv("TRADE_HOST_CONTENT_AUXILIARY_SCORE_CAP", 0.06), 0.06),
+                ),
+            )
+            auxiliary_adjustment = max(-aux_cap, min(aux_cap, auxiliary_score - 0.5))
+            score = target_score + auxiliary_adjustment
+        else:
+            blend = max(0.15, min(0.75, _safe_float(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_BLEND", 0.55), 0.55)))
+            score = score * (1.0 - blend) + target_score * blend
         score = max(0.05, min(score, 0.95))
-        prob_floor = max(0.42, min(0.80, 0.50 + override_quality * 0.18))
+        prob_floor = max(0.42, min(0.82, 0.52 + override_quality * (0.22 if primary_mode else 0.18)))
         if override_direction == "long":
             ai_long_prob = max(ai_long_prob, prob_floor)
             ai_prob = max(ai_prob, min(0.90, score))
@@ -8160,8 +8202,7 @@ def build_trade_signal_snapshot(
             ai_short_prob = max(ai_short_prob, prob_floor)
             ai_prob = min(ai_prob, max(0.10, score))
 
-    auxiliary_score = score
-    primary_indicator = "30m_macd"
+    primary_indicator = "binance_host_content" if content_override.get("applied") else "30m_macd"
 
     if _is_truthy(os.getenv("TRADE_USE_CONFLUENCE_PROB_FLOOR", "1")):
         long_confluence = 0.0
@@ -10393,7 +10434,12 @@ def run_bot():
             if content_override.get("usable"):
                 override_dir_text = "偏多" if content_override.get("direction") == "long" else "偏空"
                 override_source = "直播" if content_override.get("source_type") == "live" else "公開觀點"
-                override_state = "已覆蓋交易邏輯" if content_override.get("applied") else "只學習未覆蓋"
+                if content_override.get("applied") and content_override.get("mode") == "primary":
+                    override_state = "主邏輯"
+                elif content_override.get("applied"):
+                    override_state = "已覆蓋交易邏輯"
+                else:
+                    override_state = "只學習未覆蓋"
                 reason.append(
                     f"藍歌{override_source}{override_dir_text}（{override_state} | 強度{_safe_int(content_override.get('strength'), 0)} | 品質{_safe_float(content_override.get('quality'), 0.0):.2f} | 衝突{_safe_int(content_override.get('conflicts'), 0)}）"
                 )
