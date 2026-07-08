@@ -7300,6 +7300,188 @@ def _detect_candlestick_pattern(df):
     return "中性K", 0
 
 
+def _range_position_label(range_pos):
+    pos = max(0.0, min(1.0, _safe_float(range_pos, 0.5)))
+    if pos <= 0.15:
+        return "區間低位/支撐附近"
+    if pos <= 0.35:
+        return "偏低位"
+    if pos < 0.65:
+        return "中位震盪"
+    if pos < 0.85:
+        return "偏高位"
+    return "區間高位/壓力附近"
+
+
+def _trend_label(trend):
+    value = _safe_int(trend, 0)
+    if value > 0:
+        return "偏多"
+    if value < 0:
+        return "偏空"
+    return "中性"
+
+
+def _pattern_bias_label(pattern_bias):
+    value = _safe_int(pattern_bias, 0)
+    if value > 0:
+        return "K線偏多"
+    if value < 0:
+        return "K線偏空"
+    return "K線中性"
+
+
+def _timeframe_bias_score(trend, range_pos, pattern_bias, window_change_pct):
+    pos = max(0.0, min(1.0, _safe_float(range_pos, 0.5)))
+    score = _safe_int(trend, 0) * 0.55
+    score += _safe_int(pattern_bias, 0) * 0.25
+    change = _safe_float(window_change_pct, 0.0)
+    if abs(change) >= 0.6:
+        score += (1 if change > 0 else -1) * min(0.35, abs(change) / 12.0)
+    if pos >= 0.82:
+        score -= 0.18
+    elif pos <= 0.18:
+        score += 0.18
+    return max(-1.0, min(1.0, score))
+
+
+def _host_style_action_hint(tf_name, bias_score, range_pos):
+    pos = max(0.0, min(1.0, _safe_float(range_pos, 0.5)))
+    if tf_name in ("1M", "1W", "1D"):
+        if bias_score > 0.25:
+            return "高週期給多方背景，但高位不追多"
+        if bias_score < -0.25:
+            return "高週期給空方背景，但低位不追空"
+        return "高週期未定向，短線降倉或等突破"
+    if tf_name in ("4H", "1H"):
+        if bias_score > 0.25:
+            return "用回踩支撐找多，壓力前先減倉"
+        if bias_score < -0.25:
+            return "用反彈壓力找空，支撐前先減倉"
+        return "方向混沌，等區間邊界或放量突破"
+    if bias_score > 0.25:
+        return "15m只找多單觸發，不在壓力高位硬追" if pos < 0.82 else "15m偏多但已近壓力，等回踩"
+    if bias_score < -0.25:
+        return "15m只找空單觸發，不在支撐低位硬追" if pos > 0.18 else "15m偏空但已近支撐，等反彈"
+    return "15m沒有觸發，等待量能或結構確認"
+
+
+def _build_timeframe_kline_view(higher_tf_context, pattern_map=None):
+    context = higher_tf_context if isinstance(higher_tf_context, dict) else {}
+    patterns = pattern_map if isinstance(pattern_map, dict) else {}
+    specs = [
+        ("1M", "monthly", "宏觀大區間"),
+        ("1W", "weekly", "高週期趨勢"),
+        ("1D", "daily", "主要風險背景"),
+        ("4H", "four_hour", "波段方向"),
+        ("1H", "one_hour", "日內方向"),
+        ("15m", "fifteen_min", "進出場觸發"),
+    ]
+    view = {}
+    summary_parts = []
+    for tf_name, prefix, role in specs:
+        pattern_name, pattern_bias = patterns.get(prefix, ("未提供", 0))
+        trend = context.get(f"{prefix}_trend", 0)
+        range_pos = _safe_float(context.get(f"{prefix}_range_pos"), 0.5)
+        window_change = _safe_float(context.get(f"{prefix}_window_change_pct"), 0.0)
+        support = context.get(f"{prefix}_support")
+        resistance = context.get(f"{prefix}_resistance")
+        bias_score = _timeframe_bias_score(trend, range_pos, pattern_bias, window_change)
+        if bias_score > 0.25:
+            bias_label = "偏多"
+        elif bias_score < -0.25:
+            bias_label = "偏空"
+        else:
+            bias_label = "中性"
+        range_label = _range_position_label(range_pos)
+        action = _host_style_action_hint(tf_name, bias_score, range_pos)
+        support_text = f"{_safe_float(support):.2f}" if support else "無"
+        resistance_text = f"{_safe_float(resistance):.2f}" if resistance else "無"
+        text = (
+            f"{role}：{_trend_label(trend)}，{pattern_name}/{_pattern_bias_label(pattern_bias)}，"
+            f"{range_label}，窗口變化{window_change:.2f}%，支撐{support_text}，壓力{resistance_text}；"
+            f"{action}"
+        )
+        view[tf_name] = {
+            "role": role,
+            "bias": bias_label,
+            "trend": _trend_label(trend),
+            "pattern": pattern_name,
+            "pattern_bias": _pattern_bias_label(pattern_bias),
+            "range_pos": round(range_pos, 4),
+            "range_label": range_label,
+            "window_change_pct": round(window_change, 4),
+            "support": support,
+            "resistance": resistance,
+            "action": action,
+            "text": text,
+        }
+        summary_parts.append(f"{tf_name}={text}")
+
+    high_tf_score = (
+        _timeframe_bias_score(
+            context.get("monthly_trend", 0),
+            context.get("monthly_range_pos", 0.5),
+            patterns.get("monthly", ("", 0))[1],
+            context.get("monthly_window_change_pct", 0.0),
+        )
+        * 0.30
+        + _timeframe_bias_score(
+            context.get("weekly_trend", 0),
+            context.get("weekly_range_pos", 0.5),
+            patterns.get("weekly", ("", 0))[1],
+            context.get("weekly_window_change_pct", 0.0),
+        )
+        * 0.35
+        + _timeframe_bias_score(
+            context.get("daily_trend", 0),
+            context.get("daily_range_pos", 0.5),
+            patterns.get("daily", ("", 0))[1],
+            context.get("daily_window_change_pct", 0.0),
+        )
+        * 0.35
+    )
+    mid_tf_score = (
+        _timeframe_bias_score(
+            context.get("four_hour_trend", 0),
+            context.get("four_hour_range_pos", 0.5),
+            patterns.get("four_hour", ("", 0))[1],
+            context.get("four_hour_window_change_pct", 0.0),
+        )
+        * 0.55
+        + _timeframe_bias_score(
+            context.get("one_hour_trend", 0),
+            context.get("one_hour_range_pos", 0.5),
+            patterns.get("one_hour", ("", 0))[1],
+            context.get("one_hour_window_change_pct", 0.0),
+        )
+        * 0.45
+    )
+    low_tf_score = _timeframe_bias_score(
+        context.get("fifteen_min_trend", 0),
+        context.get("fifteen_min_range_pos", 0.5),
+        patterns.get("fifteen_min", ("", 0))[1],
+        context.get("fifteen_min_window_change_pct", 0.0),
+    )
+    conflict = (
+        (high_tf_score > 0.25 and mid_tf_score < -0.25)
+        or (high_tf_score < -0.25 and mid_tf_score > 0.25)
+    )
+    host_style_order = (
+        "先看月/週/日定大背景，再看4H/1H判斷主要方向與支撐壓力，"
+        "最後只用15m找進場觸發；高位不追多、低位不追空，週期衝突時降倉或等待。"
+    )
+    return {
+        "order": host_style_order,
+        "high_tf_score": round(high_tf_score, 4),
+        "mid_tf_score": round(mid_tf_score, 4),
+        "low_tf_score": round(low_tf_score, 4),
+        "conflict": bool(conflict),
+        "views": view,
+        "summary": "；".join(summary_parts),
+    }
+
+
 def _calc_support_resistance_levels(df, lookback=60):
     if df is None or len(df) < 20:
         return None, None
@@ -8471,6 +8653,16 @@ def build_trade_signal_snapshot(
         df_1h=df_1h,
         df_15m=df_15m,
     )
+    timeframe_patterns = {
+        "fifteen_min": _detect_candlestick_pattern(df_15m),
+        "one_hour": _detect_candlestick_pattern(df_1h),
+        "four_hour": _detect_candlestick_pattern(df_4h),
+        "daily": _detect_candlestick_pattern(df_1d),
+        "weekly": _detect_candlestick_pattern(df_1w),
+    }
+    timeframe_kline_view = _build_timeframe_kline_view(higher_timeframe, timeframe_patterns)
+    higher_timeframe["timeframe_kline_view"] = timeframe_kline_view
+    higher_timeframe["timeframe_kline_summary"] = timeframe_kline_view.get("summary", "")
     regime = detect_market_regime(df_1h, df_4h)
 
     trend_4h = df_4h["close"].iloc[-1] - df_4h["ma25"].iloc[-1]
@@ -9085,6 +9277,8 @@ def build_trade_signal_snapshot(
         "derivatives_flow_stale": bool(derivatives_flow.get("stale", False)),
         "content_override": content_override,
         "learned_entry_logic": learned_entry_logic,
+        "timeframe_kline_view": timeframe_kline_view,
+        "timeframe_kline_summary": timeframe_kline_view.get("summary", ""),
         "higher_timeframe": higher_timeframe,
         "support_hits": _safe_int(sr_analysis.get("support_hits"), 0),
         "resistance_hits": _safe_int(sr_analysis.get("resistance_hits"), 0),
@@ -9696,6 +9890,10 @@ def _start_mlx_auto_analysis(period_key, market_context):
 4H一個月變化: {context.get('four_hour_window_change_pct')}%，4H區間位置: {context.get('four_hour_range_pos')}
 1H一週變化: {context.get('one_hour_window_change_pct')}%，1H區間位置: {context.get('one_hour_range_pos')}
 15m一天變化: {context.get('fifteen_min_window_change_pct')}%，15m區間位置: {context.get('fifteen_min_range_pos')}
+MLX多區間K線讀法順序: {context.get('host_style_kline_order')}
+MLX多區間K線判讀:
+{context.get('timeframe_kline_summary')}
+多週期是否衝突: {context.get('timeframe_conflict')}
 市場狀態: {context.get('regime')}
 突破: {context.get('breakout')}
 宏觀偏向: {context.get('macro')}
@@ -9709,14 +9907,16 @@ def _start_mlx_auto_analysis(period_key, market_context):
 {context.get('range_trade_reference')}
 
 學習目標：
-1. 分別說明15m、1H、4H、日線、週線、月線K線看到哪些因素支持做多或做空。
-2. 從多週期價位找出目前有效的支撐區與壓力區，不可只給單一模糊價位。
-3. 若市場為震盪，做多應靠近支撐、做空應靠近壓力；SL放在區間外並預留ATR緩衝，
+1. 用 MLX 多區間K線讀法順序判讀：先看月/週/日定大背景，再看4H/1H判斷主要方向與支撐壓力，最後只用15m找進場觸發。
+2. 分別說明15m、1H、4H、日線、週線、月線K線看到哪些因素支持做多或做空。
+3. 高位不追多、低位不追空；不同週期互相衝突時要降低信心、縮小倉位或等待，不可硬開。
+4. 從多週期價位找出目前有效的支撐區與壓力區，不可只給單一模糊價位。
+5. 若市場為震盪，做多應靠近支撐、做空應靠近壓力；SL放在區間外並預留ATR緩衝，
    TP放在對側區間之前。必須給出具體多空兩套TP/SL與區間失效條件。
-4. 支撐區只能由支撐候選組成，壓力區只能由壓力候選組成，禁止交叉混用。
-5. 價位必須滿足：震盪做多 SL < 進場 < TP；震盪做空 TP < 進場 < SL。
+6. 支撐區只能由支撐候選組成，壓力區只能由壓力候選組成，禁止交叉混用。
+7. 價位必須滿足：震盪做多 SL < 進場 < TP；震盪做空 TP < 進場 < SL。
    多單SL必須低於支撐區下緣；空單SL必須高於壓力區上緣。
-6. 震盪支撐、壓力、進場、TP、SL必須逐字使用「策略計算的合法震盪參考方案」，
+8. 震盪支撐、壓力、進場、TP、SL必須逐字使用「策略計算的合法震盪參考方案」，
    不可自行交換或另算價位。
 
 請先輸出一段嚴格 JSON，不可省略欄位，格式如下：
@@ -10290,6 +10490,20 @@ def run_bot():
                 df_15m=df_15m,
                 df_1mth=df_1mth,
             )
+            timeframe_patterns = {
+                "fifteen_min": _detect_candlestick_pattern(df_15m),
+                "one_hour": _detect_candlestick_pattern(df_1h),
+                "four_hour": _detect_candlestick_pattern(df_4h),
+                "daily": _detect_candlestick_pattern(df_1d),
+                "weekly": _detect_candlestick_pattern(df_1w),
+                "monthly": _detect_candlestick_pattern(df_1mth),
+            }
+            timeframe_kline_view = _build_timeframe_kline_view(
+                higher_tf_context,
+                timeframe_patterns,
+            )
+            higher_tf_context["timeframe_kline_view"] = timeframe_kline_view
+            higher_tf_context["timeframe_kline_summary"] = timeframe_kline_view.get("summary", "")
             if record_higher_timeframe_context(higher_tf_context):
                 print(
                     "🧭 已收集MLX多週期資料 | "
@@ -10351,15 +10565,15 @@ def run_bot():
                 "sampling_timeframe": "15m",
                 "htf": htf,
                 "mid_trend": mid_trend,
-                "one_hour_pattern": _detect_candlestick_pattern(df_1h)[0],
-                "four_hour_pattern": _detect_candlestick_pattern(df_4h)[0],
-                "daily_pattern": _detect_candlestick_pattern(df_1d)[0],
-                "weekly_pattern": _detect_candlestick_pattern(df_1w)[0],
+                "one_hour_pattern": timeframe_patterns["one_hour"][0],
+                "four_hour_pattern": timeframe_patterns["four_hour"][0],
+                "daily_pattern": timeframe_patterns["daily"][0],
+                "weekly_pattern": timeframe_patterns["weekly"][0],
                 "daily_trend": higher_tf_context.get("daily_trend"),
                 "daily_medium_change_pct": higher_tf_context.get("daily_medium_change_pct"),
                 "weekly_trend": higher_tf_context.get("weekly_trend"),
                 "weekly_medium_change_pct": higher_tf_context.get("weekly_medium_change_pct"),
-                "monthly_pattern": _detect_candlestick_pattern(df_1mth)[0],
+                "monthly_pattern": timeframe_patterns["monthly"][0],
                 "monthly_trend": higher_tf_context.get("monthly_trend"),
                 "monthly_window_change_pct": higher_tf_context.get("monthly_window_change_pct"),
                 "monthly_range_pos": higher_tf_context.get("monthly_range_pos"),
@@ -10412,6 +10626,10 @@ def run_bot():
                 "range_trade_reference": range_trade_reference,
                 "sr_bias": _safe_float(sr_analysis.get("bias"), 0.0),
                 "sr_lines": "\n".join(sr_analysis.get("lines") or []),
+                "timeframe_kline_view": timeframe_kline_view,
+                "timeframe_kline_summary": timeframe_kline_view.get("summary", ""),
+                "host_style_kline_order": timeframe_kline_view.get("order", ""),
+                "timeframe_conflict": bool(timeframe_kline_view.get("conflict", False)),
             }
             _start_mlx_auto_analysis(
                 f"ETHUSDT:15m:{completed_15m}",
