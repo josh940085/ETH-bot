@@ -1373,7 +1373,13 @@ def _binance_host_live_learning_sources():
         except Exception as exc:
             print(f"⚠️ 藍歌直播學習文字檔讀取失敗: {exc}")
 
-    archive_dir = str(os.getenv("BINANCE_HOST_LIVE_ARCHIVE_DIR", "") or "").strip()
+    archive_dir = str(
+        os.getenv(
+            "BINANCE_HOST_LIVE_ARCHIVE_DIR",
+            str(data_path("binance_host_live_archives")),
+        )
+        or ""
+    ).strip()
     if archive_dir:
         try:
             root = Path(archive_dir).expanduser()
