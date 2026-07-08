@@ -1586,6 +1586,30 @@ def _extract_binance_host_live_segments(raw_text, host_name="蓝歌", limit=8):
 
 def _infer_binance_host_direction(text):
     text = str(text or "")
+    primary_parts = []
+    title_parts = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if re.match(r"^(?:主題|標題|标题)\s*[:：]", line):
+            title_parts.append(line)
+            continue
+        if re.match(r"^(?:直播內容|直播内容|逐字稿|Transcript|思路|交易邏輯|交易逻辑|風控|风控)\s*[:：]", line, flags=re.I):
+            primary_parts.append(line)
+            continue
+        if not re.match(r"^(?:方向|品種|品种|日期|回放|長度|长度|聆聽|收聽|来源|來源)\s*[:：]", line):
+            primary_parts.append(line)
+    primary_text = "\n".join(primary_parts).strip()
+    scoring_text = primary_text or text
+    declared = re.search(r"方向\s*[:：]\s*(做多|多方|看多|做空|空方|看空|等待|觀望|观望|中性)", text)
+    if declared and not primary_text:
+        value = declared.group(1)
+        if value in {"做多", "多方", "看多"}:
+            return "long", 1
+        if value in {"做空", "空方", "看空"}:
+            return "short", 1
+        return "neutral", 0
     bullish = (
         "做多", "多单", "多單", "看多", "牛市", "上漲", "上涨", "拉升", "反弹",
         "反彈", "抄底", "帶上", "带上", "突破", "上去", "漲到", "涨到",
@@ -1594,35 +1618,259 @@ def _infer_binance_host_direction(text):
         "做空", "空单", "空單", "空軍", "空军", "看空", "熊市", "下跌", "跌破",
         "加速下跌", "大跌", "回落", "洗盤", "洗盘", "抗單", "抗单", "跌到",
     )
-    bull_score = sum(text.count(word) for word in bullish)
-    bear_score = sum(text.count(word) for word in bearish)
-    bear_score -= len(re.findall(r"(?:沒有|未|沒|尚未)\s*(?:跌破|下跌|大跌|回落)", text))
-    bull_score -= len(re.findall(r"(?:沒有|未|沒|尚未)\s*(?:突破|上漲|上涨|拉升|反彈|反弹)", text))
+    bull_score = sum(scoring_text.count(word) for word in bullish)
+    bear_score = sum(scoring_text.count(word) for word in bearish)
+    if primary_text and title_parts:
+        title_text = "\n".join(title_parts)
+        bull_score += sum(title_text.count(word) for word in bullish) * 0.25
+        bear_score += sum(title_text.count(word) for word in bearish) * 0.25
+    bear_score -= len(re.findall(r"(?:沒有|未|沒|尚未)\s*(?:跌破|下跌|大跌|回落)", scoring_text))
+    bull_score -= len(re.findall(r"(?:沒有|未|沒|尚未)\s*(?:突破|上漲|上涨|拉升|反彈|反弹)", scoring_text))
     bull_score = max(0, bull_score)
     bear_score = max(0, bear_score)
-    if re.search(r"跌\s*\d+|跌\d+|下跌\s*\d+", text):
+    if re.search(r"跌\s*\d+|跌\d+|下跌\s*\d+", scoring_text):
         bear_score += 2
-    if re.search(r"上\s*\d+|漲\s*\d+|涨\s*\d+", text):
+    if re.search(r"上\s*\d+|漲\s*\d+|涨\s*\d+", scoring_text):
         bull_score += 1
+    if declared and primary_text:
+        value = declared.group(1)
+        if value in {"做多", "多方", "看多"}:
+            bull_score += 0.5
+        elif value in {"做空", "空方", "看空"}:
+            bear_score += 0.5
 
     if bull_score > bear_score:
-        return "long", bull_score - bear_score
+        return "long", int(max(1, round(bull_score - bear_score)))
     if bear_score > bull_score:
-        return "short", bear_score - bull_score
+        return "short", int(max(1, round(bear_score - bull_score)))
     return "neutral", 0
 
 
-def _should_update_binance_host_latest_signal(state, direction, strength):
+def _binance_host_content_ts(text, now_ts=None):
+    text = str(text or "")
+    now_dt = datetime.datetime.fromtimestamp(
+        _safe_float(now_ts, time.time()), ZoneInfo("Asia/Taipei")
+    )
+    hours_match = re.search(r"日期\s*[:：]\s*(\d+)\s*(?:小時|小时)", text)
+    if hours_match:
+        return (now_dt - datetime.timedelta(hours=_safe_int(hours_match.group(1), 0))).timestamp()
+    minutes_match = re.search(r"日期\s*[:：]\s*(\d+)\s*(?:分鐘|分钟|分)", text)
+    if minutes_match:
+        return (now_dt - datetime.timedelta(minutes=_safe_int(minutes_match.group(1), 0))).timestamp()
+
+    explicit = re.search(r"(\d{4})年\s*(\d{1,2})月\s*(\d{1,2})日", text)
+    if explicit:
+        try:
+            return datetime.datetime(
+                _safe_int(explicit.group(1), now_dt.year),
+                _safe_int(explicit.group(2), 1),
+                _safe_int(explicit.group(3), 1),
+                tzinfo=ZoneInfo("Asia/Taipei"),
+            ).timestamp()
+        except Exception:
+            pass
+
+    month_day = re.search(r"(?<!年)(\d{1,2})月\s*(\d{1,2})日", text)
+    if month_day:
+        month = _safe_int(month_day.group(1), now_dt.month)
+        day = _safe_int(month_day.group(2), now_dt.day)
+        year = now_dt.year
+        try:
+            candidate = datetime.datetime(year, month, day, tzinfo=ZoneInfo("Asia/Taipei"))
+            if candidate.timestamp() > now_dt.timestamp() + 86400:
+                candidate = datetime.datetime(year - 1, month, day, tzinfo=ZoneInfo("Asia/Taipei"))
+            return candidate.timestamp()
+        except Exception:
+            pass
+    return 0.0
+
+
+def _should_update_binance_host_latest_signal(state, direction, strength, text=None, now_ts=None):
     if direction not in {"long", "short"} or strength <= 0:
         return False
     latest = state.get("latest_signal") if isinstance(state, dict) else None
     if not isinstance(latest, dict):
         return True
+    candidate_content_ts = _binance_host_content_ts(text, now_ts=now_ts)
+    latest_content_ts = _safe_float(latest.get("content_ts"), 0.0)
+    if latest_content_ts <= 0:
+        latest_content_ts = _binance_host_content_ts(latest.get("text_preview"), now_ts=now_ts)
+    if candidate_content_ts > 0 and latest_content_ts <= 0:
+        return True
+    if candidate_content_ts <= 0 and latest_content_ts > 0:
+        return False
+    if candidate_content_ts > 0 and latest_content_ts > 0:
+        recency_grace_sec = max(
+            0,
+            _safe_int(os.getenv("BINANCE_HOST_LIVE_LATEST_RECENCY_GRACE_SEC", 6 * 3600), 6 * 3600),
+        )
+        if candidate_content_ts + recency_grace_sec < latest_content_ts:
+            return False
     latest_direction = str(latest.get("direction") or "").lower()
     latest_strength = _safe_int(latest.get("strength"), 0)
     if latest_direction not in {"long", "short"}:
         return True
     return strength >= latest_strength
+
+
+def _binance_host_validation_symbol(text):
+    text = str(text or "").upper()
+    if "ETH" in text or "以太" in text:
+        return "ETHUSDT"
+    if "BTC" in text or "大餅" in text or "大饼" in text or "比特" in text:
+        return "BTCUSDT"
+    return ""
+
+
+def _fetch_binance_host_validation_klines(symbol, start_ts, hours=24):
+    symbol = str(symbol or "").upper().strip()
+    start_ts = _safe_float(start_ts, 0.0)
+    if not symbol or start_ts <= 0:
+        return []
+    try:
+        response = requests.get(
+            "https://fapi.binance.com/fapi/v1/klines",
+            params={
+                "symbol": symbol,
+                "interval": "1h",
+                "startTime": int(start_ts * 1000),
+                "limit": max(6, min(48, _safe_int(hours, 24) + 3)),
+            },
+            timeout=max(3, _safe_int(os.getenv("BINANCE_HOST_VALIDATION_TIMEOUT_SEC", 8), 8)),
+        )
+        response.raise_for_status()
+        rows = response.json()
+    except Exception as exc:
+        print(f"⚠️ 主播直播走勢驗證K線抓取失敗 {symbol}: {exc}")
+        return []
+    if not isinstance(rows, list):
+        return []
+    parsed = []
+    for row in rows:
+        try:
+            parsed.append(
+                {
+                    "open_time": _safe_float(row[0], 0.0) / 1000.0,
+                    "open": _safe_float(row[1], 0.0),
+                    "high": _safe_float(row[2], 0.0),
+                    "low": _safe_float(row[3], 0.0),
+                    "close": _safe_float(row[4], 0.0),
+                }
+            )
+        except Exception:
+            continue
+    return parsed
+
+
+def _validate_binance_host_live_segment(segment, now_ts=None):
+    text = str((segment or {}).get("text") or "")
+    direction, strength = _infer_binance_host_direction(text)
+    if direction not in {"long", "short"}:
+        return None
+    content_ts = _binance_host_content_ts(text, now_ts=now_ts)
+    if content_ts <= 0:
+        return None
+    symbol = _binance_host_validation_symbol(text)
+    if not symbol:
+        return None
+
+    now_ts = _safe_float(now_ts, time.time())
+    min_age_hours = max(1, _safe_int(os.getenv("BINANCE_HOST_VALIDATION_MIN_HOURS", 4), 4))
+    age_hours = int((now_ts - content_ts) // 3600)
+    if age_hours < min_age_hours:
+        return {
+            "status": "pending",
+            "reason": "not_enough_future_klines",
+            "symbol": symbol,
+            "direction": direction,
+            "strength": strength,
+            "content_ts": content_ts,
+            "age_hours": max(0, age_hours),
+        }
+
+    target_hours = [24, 12, 4]
+    available_hours = max(min_age_hours, min(24, age_hours))
+    klines = _fetch_binance_host_validation_klines(symbol, content_ts, hours=available_hours)
+    if len(klines) < 2 or _safe_float(klines[0].get("open"), 0.0) <= 0:
+        return {
+            "status": "pending",
+            "reason": "missing_klines",
+            "symbol": symbol,
+            "direction": direction,
+            "strength": strength,
+            "content_ts": content_ts,
+            "age_hours": max(0, age_hours),
+        }
+
+    entry = _safe_float(klines[0].get("open"), 0.0)
+    horizon_returns = {}
+    for horizon in target_hours:
+        if age_hours < horizon or len(klines) <= horizon:
+            continue
+        close = _safe_float(klines[horizon].get("close"), 0.0)
+        if close > 0:
+            horizon_returns[f"{horizon}h"] = round((close - entry) / entry * 100.0, 4)
+    if not horizon_returns:
+        close = _safe_float(klines[-1].get("close"), 0.0)
+        if close > 0:
+            used_hours = max(1, int((klines[-1].get("open_time", content_ts) - content_ts) // 3600))
+            horizon_returns[f"{used_hours}h"] = round((close - entry) / entry * 100.0, 4)
+
+    preferred_key = "24h" if "24h" in horizon_returns else ("12h" if "12h" in horizon_returns else "4h")
+    move_pct = _safe_float(horizon_returns.get(preferred_key), 0.0)
+    signed_move_pct = move_pct if direction == "long" else -move_pct
+    min_move_pct = max(0.05, _safe_float(os.getenv("BINANCE_HOST_VALIDATION_MIN_MOVE_PCT", "0.25"), 0.25))
+    success = signed_move_pct >= min_move_pct
+    return {
+        "status": "evaluated",
+        "symbol": symbol,
+        "direction": direction,
+        "strength": strength,
+        "content_ts": content_ts,
+        "age_hours": max(0, age_hours),
+        "entry_price": round(entry, 4),
+        "horizon_returns_pct": horizon_returns,
+        "used_horizon": preferred_key,
+        "signed_move_pct": round(signed_move_pct, 4),
+        "success": bool(success),
+        "evaluated_at": now_ts,
+    }
+
+
+def _update_binance_host_live_validation_state(state, raw_sources, now_ts=None):
+    if not isinstance(state, dict):
+        return state
+    now_ts = _safe_float(now_ts, time.time())
+    validations = state.get("validations")
+    if not isinstance(validations, dict):
+        validations = {}
+    max_segments = _safe_int(os.getenv("BINANCE_HOST_LIVE_MAX_SEGMENTS", 200), 200)
+    host_name = str(os.getenv("BINANCE_HOST_LEARNING_NAME", "蓝歌") or "蓝歌").strip()
+    for source, raw_text in raw_sources:
+        for segment in _extract_binance_host_live_segments(raw_text, host_name=host_name, limit=max_segments):
+            digest = segment.get("hash")
+            if not digest:
+                continue
+            result = _validate_binance_host_live_segment(segment, now_ts=now_ts)
+            if not result:
+                continue
+            result["source_url"] = source
+            result["text_preview"] = str(segment.get("text") or "")[:160]
+            previous = validations.get(digest)
+            if isinstance(previous, dict) and previous.get("status") == "evaluated" and result.get("status") != "evaluated":
+                continue
+            validations[digest] = result
+    evaluated = [item for item in validations.values() if isinstance(item, dict) and item.get("status") == "evaluated"]
+    successful = sum(1 for item in evaluated if item.get("success"))
+    state["validations"] = validations
+    state["validation_summary"] = {
+        "evaluated": len(evaluated),
+        "successful": successful,
+        "accuracy": round(successful / len(evaluated) * 100.0, 2) if evaluated else 0.0,
+        "pending": sum(1 for item in validations.values() if isinstance(item, dict) and item.get("status") == "pending"),
+        "updated_at": now_ts,
+    }
+    return state
 
 
 def _record_binance_host_learning_item(
@@ -1732,13 +1980,14 @@ def _process_binance_host_learning(price, market_context=None):
             if inserted:
                 learned += inserted
                 direction, strength = _infer_binance_host_direction(post.get("text"))
-                if _should_update_binance_host_latest_signal(state, direction, strength):
+                if _should_update_binance_host_latest_signal(state, direction, strength, post.get("text"), now_ts):
                     state["latest_signal"] = {
                         "direction": direction,
                         "strength": strength,
                         "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
                         "source_url": source,
                         "text_preview": str(post.get("text") or "")[:160],
+                        "content_ts": _binance_host_content_ts(post.get("text"), now_ts=now_ts),
                         "learned_at": now_ts,
                     }
             if learned >= max_posts:
@@ -1801,13 +2050,14 @@ def _process_binance_host_live_learning(price, market_context=None):
             if inserted:
                 learned += inserted
                 direction, strength = _infer_binance_host_direction(segment.get("text"))
-                if _should_update_binance_host_latest_signal(state, direction, strength):
+                if _should_update_binance_host_latest_signal(state, direction, strength, segment.get("text"), now_ts):
                     state["latest_signal"] = {
                         "direction": direction,
                         "strength": strength,
                         "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
                         "source_url": source,
                         "text_preview": str(segment.get("text") or "")[:160],
+                        "content_ts": _binance_host_content_ts(segment.get("text"), now_ts=now_ts),
                         "learned_at": now_ts,
                     }
             if max_segments > 0 and learned >= max_segments:
@@ -1818,6 +2068,7 @@ def _process_binance_host_live_learning(price, market_context=None):
     state["seen_hashes"] = list(seen)[-500:]
     state["last_learned_at"] = now_ts if learned else state.get("last_learned_at", 0)
     state["learned_total"] = _safe_int(state.get("learned_total"), 0) + learned
+    state = _update_binance_host_live_validation_state(state, raw_sources, now_ts=now_ts)
     _write_json_file(BINANCE_HOST_LIVE_LEARNING_STATE_PATH, state)
     return learned
 
