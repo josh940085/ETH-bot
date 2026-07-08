@@ -1572,7 +1572,11 @@ def _extract_binance_host_live_segments(raw_text, host_name="蓝歌", limit=8):
             re.I,
         ):
             continue
-        clean = clean[:1400]
+        max_chars = max(
+            1200,
+            _safe_int(os.getenv("BINANCE_HOST_LIVE_SEGMENT_MAX_CHARS", 4000), 4000),
+        )
+        clean = clean[:max_chars]
         digest = hashlib.sha256(clean.encode("utf-8", errors="ignore")).hexdigest()
         if digest in seen:
             continue
@@ -1582,6 +1586,54 @@ def _extract_binance_host_live_segments(raw_text, host_name="蓝歌", limit=8):
         if max_items > 0 and len(segments) >= max_items:
             break
     return segments
+
+
+def _extract_binance_host_live_document(raw_text, source="", limit_chars=None):
+    text = _html_to_learning_text(raw_text)
+    if not text:
+        return None
+    lines = []
+    for raw_line in text.splitlines():
+        line = normalize_news_text(raw_line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        if re.fullmatch(r"-{3,}", line):
+            lines.append("---")
+            continue
+        if re.search(
+            r"(方向|品種|日期|回放|主題|長度|聆聽|思路|交易邏輯|風控|支撐|壓力|止盈|止損|停損|進場|出場|突破|跌破|回踩|補倉|減倉|ETH|BTC|以太|比特|多軍|空軍|做多|做空|等待)",
+            line,
+            re.I,
+        ):
+            lines.append(line)
+    if not lines:
+        return None
+
+    max_chars = max(
+        2000,
+        _safe_int(
+            limit_chars
+            if limit_chars is not None
+            else os.getenv("BINANCE_HOST_LIVE_DOCUMENT_MAX_CHARS", 12000),
+            12000,
+        ),
+    )
+    document_text = "\n".join(lines)
+    document_text = re.sub(r"\n{3,}", "\n\n", document_text).strip()[:max_chars]
+    if len(document_text) < 80:
+        return None
+    source_key = str(source or "")[:240]
+    digest = hashlib.sha256(
+        f"live-document:{source_key}:{document_text}".encode("utf-8", errors="ignore")
+    ).hexdigest()
+    return {
+        "hash": digest,
+        "text": document_text,
+        "kind": "full_live_archive_document",
+        "line_count": len(lines),
+        "char_count": len(document_text),
+    }
 
 
 def _infer_binance_host_direction(text):
@@ -2021,7 +2073,7 @@ def _process_binance_host_live_learning(price, market_context=None):
     seen = set(str(item) for item in seen_hashes)
 
     host_name = str(os.getenv("BINANCE_HOST_LEARNING_NAME", "蓝歌") or "蓝歌").strip()
-    max_segments = _safe_int(os.getenv("BINANCE_HOST_LIVE_MAX_SEGMENTS", 200), 200)
+    max_segments = _safe_int(os.getenv("BINANCE_HOST_LIVE_MAX_SEGMENTS", 0), 0)
     urls, text_sources = _binance_host_live_learning_sources()
     raw_sources = list(text_sources)
     for url in urls:
@@ -2031,8 +2083,33 @@ def _process_binance_host_live_learning(price, market_context=None):
 
     learned = 0
     market_context = market_context if isinstance(market_context, dict) else {}
+    source_stats = []
     for source, raw_text in raw_sources:
-        for segment in _extract_binance_host_live_segments(raw_text, host_name=host_name, limit=max_segments):
+        source_learned = 0
+        source_segments = _extract_binance_host_live_segments(
+            raw_text,
+            host_name=host_name,
+            limit=max_segments,
+        )
+        full_document = _extract_binance_host_live_document(raw_text, source=source)
+        if full_document:
+            inserted = _record_binance_host_learning_item(
+                price=price,
+                market_context=market_context,
+                host_name=host_name,
+                source=source,
+                item=full_document,
+                seen=seen,
+                prompt_prefix="binance-host-live-full",
+                market_source="binance_host_lange_live_full_archive",
+                primary_reason=f"幣安主播{host_name}直播檔完整資訊",
+                risk_note="直播檔完整資訊用於 MLX 策略學習；實際開單仍需價格結構、支撐壓力與風控確認。",
+                failure_label="藍歌直播檔完整資訊寫入 MLX 學習庫失敗",
+                success_label="直播檔完整資訊學習",
+            )
+            learned += inserted
+            source_learned += inserted
+        for segment in source_segments:
             inserted = _record_binance_host_learning_item(
                 price=price,
                 market_context=market_context,
@@ -2049,6 +2126,7 @@ def _process_binance_host_live_learning(price, market_context=None):
             )
             if inserted:
                 learned += inserted
+                source_learned += inserted
                 direction, strength = _infer_binance_host_direction(segment.get("text"))
                 if _should_update_binance_host_latest_signal(state, direction, strength, segment.get("text"), now_ts):
                     state["latest_signal"] = {
@@ -2062,12 +2140,23 @@ def _process_binance_host_live_learning(price, market_context=None):
                     }
             if max_segments > 0 and learned >= max_segments:
                 break
+        source_stats.append(
+            {
+                "source": source,
+                "segments": len(source_segments),
+                "full_document": bool(full_document),
+                "learned": source_learned,
+            }
+        )
         if max_segments > 0 and learned >= max_segments:
             break
 
-    state["seen_hashes"] = list(seen)[-500:]
+    state["seen_hashes"] = list(seen)[-2000:]
     state["last_learned_at"] = now_ts if learned else state.get("last_learned_at", 0)
     state["learned_total"] = _safe_int(state.get("learned_total"), 0) + learned
+    state["source_stats"] = source_stats
+    state["full_archive_learning_enabled"] = True
+    state["max_segments"] = max_segments
     state = _update_binance_host_live_validation_state(state, raw_sources, now_ts=now_ts)
     _write_json_file(BINANCE_HOST_LIVE_LEARNING_STATE_PATH, state)
     return learned
