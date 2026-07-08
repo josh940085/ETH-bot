@@ -27,6 +27,7 @@ import pickle
 import os
 import re
 import html
+import sqlite3
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
@@ -45,6 +46,7 @@ from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
 from sklearn.preprocessing import StandardScaler
 from mlx_learning import (
+    DB_PATH as MLX_LEARNING_DB_PATH,
     EVALUATION_HOURS,
     build_daily_strategy_report,
     build_learning_context as build_mlx_learning_context,
@@ -1943,6 +1945,10 @@ def _record_binance_host_learning_item(
     digest = item.get("hash")
     if not digest or digest in seen:
         return 0
+    question_key = f"{prompt_prefix}:{host_name}:{digest[:16]}"
+    if _mlx_learning_question_exists(question_key):
+        seen.add(digest)
+        return 0
 
     direction, strength = _infer_binance_host_direction(item.get("text"))
     confidence = min(0.72, 0.38 + max(0, strength) * 0.06)
@@ -1973,7 +1979,7 @@ def _record_binance_host_learning_item(
         }
     )
     try:
-        inserted = record_mlx_analysis(f"{prompt_prefix}:{host_name}:{digest[:16]}", response, market)
+        inserted = record_mlx_analysis(question_key, response, market)
     except Exception as exc:
         print(f"⚠️ {failure_label}: {exc}")
         inserted = 0
@@ -1982,6 +1988,37 @@ def _record_binance_host_learning_item(
         print(f"🧠 已寫入幣安主播{host_name}{success_label}: {direction_text} | {digest[:8]}")
         return int(inserted)
     return 0
+
+
+def _mlx_learning_question_exists(question_key):
+    question_key = str(question_key or "").strip()
+    if not question_key:
+        return False
+    try:
+        with sqlite3.connect(str(MLX_LEARNING_DB_PATH), timeout=5) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM analysis_episode WHERE question = ? LIMIT 1",
+                (question_key,),
+            ).fetchone()
+            return row is not None
+    except Exception:
+        return False
+
+
+def _count_binance_host_live_learning_episodes():
+    try:
+        with sqlite3.connect(str(MLX_LEARNING_DB_PATH), timeout=5) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM analysis_episode
+                WHERE question LIKE 'binance-host-live:%'
+                   OR question LIKE 'binance-host-live-full:%'
+                """
+            ).fetchone()
+            return _safe_int(row[0] if row else 0, 0)
+    except Exception:
+        return 0
 
 
 def _process_binance_host_learning(price, market_context=None):
@@ -2049,7 +2086,11 @@ def _process_binance_host_learning(price, market_context=None):
 
     state["seen_hashes"] = list(seen)[-300:]
     state["last_learned_at"] = now_ts if learned else state.get("last_learned_at", 0)
-    state["learned_total"] = _safe_int(state.get("learned_total"), 0) + learned
+    db_live_total = _count_binance_host_live_learning_episodes()
+    state["learned_total"] = max(
+        _safe_int(state.get("learned_total"), 0) + learned,
+        db_live_total,
+    )
     _write_json_file(BINANCE_HOST_LEARNING_STATE_PATH, state)
     return learned
 
