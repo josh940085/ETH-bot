@@ -6157,7 +6157,7 @@ def maybe_activate_auto_break_even(current_price, atr=None, now_ts=None):
     return True
 
 
-def _assess_scaling_action(direction, entry, current_price, tp, sl, reduce=False):
+def _assess_scaling_action(direction, entry, current_price, tp, sl, reduce=False, risk_cut=False):
     """回傳 (ok, reason, metrics)；在補倉/減倉前做成本合理性檢查。"""
     entry = _safe_float(entry, 0.0)
     px = _safe_float(current_price, 0.0)
@@ -6201,17 +6201,23 @@ def _assess_scaling_action(direction, entry, current_price, tp, sl, reduce=False
             return False, f"報酬扣成本後不足({net_edge*100:.3f}% < {min_net_edge*100:.3f}%)", metrics
         return True, "補倉成本檢查通過", metrics
 
-    # 減倉評估：至少要能鎖定一段淨利，避免手續費把利潤吃掉。
+    # 減倉評估：止盈減倉要能鎖定淨利；結構失效時允許風險降倉。
     one_way_exit_cost = max(0.0, fee_round_trip_rate * 0.5 + est_slippage_rate * 0.5)
     lock_net_rate = pnl_rate - one_way_exit_cost
     min_lock_rate = max(0.0002, _safe_float(os.getenv("SCALE_REDUCE_MIN_LOCK_NET_RATE", 0.0008), 0.0008))
+    max_risk_cut_loss = max(0.0005, _safe_float(os.getenv("SCALE_REDUCE_MAX_RISK_CUT_LOSS_RATE", 0.018), 0.018))
 
     metrics = {
         "pnl_rate": pnl_rate,
         "one_way_exit_cost": one_way_exit_cost,
         "lock_net_rate": lock_net_rate,
+        "risk_cut": bool(risk_cut),
     }
 
+    if risk_cut:
+        if pnl_rate < -max_risk_cut_loss:
+            return False, f"風險降倉浮虧過大({pnl_rate*100:.3f}% < -{max_risk_cut_loss*100:.3f}%)", metrics
+        return True, "結構失效風險降倉通過", metrics
     if lock_net_rate < min_lock_rate:
         return False, f"可鎖定淨利不足({lock_net_rate*100:.3f}% < {min_lock_rate*100:.3f}%)", metrics
     return True, "減倉成本檢查通過", metrics
@@ -6274,6 +6280,87 @@ def _maybe_relax_sl_after_scale_add(direction, current_price, atr=None, initial_
 
     return True, f"SL: {old_sl:.2f} → {new_sl:.2f}{sync_msg}"
 
+
+def _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing_pressure):
+    """Apply learned live-session rules to scaling: no blind averaging down."""
+    direction = str(direction or "")
+    if direction not in {"long", "short"} or not isinstance(progress, dict):
+        return {
+            "add_ok": False,
+            "reduce_ok": False,
+            "risk_cut": False,
+            "add_reason": "方向或進度無效",
+            "reduce_reason": "方向或進度無效",
+        }
+
+    support_hits = max(0, _safe_int(SCALING_MARKET_STATE.get("support_hits"), 0))
+    resistance_hits = max(0, _safe_int(SCALING_MARKET_STATE.get("resistance_hits"), 0))
+    sr_bias = _safe_float(SCALING_MARKET_STATE.get("sr_bias"), 0.0)
+    breakout = _safe_int(SCALING_MARKET_STATE.get("breakout"), 0)
+    drawdown_progress = _safe_float(progress.get("drawdown_progress"), 0.0)
+    profit_progress = _safe_float(progress.get("profit_progress"), 0.0)
+    earned_r_multiple = _safe_float(progress.get("earned_r_multiple"), 0.0)
+
+    if direction == "long":
+        direction_reconfirmed = (
+            support_hits >= 1
+            or sr_bias >= 0.16
+            or breakout == 1
+            or trend_score >= 1.4
+        )
+        structure_invalid = (
+            breakout == -1
+            or sr_bias <= -0.28
+            or (opposing_pressure and trend_score < 1.0)
+        )
+        target_pressure = resistance_hits >= 1 or sr_bias <= -0.10
+    else:
+        direction_reconfirmed = (
+            resistance_hits >= 1
+            or sr_bias <= -0.16
+            or breakout == -1
+            or trend_score >= 1.4
+        )
+        structure_invalid = (
+            breakout == 1
+            or sr_bias >= 0.28
+            or (opposing_pressure and trend_score < 1.0)
+        )
+        target_pressure = support_hits >= 1 or sr_bias >= 0.10
+
+    # Learned rule: add only when the original direction is valid again.
+    add_ok = bool(direction_reconfirmed and not structure_invalid)
+    add_reason = "方向重新成立，允許補倉" if add_ok else "方向未重新成立，禁止盲目補倉"
+    if structure_invalid:
+        add_reason = "結構失效，禁止補倉"
+
+    # Learned rule: reduce at target pressure, or cut risk when structure fails.
+    risk_cut = bool(structure_invalid and drawdown_progress > 0.12)
+    profit_reduce = bool(target_pressure and (profit_progress >= 0.28 or earned_r_multiple >= 0.65))
+    reduce_ok = bool(risk_cut or profit_reduce)
+    if risk_cut:
+        reduce_reason = "結構失效，先降倉控風險"
+    elif profit_reduce:
+        reduce_reason = "到壓力/支撐目標區，先減倉鎖利"
+    else:
+        reduce_reason = "未到減倉條件"
+
+    return {
+        "add_ok": add_ok,
+        "reduce_ok": reduce_ok,
+        "risk_cut": risk_cut,
+        "add_reason": add_reason,
+        "reduce_reason": reduce_reason,
+        "direction_reconfirmed": direction_reconfirmed,
+        "structure_invalid": structure_invalid,
+        "target_pressure": target_pressure,
+        "support_hits": support_hits,
+        "resistance_hits": resistance_hits,
+        "sr_bias": sr_bias,
+        "breakout": breakout,
+    }
+
+
 def manage_position_scaling(current_price, atr=None, now_ts=None):
     """持倉中的補倉/減倉管理（虛擬倉位）。"""
     if not _is_truthy(os.getenv("TRADE_AUTO_SCALE_ENABLED", "0")):
@@ -6331,6 +6418,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     drawdown_progress = _safe_float(progress.get("drawdown_progress"), 0.0)
     profit_progress = _safe_float(progress.get("profit_progress"), 0.0)
     earned_r_multiple = _safe_float(progress.get("earned_r_multiple"), 0.0)
+    learned_scaling = _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing_pressure)
 
     add_trigger = (
         not break_even_active
@@ -6338,16 +6426,20 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
         and add_count < max_add_count
         and size < max_size - 1e-9
         and min_add_drawdown <= drawdown_progress <= max_add_drawdown
-        and trend_score >= min_add_trend_score
-        and not opposing_pressure
+        and learned_scaling.get("add_ok")
     )
 
     reduce_trigger = (
         reduce_count < max_reduce_count
         and size > min_size + 1e-9
-        and min_reduce_progress <= profit_progress <= max_reduce_progress
-        and earned_r_multiple >= min_reduce_r_multiple
-        and (opposing_pressure or trend_score <= max_reduce_trend_score)
+        and (
+            (
+                min_reduce_progress <= profit_progress <= max_reduce_progress
+                and earned_r_multiple >= min_reduce_r_multiple
+                and learned_scaling.get("reduce_ok")
+            )
+            or learned_scaling.get("risk_cut")
+        )
     )
 
     # 補倉：逆勢回踩時逐步加碼（有上限）
@@ -6406,6 +6498,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                     f"現價: {current_price:.2f} | 目標加倉: +{int(delta*100)}%\n"
                     f"進場均價: {synced_entry:.2f} | TP: {_safe_float(active_trade.get('tp'), 0.0):.2f} | SL: {_safe_float(active_trade.get('sl'), 0.0):.2f}\n"
                     f"倉位(同步後): {int(size*100)}% → {int(synced_size*100)}%\n"
+                    f"MLX調倉邏輯: {learned_scaling.get('add_reason')}\n"
                     f"{scale_msg}"
                     f"{sl_note}",
                     priority=True,
@@ -6437,6 +6530,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                 f"現價: {current_price:.2f} | 加倉: +{int(delta*100)}%\n"
                 f"進場均價: {new_entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
                 f"倉位: {int(size*100)}% → {int(new_size*100)}%"
+                f"\nMLX調倉邏輯: {learned_scaling.get('add_reason')}"
                 f"{sl_note}",
                 priority=True,
             )
@@ -6453,6 +6547,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                 active_trade.get("tp"),
                 active_trade.get("sl"),
                 reduce=True,
+                risk_cut=bool(learned_scaling.get("risk_cut")),
             )
             if not ok_scale:
                 detail = ""
@@ -6488,6 +6583,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                     f"現價: {current_price:.2f} | 目標減倉: -{int(delta*100)}%\n"
                     f"進場均價: {synced_entry:.2f} | TP: {_safe_float(active_trade.get('tp'), 0.0):.2f} | SL: {_safe_float(active_trade.get('sl'), 0.0):.2f}\n"
                     f"倉位(同步後): {int(size*100)}% → {int(synced_size*100)}%\n"
+                    f"MLX調倉邏輯: {learned_scaling.get('reduce_reason')}\n"
                     f"{scale_msg}",
                     priority=True,
                 )
@@ -6506,7 +6602,8 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                 f"➖ 減倉（{direction}）\n"
                 f"現價: {current_price:.2f} | 減倉: -{int(delta*100)}%\n"
                 f"進場均價: {entry:.2f} | TP: {tp_text} | SL: {sl_text}\n"
-                f"倉位: {int(size*100)}% → {int(new_size*100)}%",
+                f"倉位: {int(size*100)}% → {int(new_size*100)}%\n"
+                f"MLX調倉邏輯: {learned_scaling.get('reduce_reason')}",
                 priority=True,
             )
 
