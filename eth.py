@@ -2078,7 +2078,7 @@ def _load_binance_host_content_override_signal():
         return {"enabled": False, "usable": False}
 
     max_age_sec = max(60, _safe_int(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_AGE_SEC", 6 * 3600), 6 * 3600))
-    min_strength = max(1, _safe_int(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MIN_STRENGTH", 2), 2))
+    min_strength = max(1, _safe_int(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MIN_STRENGTH", 1), 1))
     now_ts = time.time()
     candidates = []
 
@@ -2095,6 +2095,7 @@ def _load_binance_host_content_override_signal():
         latest = state.get("latest_signal")
         if not isinstance(latest, dict):
             continue
+        validation_summary = state.get("validation_summary") if isinstance(state.get("validation_summary"), dict) else {}
         direction = str(latest.get("direction") or "").lower()
         strength = _safe_int(latest.get("strength"), 0)
         if direction not in {"long", "short"} or strength < min_strength:
@@ -2114,6 +2115,9 @@ def _load_binance_host_content_override_signal():
                 "source_url": str(latest.get("source_url") or ""),
                 "text_preview": str(latest.get("text_preview") or "")[:160],
                 "learned_at": learned_at,
+                "validation_evaluated": _safe_int(validation_summary.get("evaluated"), 0),
+                "validation_successful": _safe_int(validation_summary.get("successful"), 0),
+                "validation_accuracy": _safe_float(validation_summary.get("accuracy"), 0.0),
                 "weighted_score": (strength * 0.12 + confidence + freshness * 0.35) * weight,
             }
         )
@@ -2175,8 +2179,20 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
     strength = _safe_int(signal.get("strength"), 0)
     confidence = max(0.0, min(0.90, _safe_float(signal.get("confidence"), 0.0)))
     freshness = max(0.0, min(1.0, _safe_float(signal.get("freshness"), 0.0)))
-    quality = confidence + min(0.30, strength * 0.04) + freshness * 0.12 + supports * 0.03 - conflicts * 0.08
-    default_min_quality = 0.54 if primary_mode else 0.62
+    validation_evaluated = _safe_int(signal.get("validation_evaluated"), 0)
+    validation_accuracy = _safe_float(signal.get("validation_accuracy"), 0.0)
+    validation_edge = 0.0
+    if validation_evaluated >= max(3, _safe_int(os.getenv("TRADE_HOST_CONTENT_MIN_VALIDATION_SAMPLES", 5), 5)):
+        validation_edge = max(-0.20, min(0.20, (validation_accuracy - 50.0) / 100.0))
+    quality = (
+        confidence
+        + min(0.30, strength * 0.04)
+        + freshness * 0.12
+        + validation_edge * 0.35
+        + supports * 0.03
+        - conflicts * 0.08
+    )
+    default_min_quality = 0.45 if primary_mode else 0.58
     min_quality = max(
         0.40,
         min(
@@ -2200,6 +2216,9 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
             "quality": round(quality, 3),
             "min_quality": min_quality,
             "max_conflicts": max_conflicts,
+            "validation_evaluated": validation_evaluated,
+            "validation_accuracy": round(validation_accuracy, 2),
+            "validation_edge": round(validation_edge, 3),
         }
     )
     return payload
@@ -8468,7 +8487,7 @@ def build_trade_signal_snapshot(
             ai_short_prob = max(ai_short_prob, prob_floor)
             ai_prob = min(ai_prob, max(0.10, score))
 
-    primary_indicator = "binance_host_content" if content_override.get("applied") else "30m_macd"
+    primary_indicator = "mlx_host_strategy" if content_override.get("applied") else "auxiliary_technical_stack"
 
     if _is_truthy(os.getenv("TRADE_USE_CONFLUENCE_PROB_FLOOR", "1")):
         long_confluence = 0.0
@@ -10701,13 +10720,13 @@ def run_bot():
                 override_dir_text = "偏多" if content_override.get("direction") == "long" else "偏空"
                 override_source = "直播" if content_override.get("source_type") == "live" else "公開觀點"
                 if content_override.get("applied") and content_override.get("mode") == "primary":
-                    override_state = "主邏輯"
+                    override_state = "MLX主播策略主訊號"
                 elif content_override.get("applied"):
-                    override_state = "已覆蓋交易邏輯"
+                    override_state = "MLX主播策略覆蓋"
                 else:
                     override_state = "只學習未覆蓋"
                 reason.append(
-                    f"藍歌{override_source}{override_dir_text}（{override_state} | 強度{_safe_int(content_override.get('strength'), 0)} | 品質{_safe_float(content_override.get('quality'), 0.0):.2f} | 衝突{_safe_int(content_override.get('conflicts'), 0)}）"
+                    f"藍歌{override_source}{override_dir_text}（{override_state} | 強度{_safe_int(content_override.get('strength'), 0)} | 品質{_safe_float(content_override.get('quality'), 0.0):.2f} | 驗證{_safe_float(content_override.get('validation_accuracy'), 0.0):.1f}%/{_safe_int(content_override.get('validation_evaluated'), 0)}筆 | 衝突{_safe_int(content_override.get('conflicts'), 0)}）"
                 )
 
             # ===== 市場狀態中文轉換 =====
