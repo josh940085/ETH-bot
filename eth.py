@@ -1612,6 +1612,19 @@ def _infer_binance_host_direction(text):
     return "neutral", 0
 
 
+def _should_update_binance_host_latest_signal(state, direction, strength):
+    if direction not in {"long", "short"} or strength <= 0:
+        return False
+    latest = state.get("latest_signal") if isinstance(state, dict) else None
+    if not isinstance(latest, dict):
+        return True
+    latest_direction = str(latest.get("direction") or "").lower()
+    latest_strength = _safe_int(latest.get("strength"), 0)
+    if latest_direction not in {"long", "short"}:
+        return True
+    return strength >= latest_strength
+
+
 def _record_binance_host_learning_item(
     *,
     price,
@@ -1719,7 +1732,7 @@ def _process_binance_host_learning(price, market_context=None):
             if inserted:
                 learned += inserted
                 direction, strength = _infer_binance_host_direction(post.get("text"))
-                if direction in {"long", "short"} and strength > 0:
+                if _should_update_binance_host_latest_signal(state, direction, strength):
                     state["latest_signal"] = {
                         "direction": direction,
                         "strength": strength,
@@ -1788,7 +1801,7 @@ def _process_binance_host_live_learning(price, market_context=None):
             if inserted:
                 learned += inserted
                 direction, strength = _infer_binance_host_direction(segment.get("text"))
-                if direction in {"long", "short"} and strength > 0:
+                if _should_update_binance_host_latest_signal(state, direction, strength):
                     state["latest_signal"] = {
                         "direction": direction,
                         "strength": strength,
