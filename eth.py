@@ -104,6 +104,7 @@ NEWS_PERFORMANCE_LOG = data_path("news_predictions.jsonl")   # 記錄所有預�
 NEWS_LEARNING_BUFFER = data_path("learning_buffer.pkl")       # 增量學習緩衝區
 NEWS_EVAL_PENDING_PATH = data_path("news_eval_pending.pkl")   # 待市場驗證的新聞預測
 NEWS_STATS_CACHE_PATH = data_path("news_stats_cache.json")
+BINANCE_HOST_LEARNING_STATE_PATH = data_path("binance_host_learning_state.json")
 NEWS_MODEL_VERSION = 2
 news_model = None
 news_vectorizer = None
@@ -1318,6 +1319,227 @@ def _write_json_file(path, payload):
         _write_json_atomic(Path(path), payload)
     except Exception:
         pass
+
+
+def _binance_host_learning_enabled():
+    return _is_truthy(os.getenv("BINANCE_HOST_LEARNING_ENABLED", "1"))
+
+
+def _binance_host_learning_sources():
+    raw_urls = str(
+        os.getenv(
+            "BINANCE_HOST_LEARNING_URLS",
+            "https://www.binance.com/zh-TC/square/profile/square-creator-885626428",
+        )
+        or ""
+    )
+    urls = [url.strip() for url in re.split(r"[,;\n]+", raw_urls) if url.strip()]
+    texts = []
+    inline_text = str(os.getenv("BINANCE_HOST_LEARNING_TEXT", "") or "").strip()
+    if inline_text:
+        texts.append(("env:BINANCE_HOST_LEARNING_TEXT", inline_text))
+
+    text_path = str(os.getenv("BINANCE_HOST_LEARNING_TEXT_PATH", "") or "").strip()
+    if text_path:
+        try:
+            path = Path(text_path).expanduser()
+            if path.exists() and path.is_file():
+                texts.append((str(path), path.read_text(encoding="utf-8", errors="ignore")))
+        except Exception as exc:
+            print(f"⚠️ 藍歌學習文字檔讀取失敗: {exc}")
+
+    return urls, texts
+
+
+def _fetch_binance_host_source(url):
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+                ),
+                "Accept-Language": "zh-TW,zh-Hant;q=0.9,zh-CN;q=0.8,en;q=0.6",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout=max(3, _safe_int(os.getenv("BINANCE_HOST_LEARNING_TIMEOUT_SEC", 8), 8)),
+        )
+        if response.status_code >= 400:
+            return ""
+        return response.text or ""
+    except Exception as exc:
+        print(f"⚠️ 藍歌 Binance Square 來源讀取失敗: {exc}")
+        return ""
+
+
+def _html_to_learning_text(raw_text):
+    text = html.unescape(str(raw_text or ""))
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", "\n", text)
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", "\n", text)
+    text = re.sub(r"<[^>]+>", "\n", text)
+    text = text.replace("\\n", "\n").replace("\\t", " ")
+    text = re.sub(r"\r+", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _extract_binance_host_posts(raw_text, host_name="蓝歌", limit=8):
+    text = _html_to_learning_text(raw_text)
+    if not text:
+        return []
+
+    separator = os.getenv("BINANCE_HOST_LEARNING_POST_SEPARATOR", "\n---\n")
+    chunks = []
+    if separator and separator in text:
+        chunks = [part.strip() for part in text.split(separator)]
+    else:
+        pattern = rf"(?:^|\n)\s*{re.escape(host_name)}\s*\n\s*[·•]?\s*\n?\s*[-—]*\s*\n"
+        parts = re.split(pattern, text)
+        chunks = [part.strip() for part in parts[1:]]
+        if not chunks:
+            lines = [line.strip() for line in text.splitlines() if line.strip()]
+            current = []
+            for line in lines:
+                if line == host_name and current:
+                    chunks.append("\n".join(current))
+                    current = []
+                elif _is_crypto_relevant_news(line) or re.search(
+                    r"[$#](ETH|BTC|SOL)|以太|比特|做多|做空|空单|多单",
+                    line,
+                    re.I,
+                ):
+                    current.append(line)
+            if current:
+                chunks.append("\n".join(current))
+
+    posts = []
+    seen = set()
+    for chunk in chunks:
+        clean = normalize_news_text(chunk)
+        clean = re.sub(r"\b(Image|Log in|Sign up|登入|註冊|查看原文)\b", " ", clean, flags=re.I)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        if len(clean) < 24:
+            continue
+        if not re.search(r"[$#](ETH|BTC|SOL)|ETH|BTC|以太|比特|做多|做空|空单|多单|牛市|熊市|跌|漲|涨", clean, re.I):
+            continue
+        clean = clean[:1600]
+        digest = hashlib.sha256(clean.encode("utf-8", errors="ignore")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        posts.append({"hash": digest, "text": clean})
+        if len(posts) >= max(1, _safe_int(limit, 8)):
+            break
+    return posts
+
+
+def _infer_binance_host_direction(text):
+    text = str(text or "")
+    bullish = (
+        "做多", "多单", "多單", "看多", "牛市", "上漲", "上涨", "拉升", "反弹",
+        "反彈", "抄底", "帶上", "带上", "突破", "上去", "漲到", "涨到",
+    )
+    bearish = (
+        "做空", "空单", "空單", "空軍", "空军", "看空", "熊市", "下跌", "跌破",
+        "加速下跌", "大跌", "回落", "洗盤", "洗盘", "抗單", "抗单", "跌到",
+    )
+    bull_score = sum(text.count(word) for word in bullish)
+    bear_score = sum(text.count(word) for word in bearish)
+    if re.search(r"跌\s*\d+|跌\d+|下跌\s*\d+", text):
+        bear_score += 2
+    if re.search(r"上\s*\d+|漲\s*\d+|涨\s*\d+", text):
+        bull_score += 1
+
+    if bull_score > bear_score:
+        return "long", bull_score - bear_score
+    if bear_score > bull_score:
+        return "short", bear_score - bull_score
+    return "neutral", 0
+
+
+def _process_binance_host_learning(price, market_context=None):
+    if not _binance_host_learning_enabled():
+        return 0
+
+    now_ts = time.time()
+    state = _read_json_file(BINANCE_HOST_LEARNING_STATE_PATH, {})
+    if not isinstance(state, dict):
+        state = {}
+    interval = max(60, _safe_int(os.getenv("BINANCE_HOST_LEARNING_INTERVAL_SEC", 900), 900))
+    if now_ts - _safe_float(state.get("last_run_ts"), 0.0) < interval:
+        return 0
+
+    state["last_run_ts"] = now_ts
+    seen_hashes = state.get("seen_hashes")
+    if not isinstance(seen_hashes, list):
+        seen_hashes = []
+    seen = set(str(item) for item in seen_hashes)
+
+    host_name = str(os.getenv("BINANCE_HOST_LEARNING_NAME", "蓝歌") or "蓝歌").strip()
+    max_posts = max(1, _safe_int(os.getenv("BINANCE_HOST_LEARNING_MAX_POSTS", 3), 3))
+    urls, text_sources = _binance_host_learning_sources()
+    raw_sources = list(text_sources)
+    for url in urls:
+        content = _fetch_binance_host_source(url)
+        if content:
+            raw_sources.append((url, content))
+
+    learned = 0
+    market_context = market_context if isinstance(market_context, dict) else {}
+    for source, raw_text in raw_sources:
+        for post in _extract_binance_host_posts(raw_text, host_name=host_name, limit=max_posts):
+            digest = post.get("hash")
+            if not digest or digest in seen:
+                continue
+            direction, strength = _infer_binance_host_direction(post.get("text"))
+            confidence = min(0.72, 0.38 + max(0, strength) * 0.06)
+            direction_text = {"long": "做多", "short": "做空", "neutral": "觀望"}.get(direction, "觀望")
+            response = json.dumps(
+                {
+                    "direction": direction_text,
+                    "primary_reason": f"幣安主播{host_name}公開觀點",
+                    "confidence": round(confidence, 2),
+                    "market_regime": "news_driven",
+                    "support_zone": [],
+                    "resistance_zone": [],
+                    "risk_note": "主播觀點只作 MLX 輔助學習，不直接下單。",
+                    "source": source,
+                    "text": post.get("text"),
+                },
+                ensure_ascii=False,
+            )
+            market = dict(market_context)
+            market.update(
+                {
+                    "price": _safe_float(price, 0.0),
+                    "source": "binance_host_lange",
+                    "host_name": host_name,
+                    "source_url": source,
+                    "primary_reason": f"幣安主播{host_name}公開觀點",
+                    "direction_hint": direction,
+                }
+            )
+            try:
+                inserted = record_mlx_analysis(f"binance-host:{host_name}:{digest[:16]}", response, market)
+            except Exception as exc:
+                print(f"⚠️ 藍歌觀點寫入 MLX 學習庫失敗: {exc}")
+                inserted = 0
+            if inserted:
+                learned += int(inserted)
+                seen.add(digest)
+                print(f"🧠 已寫入幣安主播{host_name}觀點學習: {direction_text} | {digest[:8]}")
+            if learned >= max_posts:
+                break
+        if learned >= max_posts:
+            break
+
+    state["seen_hashes"] = list(seen)[-300:]
+    state["last_learned_at"] = now_ts if learned else state.get("last_learned_at", 0)
+    state["learned_total"] = _safe_int(state.get("learned_total"), 0) + learned
+    _write_json_file(BINANCE_HOST_LEARNING_STATE_PATH, state)
+    return learned
 
 
 def _load_learning_buffer_samples(max_per_label=40):
@@ -9300,6 +9522,22 @@ def run_bot():
 
             # ===== 真實交易管理（TP/SL） =====
             evaluate_mlx_learning(price)
+            _process_binance_host_learning(
+                price,
+                {
+                    "price": price,
+                    "regime": regime,
+                    "htf": htf,
+                    "mid_trend": mid_trend,
+                    "breakout": breakout,
+                    "macro_bias": _compute_macro_bias(
+                        sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
+                    ),
+                    "news_bias": news_bias,
+                    "event_risk": event_risk,
+                    "symbol": "ETHUSDT",
+                },
+            )
             if active_trade["open"]:
                 position_direction = str(active_trade.get("direction") or "")
                 td_position_warning = (
