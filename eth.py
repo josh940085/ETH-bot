@@ -2224,6 +2224,142 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
     return payload
 
 
+def _score_mlx_learned_entry_logic(
+    technical_score,
+    *,
+    range_pos,
+    htf,
+    mid_trend,
+    breakout,
+    regime,
+    volume_spike,
+    buy_pressure,
+    sell_pressure,
+    sweep_high,
+    sweep_low,
+    support_hits,
+    resistance_hits,
+    repeated_support_tests,
+    repeated_resistance_tests,
+    repeated_test_pressure,
+    macro_bias,
+    derivatives_pressure,
+):
+    """Use the learned live-session playbook as the trade-entry decision layer."""
+    long_setup = 0.0
+    short_setup = 0.0
+    reasons = []
+    range_pos = max(0.0, min(1.0, _safe_float(range_pos, 0.5)))
+
+    # Learned rule: do not chase; wait for support/resistance behavior first.
+    if range_pos <= 0.28:
+        long_setup += 1.0
+        reasons.append("低位靠近支撐，優先等多方確認")
+    elif range_pos >= 0.72:
+        short_setup += 1.0
+        reasons.append("高位靠近壓力，優先等空方確認")
+    if range_pos >= 0.86 and not (breakout == 1 and volume_spike and buy_pressure):
+        long_setup -= 0.8
+        short_setup += 0.5
+        reasons.append("高位未確認突破，不追多")
+    if range_pos <= 0.14 and not (breakout == -1 and volume_spike and sell_pressure):
+        short_setup -= 0.8
+        long_setup += 0.5
+        reasons.append("低位未確認跌破，不追空")
+
+    # Learned rule: repeated tests are useful only with confirmation.
+    if repeated_resistance_tests >= 2:
+        if breakout == 1 and (volume_spike or buy_pressure) and not sweep_high:
+            long_setup += min(2.0, 0.7 + repeated_resistance_tests * 0.28)
+            reasons.append("壓力連續測試後放量突破，偏多")
+        else:
+            short_setup += min(1.4, 0.5 + repeated_resistance_tests * 0.18)
+            reasons.append("壓力連續測試但未確認突破，偏空等反彈失敗")
+    if repeated_support_tests >= 2:
+        if breakout == -1 and (volume_spike or sell_pressure) and not sweep_low:
+            short_setup += min(2.0, 0.7 + repeated_support_tests * 0.28)
+            reasons.append("支撐連續測試後跌破，偏空")
+        else:
+            long_setup += min(1.4, 0.5 + repeated_support_tests * 0.18)
+            reasons.append("支撐連續測試但未確認跌破，偏多等承接")
+
+    if breakout == 1:
+        if volume_spike and buy_pressure and not sweep_high:
+            long_setup += 1.2
+            reasons.append("突破有量且買盤確認")
+        else:
+            short_setup += 0.6
+            reasons.append("突破量能不足，防假突破")
+    elif breakout == -1:
+        if volume_spike and sell_pressure and not sweep_low:
+            short_setup += 1.2
+            reasons.append("跌破有量且賣壓確認")
+        else:
+            long_setup += 0.6
+            reasons.append("跌破量能不足，防假跌破")
+
+    if sweep_high:
+        short_setup += 1.1
+        reasons.append("掃高回落，反彈失敗偏空")
+    if sweep_low:
+        long_setup += 1.1
+        reasons.append("掃低收回，跌破失敗偏多")
+
+    if _safe_int(resistance_hits, 0) >= 2:
+        short_setup += 0.5
+    elif _safe_int(resistance_hits, 0) == 1:
+        short_setup += 0.25
+    if _safe_int(support_hits, 0) >= 2:
+        long_setup += 0.5
+    elif _safe_int(support_hits, 0) == 1:
+        long_setup += 0.25
+
+    if str(regime).startswith("bull"):
+        long_setup += 0.35
+    elif str(regime).startswith("bear"):
+        short_setup += 0.35
+    if _safe_int(mid_trend, 0) > 0:
+        long_setup += 0.35
+    elif _safe_int(mid_trend, 0) < 0:
+        short_setup += 0.35
+    if _safe_int(htf, 0) > 0:
+        long_setup += 0.25
+    elif _safe_int(htf, 0) < 0:
+        short_setup += 0.25
+
+    macro_bias = _safe_float(macro_bias, 0.0)
+    derivatives_pressure = _safe_float(derivatives_pressure, 0.0)
+    if macro_bias > 0.45:
+        long_setup += 0.25
+    elif macro_bias < -0.45:
+        short_setup += 0.25
+    if derivatives_pressure > 0.12:
+        long_setup += 0.20
+    elif derivatives_pressure < -0.12:
+        short_setup += 0.20
+
+    if repeated_test_pressure > 0:
+        long_setup += min(0.35, abs(repeated_test_pressure) * 0.4)
+    elif repeated_test_pressure < 0:
+        short_setup += min(0.35, abs(repeated_test_pressure) * 0.4)
+
+    setup_delta = long_setup - short_setup
+    learned_edge = max(-0.34, min(0.34, setup_delta * 0.11))
+    technical_aux = max(-0.06, min(0.06, _safe_float(technical_score, 0.5) - 0.5))
+    learned_score = max(0.05, min(0.95, 0.5 + learned_edge + technical_aux))
+    direction = "long" if learned_score > 0.5 else "short" if learned_score < 0.5 else "neutral"
+    confidence = min(0.72, 0.42 + abs(setup_delta) * 0.06)
+    return {
+        "score": learned_score,
+        "direction": direction,
+        "confidence": round(confidence, 3),
+        "long_setup": round(long_setup, 3),
+        "short_setup": round(short_setup, 3),
+        "technical_aux": round(technical_aux, 3),
+        "reasons": reasons[:8],
+    }
+
+
 def _load_learning_buffer_samples(max_per_label=40):
     try:
         with open(NEWS_LEARNING_BUFFER, "rb") as f:
@@ -8438,6 +8574,35 @@ def build_trade_signal_snapshot(
         score = max(0.05, min(score, 0.95))
 
     auxiliary_score = score
+    learned_entry_logic = _score_mlx_learned_entry_logic(
+        auxiliary_score,
+        range_pos=features.get("range_pos"),
+        htf=htf,
+        mid_trend=mid_trend,
+        breakout=breakout,
+        regime=regime,
+        volume_spike=volume_spike,
+        buy_pressure=buy_pressure,
+        sell_pressure=sell_pressure,
+        sweep_high=sweep_high,
+        sweep_low=sweep_low,
+        support_hits=_safe_int(sr_analysis.get("support_hits"), 0),
+        resistance_hits=_safe_int(sr_analysis.get("resistance_hits"), 0),
+        repeated_support_tests=repeated_support_tests,
+        repeated_resistance_tests=repeated_resistance_tests,
+        repeated_test_pressure=repeated_test_pressure,
+        macro_bias=macro_bias,
+        derivatives_pressure=derivatives_pressure,
+    )
+    score = _safe_float(learned_entry_logic.get("score"), score)
+    learned_logic_confidence = max(0.0, min(0.82, _safe_float(learned_entry_logic.get("confidence"), 0.0)))
+    learned_logic_direction = str(learned_entry_logic.get("direction") or "")
+    if learned_logic_direction == "long":
+        ai_long_prob = max(ai_long_prob, learned_logic_confidence)
+        ai_prob = max(ai_prob, score)
+    elif learned_logic_direction == "short":
+        ai_short_prob = max(ai_short_prob, learned_logic_confidence)
+        ai_prob = min(ai_prob, score)
     raw_content_override = _load_binance_host_content_override_signal()
     content_override = _assess_host_content_override(
         raw_content_override,
@@ -8487,7 +8652,7 @@ def build_trade_signal_snapshot(
             ai_short_prob = max(ai_short_prob, prob_floor)
             ai_prob = min(ai_prob, max(0.10, score))
 
-    primary_indicator = "mlx_host_strategy" if content_override.get("applied") else "logic_signal"
+    primary_indicator = "mlx_host_strategy" if content_override.get("applied") else "mlx_learned_logic"
 
     if _is_truthy(os.getenv("TRADE_USE_CONFLUENCE_PROB_FLOOR", "1")):
         long_confluence = 0.0
@@ -8822,6 +8987,7 @@ def build_trade_signal_snapshot(
         "derivatives_pressure": derivatives_pressure,
         "derivatives_flow_stale": bool(derivatives_flow.get("stale", False)),
         "content_override": content_override,
+        "learned_entry_logic": learned_entry_logic,
         "higher_timeframe": higher_timeframe,
         "support_hits": _safe_int(sr_analysis.get("support_hits"), 0),
         "resistance_hits": _safe_int(sr_analysis.get("resistance_hits"), 0),
@@ -10608,6 +10774,7 @@ def run_bot():
             repeated_resistance_tests = _safe_int(decision.get("repeated_resistance_tests"), 0)
             repeated_test_pressure = _safe_float(decision.get("repeated_test_pressure"), 0.0)
             content_override = decision.get("content_override") if isinstance(decision.get("content_override"), dict) else {}
+            learned_entry_logic = decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {}
             entry = price
             daily_min_trade = _daily_min_trade_due()
             if daily_min_trade:
@@ -10715,6 +10882,17 @@ def run_bot():
             if repeated_support_tests >= 2 or repeated_resistance_tests >= 2:
                 reason.append(
                     f"連續測試壓力（支撐{repeated_support_tests} / 壓力{repeated_resistance_tests} | 方向壓力{repeated_test_pressure:+.2f}）"
+                )
+            if learned_entry_logic:
+                learned_dir = {"long": "偏多", "short": "偏空", "neutral": "中性"}.get(
+                    str(learned_entry_logic.get("direction") or "neutral"),
+                    "中性",
+                )
+                learned_reasons = "、".join((learned_entry_logic.get("reasons") or [])[:2])
+                reason.append(
+                    f"MLX學習邏輯{learned_dir}（多{_safe_float(learned_entry_logic.get('long_setup'), 0.0):.2f}/空{_safe_float(learned_entry_logic.get('short_setup'), 0.0):.2f}"
+                    + (f" | {learned_reasons}" if learned_reasons else "")
+                    + "）"
                 )
             if content_override.get("usable"):
                 override_dir_text = "偏多" if content_override.get("direction") == "long" else "偏空"
