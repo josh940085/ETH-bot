@@ -1373,6 +1373,42 @@ def _binance_host_live_learning_sources():
         except Exception as exc:
             print(f"⚠️ 藍歌直播學習文字檔讀取失敗: {exc}")
 
+    archive_dir = str(os.getenv("BINANCE_HOST_LIVE_ARCHIVE_DIR", "") or "").strip()
+    if archive_dir:
+        try:
+            root = Path(archive_dir).expanduser()
+            if root.exists() and root.is_dir():
+                allowed_ext = {
+                    ".txt",
+                    ".md",
+                    ".json",
+                    ".jsonl",
+                    ".srt",
+                    ".vtt",
+                    ".csv",
+                    ".tsv",
+                }
+                max_files = max(1, _safe_int(os.getenv("BINANCE_HOST_LIVE_ARCHIVE_MAX_FILES", 500), 500))
+                max_file_bytes = max(
+                    10_000,
+                    _safe_int(os.getenv("BINANCE_HOST_LIVE_ARCHIVE_MAX_FILE_BYTES", 2_000_000), 2_000_000),
+                )
+                files = [
+                    path
+                    for path in root.rglob("*")
+                    if path.is_file() and path.suffix.lower() in allowed_ext
+                ]
+                for path in sorted(files, key=lambda item: str(item))[:max_files]:
+                    try:
+                        if path.stat().st_size > max_file_bytes:
+                            print(f"⚠️ 略過過大的藍歌直播檔: {path}")
+                            continue
+                        texts.append((str(path), path.read_text(encoding="utf-8", errors="ignore")))
+                    except Exception as exc:
+                        print(f"⚠️ 藍歌直播檔讀取失敗 {path}: {exc}")
+        except Exception as exc:
+            print(f"⚠️ 藍歌直播檔案庫讀取失敗: {exc}")
+
     return urls, texts
 
 
@@ -1511,6 +1547,10 @@ def _extract_binance_host_live_segments(raw_text, host_name="蓝歌", limit=8):
     for chunk in chunks:
         clean = normalize_news_text(chunk)
         clean = re.sub(r"^\s*(?:\[[^\]]+\]|\d{1,2}:\d{2}(?::\d{2})?)\s*", "", clean).strip()
+        clean = re.sub(r"\b\d+\s+\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\b", " ", clean)
+        clean = re.sub(r"\b\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\s*-->\s*\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}\b", " ", clean)
+        clean = re.sub(r"\S*\s*-->\s*\S*", " ", clean)
+        clean = re.sub(r"^\s*\d+\s+", "", clean).strip()
         clean = re.sub(
             r"\b(Live|Replay|Subscribe|Follow|Share|Like|登入|註冊|訂閱|分享|直播回放)\b",
             " ",
@@ -1521,7 +1561,7 @@ def _extract_binance_host_live_segments(raw_text, host_name="蓝歌", limit=8):
         if len(clean) < 24:
             continue
         if not re.search(
-            r"[$#](ETH|BTC|SOL)|ETH|BTC|以太|比特|大餅|大饼|做多|做空|空单|多单|牛市|熊市|支撐|支撑|壓力|压力|跌|漲|涨",
+            r"[$#](ETH|BTC|SOL)|ETH|BTC|以太|比特|大餅|大饼|做多|做空|空单|多单|牛市|熊市|支撐|支撑|壓力|压力|止盈|止損|止损|停損|停损|倉位|仓位|槓桿|杠杆|進場|进场|出場|出场|突破|跌破|洗盤|洗盘|回踩|回測|回测|跌|漲|涨",
             clean,
             re.I,
         ):
@@ -1532,7 +1572,8 @@ def _extract_binance_host_live_segments(raw_text, host_name="蓝歌", limit=8):
             continue
         seen.add(digest)
         segments.append({"hash": digest, "text": clean})
-        if len(segments) >= max(1, _safe_int(limit, 8)):
+        max_items = _safe_int(limit, 8)
+        if max_items > 0 and len(segments) >= max_items:
             break
     return segments
 
@@ -1671,6 +1712,15 @@ def _process_binance_host_learning(price, market_context=None):
             )
             if inserted:
                 learned += inserted
+                direction, strength = _infer_binance_host_direction(post.get("text"))
+                state["latest_signal"] = {
+                    "direction": direction,
+                    "strength": strength,
+                    "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
+                    "source_url": source,
+                    "text_preview": str(post.get("text") or "")[:160],
+                    "learned_at": now_ts,
+                }
             if learned >= max_posts:
                 break
         if learned >= max_posts:
@@ -1702,7 +1752,7 @@ def _process_binance_host_live_learning(price, market_context=None):
     seen = set(str(item) for item in seen_hashes)
 
     host_name = str(os.getenv("BINANCE_HOST_LEARNING_NAME", "蓝歌") or "蓝歌").strip()
-    max_segments = max(1, _safe_int(os.getenv("BINANCE_HOST_LIVE_MAX_SEGMENTS", 5), 5))
+    max_segments = _safe_int(os.getenv("BINANCE_HOST_LIVE_MAX_SEGMENTS", 200), 200)
     urls, text_sources = _binance_host_live_learning_sources()
     raw_sources = list(text_sources)
     for url in urls:
@@ -1730,9 +1780,18 @@ def _process_binance_host_live_learning(price, market_context=None):
             )
             if inserted:
                 learned += inserted
-            if learned >= max_segments:
+                direction, strength = _infer_binance_host_direction(segment.get("text"))
+                state["latest_signal"] = {
+                    "direction": direction,
+                    "strength": strength,
+                    "confidence": min(0.72, 0.38 + max(0, strength) * 0.06),
+                    "source_url": source,
+                    "text_preview": str(segment.get("text") or "")[:160],
+                    "learned_at": now_ts,
+                }
+            if max_segments > 0 and learned >= max_segments:
                 break
-        if learned >= max_segments:
+        if max_segments > 0 and learned >= max_segments:
             break
 
     state["seen_hashes"] = list(seen)[-500:]
@@ -1740,6 +1799,119 @@ def _process_binance_host_live_learning(price, market_context=None):
     state["learned_total"] = _safe_int(state.get("learned_total"), 0) + learned
     _write_json_file(BINANCE_HOST_LIVE_LEARNING_STATE_PATH, state)
     return learned
+
+
+def _load_binance_host_content_override_signal():
+    if not _is_truthy(os.getenv("TRADE_ALLOW_HOST_CONTENT_OVERRIDE", "1")):
+        return {"enabled": False, "usable": False}
+
+    max_age_sec = max(60, _safe_int(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_AGE_SEC", 6 * 3600), 6 * 3600))
+    min_strength = max(1, _safe_int(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MIN_STRENGTH", 2), 2))
+    now_ts = time.time()
+    candidates = []
+
+    for path, source_type, weight in (
+        (BINANCE_HOST_LIVE_LEARNING_STATE_PATH, "live", 1.15),
+        (BINANCE_HOST_LEARNING_STATE_PATH, "post", 1.0),
+    ):
+        state = _read_json_file(path, {})
+        if not isinstance(state, dict):
+            continue
+        learned_at = _safe_float(state.get("last_learned_at"), 0.0)
+        if learned_at <= 0 or now_ts - learned_at > max_age_sec:
+            continue
+        latest = state.get("latest_signal")
+        if not isinstance(latest, dict):
+            continue
+        direction = str(latest.get("direction") or "").lower()
+        strength = _safe_int(latest.get("strength"), 0)
+        if direction not in {"long", "short"} or strength < min_strength:
+            continue
+        age_sec = max(0.0, now_ts - learned_at)
+        freshness = max(0.0, 1.0 - age_sec / max(max_age_sec, 1.0))
+        confidence = max(0.0, min(0.90, _safe_float(latest.get("confidence"), 0.0)))
+        if confidence <= 0:
+            confidence = min(0.72, 0.38 + strength * 0.06)
+        candidates.append(
+            {
+                "direction": direction,
+                "strength": strength,
+                "confidence": confidence,
+                "freshness": freshness,
+                "source_type": source_type,
+                "source_url": str(latest.get("source_url") or ""),
+                "text_preview": str(latest.get("text_preview") or "")[:160],
+                "learned_at": learned_at,
+                "weighted_score": (strength * 0.12 + confidence + freshness * 0.35) * weight,
+            }
+        )
+
+    if not candidates:
+        return {"enabled": True, "usable": False}
+
+    best = max(candidates, key=lambda item: item.get("weighted_score", 0.0))
+    best["usable"] = True
+    best["enabled"] = True
+    return best
+
+
+def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias, support_hits, resistance_hits, derivatives_pressure):
+    signal = signal if isinstance(signal, dict) else {}
+    if not signal.get("usable"):
+        return {"enabled": bool(signal.get("enabled")), "usable": False, "applied": False}
+
+    direction = str(signal.get("direction") or "").lower()
+    if direction not in {"long", "short"}:
+        return {"enabled": True, "usable": False, "applied": False}
+
+    sign = 1 if direction == "long" else -1
+    conflicts = 0
+    supports = 0
+    for value, threshold, weight in (
+        (_safe_int(htf, 0), 1, 1),
+        (_safe_int(mid_trend, 0), 1, 1),
+        (_safe_float(macro_bias, 0.0), 0.35, 1),
+        (_safe_float(sr_bias, 0.0), 0.10, 1),
+        (_safe_float(derivatives_pressure, 0.0), 0.12, 1),
+    ):
+        aligned = value * sign
+        if aligned >= threshold:
+            supports += weight
+        elif aligned <= -threshold:
+            conflicts += weight
+
+    if direction == "long":
+        if _safe_int(resistance_hits, 0) >= 2:
+            conflicts += 1
+        if _safe_int(support_hits, 0) >= 1:
+            supports += 1
+    else:
+        if _safe_int(support_hits, 0) >= 2:
+            conflicts += 1
+        if _safe_int(resistance_hits, 0) >= 1:
+            supports += 1
+
+    max_conflicts = max(0, _safe_int(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_CONFLICTS", 1), 1))
+    strength = _safe_int(signal.get("strength"), 0)
+    confidence = max(0.0, min(0.90, _safe_float(signal.get("confidence"), 0.0)))
+    freshness = max(0.0, min(1.0, _safe_float(signal.get("freshness"), 0.0)))
+    quality = confidence + min(0.30, strength * 0.04) + freshness * 0.12 + supports * 0.03 - conflicts * 0.08
+    min_quality = max(0.40, min(0.85, _safe_float(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MIN_QUALITY", 0.62), 0.62)))
+    applied = conflicts <= max_conflicts and quality >= min_quality
+
+    payload = dict(signal)
+    payload.update(
+        {
+            "usable": True,
+            "applied": applied,
+            "conflicts": conflicts,
+            "supports": supports,
+            "quality": round(quality, 3),
+            "min_quality": min_quality,
+            "max_conflicts": max_conflicts,
+        }
+    )
+    return payload
 
 
 def _load_learning_buffer_samples(max_per_label=40):
@@ -7744,6 +7916,7 @@ def build_trade_signal_snapshot(
             "total_trade_cost_rate_est": 0.0,
             "fee_round_trip_rate": 0.0,
             "funding_cost_rate_est": 0.0,
+            "content_override": {"enabled": True, "usable": False, "applied": False},
         }
 
     price = _safe_float(price, _safe_float(df_5m["close"].iloc[-1], 0.0))
@@ -7953,6 +8126,33 @@ def build_trade_signal_snapshot(
     if abs(derivatives_pressure) >= 0.10:
         score += max(-0.06, min(0.06, derivatives_pressure * 0.045))
         score = max(0.05, min(score, 0.95))
+
+    raw_content_override = _load_binance_host_content_override_signal()
+    content_override = _assess_host_content_override(
+        raw_content_override,
+        htf=htf,
+        mid_trend=mid_trend,
+        macro_bias=macro_bias,
+        sr_bias=sr_bias,
+        support_hits=_safe_int(sr_analysis.get("support_hits"), 0),
+        resistance_hits=_safe_int(sr_analysis.get("resistance_hits"), 0),
+        derivatives_pressure=derivatives_pressure,
+    )
+    if content_override.get("applied"):
+        override_direction = str(content_override.get("direction") or "")
+        override_quality = max(0.0, min(1.0, _safe_float(content_override.get("quality"), 0.0)))
+        max_swing = max(0.08, min(0.32, _safe_float(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_MAX_SCORE_SWING", 0.22), 0.22)))
+        target_score = 0.5 + (max_swing * override_quality if override_direction == "long" else -max_swing * override_quality)
+        blend = max(0.15, min(0.75, _safe_float(os.getenv("TRADE_HOST_CONTENT_OVERRIDE_BLEND", 0.55), 0.55)))
+        score = score * (1.0 - blend) + target_score * blend
+        score = max(0.05, min(score, 0.95))
+        prob_floor = max(0.42, min(0.80, 0.50 + override_quality * 0.18))
+        if override_direction == "long":
+            ai_long_prob = max(ai_long_prob, prob_floor)
+            ai_prob = max(ai_prob, min(0.90, score))
+        elif override_direction == "short":
+            ai_short_prob = max(ai_short_prob, prob_floor)
+            ai_prob = min(ai_prob, max(0.10, score))
 
     auxiliary_score = score
     primary_indicator = "30m_macd"
@@ -8234,6 +8434,7 @@ def build_trade_signal_snapshot(
         if (
             not final.startswith("觀望")
             and _is_truthy(os.getenv("TRADE_USE_30M_MACD_PRIMARY", "1"))
+            and not content_override.get("applied")
         ):
             if "做多" in final and mid_trend != 1:
                 final = "觀望（主指標30m MACD未支持做多）"
@@ -8288,6 +8489,7 @@ def build_trade_signal_snapshot(
         "taker_buy_ratio": taker_buy_ratio,
         "derivatives_pressure": derivatives_pressure,
         "derivatives_flow_stale": bool(derivatives_flow.get("stale", False)),
+        "content_override": content_override,
         "higher_timeframe": higher_timeframe,
         "support_hits": _safe_int(sr_analysis.get("support_hits"), 0),
         "resistance_hits": _safe_int(sr_analysis.get("resistance_hits"), 0),
@@ -10073,6 +10275,7 @@ def run_bot():
             repeated_support_tests = _safe_int(decision.get("repeated_support_tests"), 0)
             repeated_resistance_tests = _safe_int(decision.get("repeated_resistance_tests"), 0)
             repeated_test_pressure = _safe_float(decision.get("repeated_test_pressure"), 0.0)
+            content_override = decision.get("content_override") if isinstance(decision.get("content_override"), dict) else {}
             entry = price
             daily_min_trade = _daily_min_trade_due()
             if daily_min_trade:
@@ -10180,6 +10383,13 @@ def run_bot():
             if repeated_support_tests >= 2 or repeated_resistance_tests >= 2:
                 reason.append(
                     f"連續測試壓力（支撐{repeated_support_tests} / 壓力{repeated_resistance_tests} | 方向壓力{repeated_test_pressure:+.2f}）"
+                )
+            if content_override.get("usable"):
+                override_dir_text = "偏多" if content_override.get("direction") == "long" else "偏空"
+                override_source = "直播" if content_override.get("source_type") == "live" else "公開觀點"
+                override_state = "已覆蓋交易邏輯" if content_override.get("applied") else "只學習未覆蓋"
+                reason.append(
+                    f"藍歌{override_source}{override_dir_text}（{override_state} | 強度{_safe_int(content_override.get('strength'), 0)} | 品質{_safe_float(content_override.get('quality'), 0.0):.2f} | 衝突{_safe_int(content_override.get('conflicts'), 0)}）"
                 )
 
             # ===== 市場狀態中文轉換 =====
