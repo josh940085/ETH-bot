@@ -4324,6 +4324,44 @@ def _recent_tp_sl_stats(limit=5):
     return {"total": total, "tp": tp, "sl": sl}
 
 
+def _format_tp_sl_win_rate_line(performance_stats=None, *, min_startup_samples=None, recent_limit=None):
+    stats = performance_stats if isinstance(performance_stats, dict) else performance
+    startup_total = max(0, _safe_int(stats.get("total"), 0))
+    startup_wins = max(0, _safe_int(stats.get("win"), 0))
+    min_samples = max(
+        2,
+        _safe_int(
+            min_startup_samples
+            if min_startup_samples is not None
+            else os.getenv("TRADE_STARTUP_WIN_RATE_MIN_SAMPLES", 3),
+            3,
+        ),
+    )
+
+    if startup_total >= min_samples:
+        startup_rate = startup_wins / max(startup_total, 1)
+        return f"啟動後TP/SL勝率: {startup_rate:.2%}（{startup_wins}/{startup_total}）"
+
+    lookback = max(
+        min_samples,
+        _safe_int(
+            recent_limit
+            if recent_limit is not None
+            else os.getenv("TRADE_RECENT_WIN_RATE_LOOKBACK", 8),
+            8,
+        ),
+    )
+    recent = _recent_tp_sl_stats(lookback)
+    if recent["total"] > 0:
+        recent_rate = recent["tp"] / max(recent["total"], 1)
+        return (
+            f"最近TP/SL勝率: {recent_rate:.2%}（{recent['tp']}/{recent['total']}）"
+            f"｜啟動後樣本不足（{startup_total}/{min_samples}）"
+        )
+
+    return f"TP/SL勝率: 樣本不足（啟動後 {startup_total}/{min_samples}）"
+
+
 def _recent_sl_guard_reason(final, score, net_edge_rate_est, risk_rate, macro_bias, mid_trend, sr_bias):
     if not _is_truthy(os.getenv("TRADE_RECENT_SL_GUARD_ENABLED", "1")):
         return ""
@@ -9737,7 +9775,7 @@ def run_bot():
             msg += (
                 f"🤖 AI信號：{display_signal}\n"
                 f"📊 信心值: {ai_prob:.2f}\n"
-                f"📈 啟動後TP/SL勝率: {(performance['win']/performance['total'] if performance['total']>0 else 0):.2%}\n"
+                f"📈 {_format_tp_sl_win_rate_line(performance)}\n"
                 f"🌍 市場狀態: {regime_text}\n"
                 f"📰 時事判斷: {macro_text}\n"
                 f"{news_text}"
