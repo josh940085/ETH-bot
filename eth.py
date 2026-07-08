@@ -105,6 +105,7 @@ NEWS_LEARNING_BUFFER = data_path("learning_buffer.pkl")       # 增量學習緩�
 NEWS_EVAL_PENDING_PATH = data_path("news_eval_pending.pkl")   # 待市場驗證的新聞預測
 NEWS_STATS_CACHE_PATH = data_path("news_stats_cache.json")
 BINANCE_HOST_LEARNING_STATE_PATH = data_path("binance_host_learning_state.json")
+BINANCE_HOST_LIVE_LEARNING_STATE_PATH = data_path("binance_host_live_learning_state.json")
 NEWS_MODEL_VERSION = 2
 news_model = None
 news_vectorizer = None
@@ -1325,6 +1326,10 @@ def _binance_host_learning_enabled():
     return _is_truthy(os.getenv("BINANCE_HOST_LEARNING_ENABLED", "1"))
 
 
+def _binance_host_live_learning_enabled():
+    return _is_truthy(os.getenv("BINANCE_HOST_LIVE_LEARNING_ENABLED", "1"))
+
+
 def _binance_host_learning_sources():
     raw_urls = str(
         os.getenv(
@@ -1351,6 +1356,26 @@ def _binance_host_learning_sources():
     return urls, texts
 
 
+def _binance_host_live_learning_sources():
+    raw_urls = str(os.getenv("BINANCE_HOST_LIVE_TRANSCRIPT_URLS", "") or "")
+    urls = [url.strip() for url in re.split(r"[,;\n]+", raw_urls) if url.strip()]
+    texts = []
+    inline_text = str(os.getenv("BINANCE_HOST_LIVE_TEXT", "") or "").strip()
+    if inline_text:
+        texts.append(("env:BINANCE_HOST_LIVE_TEXT", inline_text))
+
+    text_path = str(os.getenv("BINANCE_HOST_LIVE_TEXT_PATH", "") or "").strip()
+    if text_path:
+        try:
+            path = Path(text_path).expanduser()
+            if path.exists() and path.is_file():
+                texts.append((str(path), path.read_text(encoding="utf-8", errors="ignore")))
+        except Exception as exc:
+            print(f"⚠️ 藍歌直播學習文字檔讀取失敗: {exc}")
+
+    return urls, texts
+
+
 def _fetch_binance_host_source(url):
     try:
         response = requests.get(
@@ -1370,6 +1395,28 @@ def _fetch_binance_host_source(url):
         return response.text or ""
     except Exception as exc:
         print(f"⚠️ 藍歌 Binance Square 來源讀取失敗: {exc}")
+        return ""
+
+
+def _fetch_binance_host_live_source(url):
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+                ),
+                "Accept-Language": "zh-TW,zh-Hant;q=0.9,zh-CN;q=0.8,en;q=0.6",
+                "Accept": "text/plain,text/html,application/json,*/*;q=0.8",
+            },
+            timeout=max(3, _safe_int(os.getenv("BINANCE_HOST_LIVE_TIMEOUT_SEC", 8), 8)),
+        )
+        if response.status_code >= 400:
+            return ""
+        return response.text or ""
+    except Exception as exc:
+        print(f"⚠️ 藍歌直播逐字稿來源讀取失敗: {exc}")
         return ""
 
 
@@ -1435,6 +1482,61 @@ def _extract_binance_host_posts(raw_text, host_name="蓝歌", limit=8):
     return posts
 
 
+def _extract_binance_host_live_segments(raw_text, host_name="蓝歌", limit=8):
+    text = _html_to_learning_text(raw_text)
+    if not text:
+        return []
+
+    separator = os.getenv("BINANCE_HOST_LIVE_SEGMENT_SEPARATOR", "\n---\n")
+    if separator and separator in text:
+        chunks = [part.strip() for part in text.split(separator)]
+    else:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        chunks = []
+        current = []
+        for line in lines:
+            clean_line = re.sub(r"^\s*(?:\[[^\]]+\]|\d{1,2}:\d{2}(?::\d{2})?)\s*", "", line).strip()
+            if not clean_line:
+                continue
+            current.append(clean_line)
+            joined = " ".join(current)
+            if len(joined) >= 260 or re.search(r"[。！？!?]\s*$", clean_line):
+                chunks.append(joined)
+                current = []
+        if current:
+            chunks.append(" ".join(current))
+
+    segments = []
+    seen = set()
+    for chunk in chunks:
+        clean = normalize_news_text(chunk)
+        clean = re.sub(r"^\s*(?:\[[^\]]+\]|\d{1,2}:\d{2}(?::\d{2})?)\s*", "", clean).strip()
+        clean = re.sub(
+            r"\b(Live|Replay|Subscribe|Follow|Share|Like|登入|註冊|訂閱|分享|直播回放)\b",
+            " ",
+            clean,
+            flags=re.I,
+        )
+        clean = re.sub(r"\s+", " ", clean).strip()
+        if len(clean) < 24:
+            continue
+        if not re.search(
+            r"[$#](ETH|BTC|SOL)|ETH|BTC|以太|比特|大餅|大饼|做多|做空|空单|多单|牛市|熊市|支撐|支撑|壓力|压力|跌|漲|涨",
+            clean,
+            re.I,
+        ):
+            continue
+        clean = clean[:1400]
+        digest = hashlib.sha256(clean.encode("utf-8", errors="ignore")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        segments.append({"hash": digest, "text": clean})
+        if len(segments) >= max(1, _safe_int(limit, 8)):
+            break
+    return segments
+
+
 def _infer_binance_host_direction(text):
     text = str(text or "")
     bullish = (
@@ -1447,6 +1549,10 @@ def _infer_binance_host_direction(text):
     )
     bull_score = sum(text.count(word) for word in bullish)
     bear_score = sum(text.count(word) for word in bearish)
+    bear_score -= len(re.findall(r"(?:沒有|未|沒|尚未)\s*(?:跌破|下跌|大跌|回落)", text))
+    bull_score -= len(re.findall(r"(?:沒有|未|沒|尚未)\s*(?:突破|上漲|上涨|拉升|反彈|反弹)", text))
+    bull_score = max(0, bull_score)
+    bear_score = max(0, bear_score)
     if re.search(r"跌\s*\d+|跌\d+|下跌\s*\d+", text):
         bear_score += 2
     if re.search(r"上\s*\d+|漲\s*\d+|涨\s*\d+", text):
@@ -1457,6 +1563,65 @@ def _infer_binance_host_direction(text):
     if bear_score > bull_score:
         return "short", bear_score - bull_score
     return "neutral", 0
+
+
+def _record_binance_host_learning_item(
+    *,
+    price,
+    market_context,
+    host_name,
+    source,
+    item,
+    seen,
+    prompt_prefix,
+    market_source,
+    primary_reason,
+    risk_note,
+    failure_label,
+    success_label,
+):
+    digest = item.get("hash")
+    if not digest or digest in seen:
+        return 0
+
+    direction, strength = _infer_binance_host_direction(item.get("text"))
+    confidence = min(0.72, 0.38 + max(0, strength) * 0.06)
+    direction_text = {"long": "做多", "short": "做空", "neutral": "觀望"}.get(direction, "觀望")
+    response = json.dumps(
+        {
+            "direction": direction_text,
+            "primary_reason": primary_reason,
+            "confidence": round(confidence, 2),
+            "market_regime": "news_driven",
+            "support_zone": [],
+            "resistance_zone": [],
+            "risk_note": risk_note,
+            "source": source,
+            "text": item.get("text"),
+        },
+        ensure_ascii=False,
+    )
+    market = dict(market_context if isinstance(market_context, dict) else {})
+    market.update(
+        {
+            "price": _safe_float(price, 0.0),
+            "source": market_source,
+            "host_name": host_name,
+            "source_url": source,
+            "primary_reason": primary_reason,
+            "direction_hint": direction,
+        }
+    )
+    try:
+        inserted = record_mlx_analysis(f"{prompt_prefix}:{host_name}:{digest[:16]}", response, market)
+    except Exception as exc:
+        print(f"⚠️ {failure_label}: {exc}")
+        inserted = 0
+    if inserted:
+        seen.add(digest)
+        print(f"🧠 已寫入幣安主播{host_name}{success_label}: {direction_text} | {digest[:8]}")
+        return int(inserted)
+    return 0
 
 
 def _process_binance_host_learning(price, market_context=None):
@@ -1490,46 +1655,22 @@ def _process_binance_host_learning(price, market_context=None):
     market_context = market_context if isinstance(market_context, dict) else {}
     for source, raw_text in raw_sources:
         for post in _extract_binance_host_posts(raw_text, host_name=host_name, limit=max_posts):
-            digest = post.get("hash")
-            if not digest or digest in seen:
-                continue
-            direction, strength = _infer_binance_host_direction(post.get("text"))
-            confidence = min(0.72, 0.38 + max(0, strength) * 0.06)
-            direction_text = {"long": "做多", "short": "做空", "neutral": "觀望"}.get(direction, "觀望")
-            response = json.dumps(
-                {
-                    "direction": direction_text,
-                    "primary_reason": f"幣安主播{host_name}公開觀點",
-                    "confidence": round(confidence, 2),
-                    "market_regime": "news_driven",
-                    "support_zone": [],
-                    "resistance_zone": [],
-                    "risk_note": "主播觀點只作 MLX 輔助學習，不直接下單。",
-                    "source": source,
-                    "text": post.get("text"),
-                },
-                ensure_ascii=False,
+            inserted = _record_binance_host_learning_item(
+                price=price,
+                market_context=market_context,
+                host_name=host_name,
+                source=source,
+                item=post,
+                seen=seen,
+                prompt_prefix="binance-host",
+                market_source="binance_host_lange",
+                primary_reason=f"幣安主播{host_name}公開觀點",
+                risk_note="主播觀點只作 MLX 輔助學習，不直接下單。",
+                failure_label="藍歌觀點寫入 MLX 學習庫失敗",
+                success_label="觀點學習",
             )
-            market = dict(market_context)
-            market.update(
-                {
-                    "price": _safe_float(price, 0.0),
-                    "source": "binance_host_lange",
-                    "host_name": host_name,
-                    "source_url": source,
-                    "primary_reason": f"幣安主播{host_name}公開觀點",
-                    "direction_hint": direction,
-                }
-            )
-            try:
-                inserted = record_mlx_analysis(f"binance-host:{host_name}:{digest[:16]}", response, market)
-            except Exception as exc:
-                print(f"⚠️ 藍歌觀點寫入 MLX 學習庫失敗: {exc}")
-                inserted = 0
             if inserted:
-                learned += int(inserted)
-                seen.add(digest)
-                print(f"🧠 已寫入幣安主播{host_name}觀點學習: {direction_text} | {digest[:8]}")
+                learned += inserted
             if learned >= max_posts:
                 break
         if learned >= max_posts:
@@ -1539,6 +1680,65 @@ def _process_binance_host_learning(price, market_context=None):
     state["last_learned_at"] = now_ts if learned else state.get("last_learned_at", 0)
     state["learned_total"] = _safe_int(state.get("learned_total"), 0) + learned
     _write_json_file(BINANCE_HOST_LEARNING_STATE_PATH, state)
+    return learned
+
+
+def _process_binance_host_live_learning(price, market_context=None):
+    if not _binance_host_live_learning_enabled():
+        return 0
+
+    now_ts = time.time()
+    state = _read_json_file(BINANCE_HOST_LIVE_LEARNING_STATE_PATH, {})
+    if not isinstance(state, dict):
+        state = {}
+    interval = max(30, _safe_int(os.getenv("BINANCE_HOST_LIVE_INTERVAL_SEC", 120), 120))
+    if now_ts - _safe_float(state.get("last_run_ts"), 0.0) < interval:
+        return 0
+
+    state["last_run_ts"] = now_ts
+    seen_hashes = state.get("seen_hashes")
+    if not isinstance(seen_hashes, list):
+        seen_hashes = []
+    seen = set(str(item) for item in seen_hashes)
+
+    host_name = str(os.getenv("BINANCE_HOST_LEARNING_NAME", "蓝歌") or "蓝歌").strip()
+    max_segments = max(1, _safe_int(os.getenv("BINANCE_HOST_LIVE_MAX_SEGMENTS", 5), 5))
+    urls, text_sources = _binance_host_live_learning_sources()
+    raw_sources = list(text_sources)
+    for url in urls:
+        content = _fetch_binance_host_live_source(url)
+        if content:
+            raw_sources.append((url, content))
+
+    learned = 0
+    market_context = market_context if isinstance(market_context, dict) else {}
+    for source, raw_text in raw_sources:
+        for segment in _extract_binance_host_live_segments(raw_text, host_name=host_name, limit=max_segments):
+            inserted = _record_binance_host_learning_item(
+                price=price,
+                market_context=market_context,
+                host_name=host_name,
+                source=source,
+                item=segment,
+                seen=seen,
+                prompt_prefix="binance-host-live",
+                market_source="binance_host_lange_live",
+                primary_reason=f"幣安主播{host_name}直播內容",
+                risk_note="直播內容只作 MLX 輔助學習，不直接下單。",
+                failure_label="藍歌直播內容寫入 MLX 學習庫失敗",
+                success_label="直播內容學習",
+            )
+            if inserted:
+                learned += inserted
+            if learned >= max_segments:
+                break
+        if learned >= max_segments:
+            break
+
+    state["seen_hashes"] = list(seen)[-500:]
+    state["last_learned_at"] = now_ts if learned else state.get("last_learned_at", 0)
+    state["learned_total"] = _safe_int(state.get("learned_total"), 0) + learned
+    _write_json_file(BINANCE_HOST_LIVE_LEARNING_STATE_PATH, state)
     return learned
 
 
@@ -9523,6 +9723,22 @@ def run_bot():
             # ===== 真實交易管理（TP/SL） =====
             evaluate_mlx_learning(price)
             _process_binance_host_learning(
+                price,
+                {
+                    "price": price,
+                    "regime": regime,
+                    "htf": htf,
+                    "mid_trend": mid_trend,
+                    "breakout": breakout,
+                    "macro_bias": _compute_macro_bias(
+                        sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
+                    ),
+                    "news_bias": news_bias,
+                    "event_risk": event_risk,
+                    "symbol": "ETHUSDT",
+                },
+            )
+            _process_binance_host_live_learning(
                 price,
                 {
                     "price": price,
