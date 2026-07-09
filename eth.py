@@ -5880,12 +5880,34 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro
     """Create the small end-of-day trade from current structure, never a blind side."""
     entry = max(0.0, _safe_float(price, 0.0))
     regime_name = str(regime or "range")
+    recent_high = _safe_float(df_15m["high"].tail(20).max(), entry)
+    recent_low = _safe_float(df_15m["low"].tail(20).min(), entry)
+    range_pos = max(0.0, min(1.0, (entry - recent_low) / max(recent_high - recent_low, 1e-6)))
+    macro_score = _safe_float(macro_bias, 0.0) + _safe_float(news_bias, 0.0) * 0.25
+
+    long_score = 0.0
+    short_score = 0.0
     if regime_name in {"bear_trend", "bear_trend_strong"}:
-        direction = "short"
+        short_score += 0.55 if regime_name == "bear_trend_strong" else 0.35
     elif regime_name in {"bull_trend", "bull_trend_strong"}:
-        direction = "long"
-    else:
-        direction = "long" if (_safe_int(htf, 0) + _safe_int(mid_trend, 0)) >= 0 else "short"
+        long_score += 0.55 if regime_name == "bull_trend_strong" else 0.35
+    long_score += 0.30 if _safe_int(htf, 0) == 1 else -0.20
+    short_score += 0.30 if _safe_int(htf, 0) == -1 else -0.20
+    long_score += 0.35 if _safe_int(mid_trend, 0) == 1 else -0.25
+    short_score += 0.35 if _safe_int(mid_trend, 0) == -1 else -0.25
+    long_score += max(-0.55, min(0.55, macro_score * 0.28))
+    short_score += max(-0.55, min(0.55, -macro_score * 0.28))
+    if range_pos >= 0.70:
+        short_score += 0.95
+        long_score -= 0.75
+    elif range_pos <= 0.30:
+        long_score += 0.95
+        short_score -= 0.75
+    if _safe_int(breakout, 0) == 1 and volume_spike:
+        long_score += 0.55
+    elif _safe_int(breakout, 0) == -1 and volume_spike:
+        short_score += 0.55
+    direction = "long" if long_score >= short_score else "short"
     atr_ref = max(_safe_float(atr, 0.0), entry * 0.001, 1e-6)
     if direction == "long":
         structural_sl = _safe_float(df_15m["low"].tail(10).min(), entry)
@@ -5906,7 +5928,6 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro
         max(0.03, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05)),
     )
     sign = 1 if direction == "long" else -1
-    macro_score = _safe_float(macro_bias, 0.0) + _safe_float(news_bias, 0.0) * 0.25
     against_macro = macro_score * sign < -0.25
     local_confirmed = (_safe_int(breakout, 0) == sign) or bool(volume_spike)
     if against_macro:
@@ -9622,6 +9643,211 @@ def _compute_macro_bias(sp_change, nq_change, btc_change, dxy_change, news_bias,
     return float(macro_bias)
 
 
+def _score_macro_indicator_alignment(
+    *,
+    direction,
+    host_mode,
+    sp_change,
+    nq_change,
+    btc_change,
+    dxy_change,
+    news_bias,
+    event_risk,
+    macro_bias,
+    htf,
+    mid_trend,
+    breakout,
+    regime,
+    sr_bias,
+    support_hits,
+    resistance_hits,
+    repeated_test_pressure,
+    derivatives_pressure,
+    taker_buy_ratio,
+    volume_spike,
+    buy_pressure,
+    sell_pressure,
+    sweep_high,
+    sweep_low,
+    range_pos,
+    timeframe_kline_view,
+):
+    """Combine news, global risk assets, derivatives, SR, and K-lines into a final quality gate."""
+    direction = str(direction or "").lower()
+    host_mode = str(host_mode or "wait")
+    sign = 1 if direction == "long" else -1 if direction == "short" else 0
+    if sign == 0:
+        return {"score": 0.0, "aligned": 0, "against": 0, "reasons": [], "hard_block": False}
+
+    view = timeframe_kline_view if isinstance(timeframe_kline_view, dict) else {}
+    pos = max(0.0, min(1.0, _safe_float(range_pos, 0.5)))
+    taker_buy_ratio = max(0.0, min(1.0, _safe_float(taker_buy_ratio, 0.5)))
+    event_risk = _safe_int(event_risk, 0)
+
+    score = 0.0
+    aligned = 0
+    against = 0
+    reasons = []
+
+    def add(value, reason, *, threshold=0.0):
+        nonlocal score, aligned, against
+        value = _safe_float(value, 0.0)
+        if abs(value) <= threshold:
+            return
+        score += value
+        if value > 0:
+            aligned += 1
+        else:
+            against += 1
+        reasons.append(reason)
+
+    macro_component = max(-1.2, min(1.2, _safe_float(macro_bias, 0.0) * 0.36)) * sign
+    add(macro_component, "宏觀分數同向" if macro_component > 0 else "宏觀分數逆向", threshold=0.12)
+
+    market_component = 0.0
+    for value, weight, inverse in (
+        (btc_change, 170.0, False),
+        (nq_change, 140.0, False),
+        (sp_change, 85.0, False),
+        (dxy_change, 120.0, True),
+    ):
+        component = _safe_float(value, 0.0) * weight
+        if inverse:
+            component *= -1
+        market_component += max(-0.45, min(0.45, component))
+    market_component *= sign
+    add(market_component, "全球股市/美元/BTC同向" if market_component > 0 else "全球股市/美元/BTC逆向", threshold=0.10)
+
+    news_component = max(-0.85, min(0.85, _safe_float(news_bias, 0.0) * 0.42)) * sign
+    add(news_component, "新聞情緒同向" if news_component > 0 else "新聞情緒逆向", threshold=0.10)
+
+    high_tf = max(-1.0, min(1.0, _safe_float(view.get("high_tf_score"), 0.0)))
+    mid_tf = max(-1.0, min(1.0, _safe_float(view.get("mid_tf_score"), 0.0)))
+    low_tf = max(-1.0, min(1.0, _safe_float(view.get("low_tf_score"), 0.0)))
+    tf_views = view.get("views") if isinstance(view.get("views"), dict) else {}
+    range_positions = [
+        _safe_float((tf_views.get(tf) or {}).get("range_pos"), 0.5)
+        for tf in ("15m", "1H", "4H", "1D")
+        if isinstance(tf_views.get(tf), dict)
+    ]
+    upper_zone_count = sum(1 for value in range_positions if value >= 0.68)
+    lower_zone_count = sum(1 for value in range_positions if value <= 0.32)
+    kline_component = (high_tf * 0.45 + mid_tf * 0.55 + low_tf * 0.30) * sign
+    add(kline_component, "多週期K線同向" if kline_component > 0 else "多週期K線逆向", threshold=0.12)
+
+    trend_component = 0.0
+    trend_component += 0.35 if htf == sign else -0.30
+    trend_component += 0.45 if mid_trend == sign else -0.38
+    if regime in {"bull_trend", "bull_trend_strong"}:
+        trend_component += 0.35 * sign
+    elif regime in {"bear_trend", "bear_trend_strong"}:
+        trend_component -= 0.35 * sign
+    add(trend_component, "大中週期趨勢同向" if trend_component > 0 else "大中週期趨勢逆向", threshold=0.10)
+
+    trigger_component = 0.0
+    if breakout == sign:
+        trigger_component += 0.45
+    elif breakout == -sign:
+        trigger_component -= 0.45
+    if direction == "long":
+        trigger_component += 0.28 if buy_pressure else -0.12
+        trigger_component += 0.30 if sweep_low else 0.0
+        trigger_component -= 0.35 if sweep_high else 0.0
+        trigger_component -= 0.28 if pos >= 0.78 else 0.0
+        trigger_component += 0.22 if pos <= 0.32 else 0.0
+    else:
+        trigger_component += 0.28 if sell_pressure else -0.12
+        trigger_component += 0.30 if sweep_high else 0.0
+        trigger_component -= 0.35 if sweep_low else 0.0
+        trigger_component -= 0.28 if pos <= 0.22 else 0.0
+        trigger_component += 0.22 if pos >= 0.68 else 0.0
+    if volume_spike:
+        trigger_component += 0.25 if trigger_component > 0 else -0.08
+    add(trigger_component, "短線觸發同向" if trigger_component > 0 else "短線觸發逆向", threshold=0.10)
+
+    sr_component = _safe_float(sr_bias, 0.0) * 0.55 * sign
+    if direction == "long":
+        sr_component += min(0.35, _safe_int(support_hits, 0) * 0.12)
+        sr_component -= min(0.35, _safe_int(resistance_hits, 0) * 0.12)
+    else:
+        sr_component += min(0.35, _safe_int(resistance_hits, 0) * 0.12)
+        sr_component -= min(0.35, _safe_int(support_hits, 0) * 0.12)
+    sr_component += max(-0.35, min(0.35, _safe_float(repeated_test_pressure, 0.0) * 0.45 * sign))
+    add(sr_component, "支撐壓力同向" if sr_component > 0 else "支撐壓力逆向", threshold=0.10)
+
+    flow_component = max(-0.65, min(0.65, _safe_float(derivatives_pressure, 0.0) * 0.65)) * sign
+    flow_component += max(-0.35, min(0.35, (taker_buy_ratio - 0.5) * 1.4)) * sign
+    add(flow_component, "合約資金流同向" if flow_component > 0 else "合約資金流逆向", threshold=0.10)
+
+    strong_trigger = (
+        breakout == sign
+        and volume_spike
+        and ((direction == "long" and buy_pressure and not sweep_high) or (direction == "short" and sell_pressure and not sweep_low))
+    )
+    hard_block = False
+    min_score = 0.55
+    if host_mode in {"trend_pullback_long", "trend_pullback_short"}:
+        min_score = 1.15
+    elif host_mode in {"support_reclaim", "resistance_rejection"}:
+        min_score = 0.85
+    elif host_mode in {"breakout_after_pressure_tests", "breakdown_after_support_tests"}:
+        min_score = 0.70
+
+    if event_risk >= 2 and score < max(min_score, 1.20) and not strong_trigger:
+        hard_block = True
+        reasons.append("高時事風險未確認")
+    if (
+        direction == "short"
+        and pos <= 0.30
+        and _safe_float(macro_bias, 0.0) > -0.45
+        and _safe_float(derivatives_pressure, 0.0) > -0.12
+        and _safe_float(news_bias, 0.0) > -0.35
+    ):
+        hard_block = True
+        reasons.append("低位追空缺少宏觀/資金流確認")
+    if (
+        direction == "short"
+        and lower_zone_count >= 2
+        and _safe_float(macro_bias, 0.0) > -0.65
+        and _safe_float(derivatives_pressure, 0.0) > -0.18
+    ):
+        hard_block = True
+        reasons.append("多週期低位追空未確認")
+    if (
+        direction == "long"
+        and pos >= 0.70
+        and _safe_float(macro_bias, 0.0) < 0.45
+        and _safe_float(derivatives_pressure, 0.0) < 0.12
+        and _safe_float(news_bias, 0.0) < 0.35
+    ):
+        hard_block = True
+        reasons.append("高位追多缺少宏觀/資金流確認")
+    if (
+        direction == "long"
+        and upper_zone_count >= 2
+        and _safe_float(macro_bias, 0.0) < 0.65
+        and _safe_float(derivatives_pressure, 0.0) < 0.18
+    ):
+        hard_block = True
+        reasons.append("多週期高位追多未確認")
+    if against >= 4 and aligned <= 2 and not strong_trigger:
+        hard_block = True
+        reasons.append("多項指標逆向")
+    if score < min_score and not strong_trigger:
+        hard_block = True
+        reasons.append("整體共振不足")
+
+    return {
+        "score": round(score, 4),
+        "min_score": round(min_score, 4),
+        "aligned": aligned,
+        "against": against,
+        "reasons": reasons[:8],
+        "hard_block": bool(hard_block),
+        "strong_trigger": bool(strong_trigger),
+    }
+
+
 def build_trade_signal_snapshot(
     *,
     df_4h,
@@ -9689,6 +9915,7 @@ def build_trade_signal_snapshot(
             "content_override": {"enabled": True, "usable": False, "applied": False},
             "host_opening_logic": {"direction": "neutral", "confidence": 0.0, "reasons": []},
             "host_logic_applied": False,
+            "macro_indicator_alignment": {"score": 0.0, "aligned": 0, "against": 0, "reasons": []},
         }
 
     price = _safe_float(price, _safe_float(df_5m["close"].iloc[-1], 0.0))
@@ -10132,6 +10359,7 @@ def build_trade_signal_snapshot(
     sl = None
     tp = None
     position_size = 0.0
+    macro_indicator_alignment = {"score": 0.0, "aligned": 0, "against": 0, "reasons": []}
     rr_at_entry = 0.0
     risk_rate = 0.0
     reward_rate = 0.0
@@ -10360,6 +10588,44 @@ def build_trade_signal_snapshot(
                 final = "觀望（主指標30m MACD未支持做多）"
             elif "做空" in final and mid_trend != -1:
                 final = "觀望（主指標30m MACD未支持做空）"
+        macro_indicator_alignment = {"score": 0.0, "aligned": 0, "against": 0, "reasons": []}
+        if (
+            not final.startswith("觀望")
+            and _is_truthy(os.getenv("TRADE_USE_MACRO_INDICATOR_ALIGNMENT_GATE", "1"))
+            and not content_override.get("applied")
+        ):
+            direction_name = "long" if "做多" in final else "short"
+            macro_indicator_alignment = _score_macro_indicator_alignment(
+                direction=direction_name,
+                host_mode=str(host_opening_logic.get("mode") or "wait"),
+                sp_change=sp_change,
+                nq_change=nq_change,
+                btc_change=btc_change,
+                dxy_change=dxy_change,
+                news_bias=news_bias,
+                event_risk=event_risk,
+                macro_bias=macro_bias,
+                htf=htf,
+                mid_trend=mid_trend,
+                breakout=breakout,
+                regime=regime,
+                sr_bias=sr_bias,
+                support_hits=support_hits,
+                resistance_hits=resistance_hits,
+                repeated_test_pressure=repeated_test_pressure,
+                derivatives_pressure=derivatives_pressure,
+                taker_buy_ratio=taker_buy_ratio,
+                volume_spike=volume_spike,
+                buy_pressure=buy_pressure,
+                sell_pressure=sell_pressure,
+                sweep_high=sweep_high,
+                sweep_low=sweep_low,
+                range_pos=features.get("range_pos"),
+                timeframe_kline_view=timeframe_kline_view,
+            )
+            if macro_indicator_alignment.get("hard_block"):
+                final = "觀望（MLX宏觀指標共振不足）"
+                position_size = 0.0
         if (
             not final.startswith("觀望")
             and _is_truthy(os.getenv("TRADE_USE_MLX_BACKTEST_PROFILE_FILTER", "1"))
@@ -10445,6 +10711,7 @@ def build_trade_signal_snapshot(
         "content_override": content_override,
         "host_opening_logic": host_opening_logic,
         "host_logic_applied": bool(host_logic_applied),
+        "macro_indicator_alignment": macro_indicator_alignment,
         "learned_entry_logic": learned_entry_logic,
         "timeframe_kline_view": timeframe_kline_view,
         "timeframe_kline_summary": timeframe_kline_view.get("summary", ""),
