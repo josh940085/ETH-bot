@@ -9693,6 +9693,9 @@ def build_trade_signal_snapshot(
 
     point_explain = ""
     if not final.startswith("觀望") and sl is not None and tp is not None and entry > 0:
+        sr_bias = _safe_float(sr_analysis.get("bias"), 0.0)
+        support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
+        resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
         if "做多" in final:
             risk_rate = max((entry - sl) / entry, 1e-9)
             reward_rate = max((tp - entry) / entry, 0.0)
@@ -9754,9 +9757,6 @@ def build_trade_signal_snapshot(
             elif resistance_hits >= 1 and not breakout_confirm and score < 0.72:
                 final = "觀望（多單壓力未突破）"
         if not final.startswith("觀望"):
-            sr_bias = _safe_float(sr_analysis.get("bias"), 0.0)
-            support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
-            resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
             if "做空" in final:
                 conflict_count = 0
                 if mid_trend == 1:

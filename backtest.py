@@ -28,6 +28,13 @@ from mlx_learning import build_trade_factor_tags
 
 
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
+BINANCE_SPOT_KLINES_URL = "https://api.binance.com/api/v3/klines"
+BINANCE_VISION_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
+KLINE_SOURCES = (
+    ("futures", BINANCE_FUTURES_KLINES_URL),
+    ("spot", BINANCE_SPOT_KLINES_URL),
+    ("vision_spot", BINANCE_VISION_KLINES_URL),
+)
 INTERVAL_MS = {
     "5m": 5 * 60 * 1000,
 }
@@ -73,7 +80,7 @@ def _resolve_timerange(args):
     return start_dt, end_dt
 
 
-def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500):
+def _fetch_klines_from_url(source_name, url, symbol, interval, start_ms, end_ms, limit=1500):
     session = requests.Session()
     all_rows = []
     cursor = int(start_ms)
@@ -87,7 +94,7 @@ def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500):
             "endTime": end_ms,
             "limit": min(1500, max(1, int(limit))),
         }
-        response = session.get(BINANCE_FUTURES_KLINES_URL, params=params, timeout=15)
+        response = session.get(url, params=params, timeout=15)
         response.raise_for_status()
         rows = response.json()
         if not isinstance(rows, list) or not rows:
@@ -126,7 +133,26 @@ def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500):
     for col in ["open", "high", "low", "close", "volume"]:
         frame[col] = frame[col].astype(float)
     frame = frame.set_index("close_time")[["open", "high", "low", "close", "volume"]]
+    frame.attrs["kline_source"] = source_name
     return frame
+
+
+def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500):
+    errors = []
+    for source_name, url in KLINE_SOURCES:
+        try:
+            frame = _fetch_klines_from_url(source_name, url, symbol, interval, start_ms, end_ms, limit=limit)
+        except requests.RequestException as exc:
+            errors.append(f"{source_name}: {exc}")
+            print(f"⚠️ K線來源失敗，改試下一個: {source_name} | {exc}")
+            continue
+        if not frame.empty:
+            if source_name != "futures":
+                print(f"♻️ Futures K線不可用，回測改用 {source_name} K線")
+            return frame
+        errors.append(f"{source_name}: empty response")
+
+    raise SystemExit("No klines returned from available Binance APIs: " + " | ".join(errors))
 
 
 def resample_ohlcv(frame, rule):
@@ -215,12 +241,13 @@ def _summarize_mlx_factors(df):
     return _summarize_grouped_trades(factor_df, "factor")
 
 
-def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded):
+def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source="futures"):
     if not trades:
         return {
             "symbol": symbol,
             "start": start_dt.isoformat(),
             "end": end_dt.isoformat(),
+            "data_source": data_source,
             "strategy_version": eth.STRATEGY_VERSION,
             "model_loaded": bool(model_loaded),
             "trades": 0,
@@ -268,6 +295,7 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded):
         "symbol": symbol,
         "start": start_dt.isoformat(),
         "end": end_dt.isoformat(),
+        "data_source": data_source,
         "strategy_version": eth.STRATEGY_VERSION,
         "model_loaded": bool(model_loaded),
         "trades": int(len(df)),
@@ -817,7 +845,8 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars):
             equity, trade_record, _ = _close_trade(open_trade, exit_price, "EOD", base_rows.index[-1], equity)
             trades.append(trade_record)
 
-    return base_5m, trades, summarize_trades(trades, start_dt, end_dt, symbol, model_loaded), learning_samples
+    data_source = str(base_5m.attrs.get("kline_source") or "futures")
+    return base_5m, trades, summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source=data_source), learning_samples
 
 
 def main():
@@ -828,6 +857,7 @@ def main():
     print("Backtest Summary")
     print(f"Symbol: {summary['symbol']}")
     print(f"Window: {summary['start']} -> {summary['end']}")
+    print(f"Data source: {summary.get('data_source', 'futures')}")
     print(f"Strategy version: {summary.get('strategy_version')}")
     print(f"5m bars: {len(base_5m)}")
     print(f"Model loaded: {summary['model_loaded']}")
