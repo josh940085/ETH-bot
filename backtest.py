@@ -3,7 +3,6 @@ import argparse
 import datetime as dt
 import json
 import os
-import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,7 +18,6 @@ if NotOpenSSLWarning is not None:
     warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 import pandas as pd
-import requests
 
 os.environ.setdefault("ETH_BOT_DISABLE_LIVE", "1")
 
@@ -27,22 +25,14 @@ import eth
 from mlx_learning import build_trade_factor_tags
 
 
-BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
-BINANCE_SPOT_KLINES_URL = "https://api.binance.com/api/v3/klines"
-BINANCE_VISION_KLINES_URL = "https://data-api.binance.vision/api/v3/klines"
-KLINE_SOURCES = (
-    ("futures", BINANCE_FUTURES_KLINES_URL),
-    ("spot", BINANCE_SPOT_KLINES_URL),
-    ("vision_spot", BINANCE_VISION_KLINES_URL),
-)
 INTERVAL_MS = {
     "5m": 5 * 60 * 1000,
 }
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="Replay ETH-bot strategy on historical Binance futures klines.")
-    parser.add_argument("--symbol", default="ETHUSDT", help="Binance futures symbol")
+    parser = argparse.ArgumentParser(description="Replay ETH-bot strategy on historical TradingView klines.")
+    parser.add_argument("--symbol", default="ETHUSDT", help="Trading symbol, e.g. ETHUSDT")
     parser.add_argument("--days", type=int, default=30, help="Lookback days when start/end are not provided")
     parser.add_argument("--start", help="UTC start time, e.g. 2026-05-01 or 2026-05-01T00:00:00")
     parser.add_argument("--end", help="UTC end time, e.g. 2026-05-22 or 2026-05-22T00:00:00")
@@ -80,33 +70,19 @@ def _resolve_timerange(args):
     return start_dt, end_dt
 
 
-def _fetch_klines_from_url(source_name, url, symbol, interval, start_ms, end_ms, limit=1500):
-    session = requests.Session()
-    all_rows = []
-    cursor = int(start_ms)
+def _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=1500):
     step_ms = INTERVAL_MS[interval]
-
-    while cursor < end_ms:
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "startTime": cursor,
-            "endTime": end_ms,
-            "limit": min(1500, max(1, int(limit))),
-        }
-        response = session.get(url, params=params, timeout=15)
-        response.raise_for_status()
-        rows = response.json()
-        if not isinstance(rows, list) or not rows:
-            break
-
-        all_rows.extend(rows)
-        last_open_ms = int(rows[-1][0])
-        next_cursor = last_open_ms + step_ms
-        if next_cursor <= cursor:
-            break
-        cursor = next_cursor
-        time.sleep(0.05)
+    required_bars = int(max(1, (int(end_ms) - int(start_ms)) // step_ms + 8))
+    rows, source_name = eth._fetch_market_kline_rows(
+        symbol,
+        interval,
+        limit=max(required_bars, int(limit)),
+        start_time_ms=start_ms,
+        end_time_ms=end_ms,
+        timeout=20,
+        prefix="回測K線",
+    )
+    all_rows = rows if isinstance(rows, list) else []
 
     if not all_rows:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
@@ -138,21 +114,14 @@ def _fetch_klines_from_url(source_name, url, symbol, interval, start_ms, end_ms,
 
 
 def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500):
-    errors = []
-    for source_name, url in KLINE_SOURCES:
-        try:
-            frame = _fetch_klines_from_url(source_name, url, symbol, interval, start_ms, end_ms, limit=limit)
-        except requests.RequestException as exc:
-            errors.append(f"{source_name}: {exc}")
-            print(f"⚠️ K線來源失敗，改試下一個: {source_name} | {exc}")
-            continue
-        if not frame.empty:
-            if source_name != "futures":
-                print(f"♻️ Futures K線不可用，回測改用 {source_name} K線")
-            return frame
-        errors.append(f"{source_name}: empty response")
-
-    raise SystemExit("No klines returned from available Binance APIs: " + " | ".join(errors))
+    try:
+        frame = _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=limit)
+    except Exception as exc:
+        raise SystemExit(f"No klines returned from TradingView market data source: {exc}") from exc
+    if not frame.empty:
+        print(f"📈 回測K線來源: {frame.attrs.get('kline_source', 'unknown')}")
+        return frame
+    raise SystemExit("No klines returned from TradingView market data source")
 
 
 def resample_ohlcv(frame, rule):

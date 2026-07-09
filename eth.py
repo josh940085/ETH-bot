@@ -129,8 +129,38 @@ NEWS_RETRAIN_MIN_INTERVAL_SEC = 900.0
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+TRADINGVIEW_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
+TRADINGVIEW_SYMBOL_MAP = {
+    "ETHUSDT": "BINANCE:ETHUSDT.P",
+    "BTCUSDT": "BINANCE:BTCUSDT.P",
+}
+TRADINGVIEW_INTERVAL_MAP = {
+    "1m": "1",
+    "3m": "3",
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "1h": "60",
+    "2h": "120",
+    "4h": "240",
+    "1d": "D",
+    "1w": "W",
+    "1M": "M",
+}
+KLINE_INTERVAL_MS = {
+    "1m": 60 * 1000,
+    "3m": 3 * 60 * 1000,
+    "5m": 5 * 60 * 1000,
+    "15m": 15 * 60 * 1000,
+    "30m": 30 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "2h": 2 * 60 * 60 * 1000,
+    "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000,
+    "1w": 7 * 24 * 60 * 60 * 1000,
+    "1M": 31 * 24 * 60 * 60 * 1000,
+}
 BINANCE_KLINE_SOURCES = (
-    ("futures", "https://fapi.binance.com/fapi/v1/klines"),
     ("spot", "https://api.binance.com/api/v3/klines"),
     ("vision_spot", "https://data-api.binance.vision/api/v3/klines"),
 )
@@ -173,6 +203,18 @@ def _get_required_env(name, default=None, mask=False, warn_if_missing=True):
 
 _load_local_env()
 
+ALLOW_BINANCE_MARKET_DATA_FALLBACK = str(os.getenv("ALLOW_BINANCE_MARKET_DATA_FALLBACK", "0") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+ALLOW_BINANCE_DERIVATIVES_MARKET_DATA = str(os.getenv("ALLOW_BINANCE_DERIVATIVES_MARKET_DATA", "0") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "", warn_if_missing=False)
 DEFAULT_OPENAI_CHAT_MODEL = "gpt-5-mini"
@@ -1806,7 +1848,7 @@ def _fetch_binance_host_validation_klines(symbol, start_ts, hours=24):
     if not symbol or start_ts <= 0:
         return []
     try:
-        rows, _ = _fetch_binance_kline_rows(
+        rows, _ = _fetch_market_kline_rows(
             symbol,
             "1h",
             limit=max(6, min(48, _safe_int(hours, 24) + 3)),
@@ -3735,6 +3777,16 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
     snapshot = _default_derivatives_flow_snapshot()
     snapshot["symbol"] = symbol
     snapshot["ts"] = int(now_ts)
+
+    if not ALLOW_BINANCE_DERIVATIVES_MARKET_DATA:
+        snapshot.update(previous)
+        snapshot["symbol"] = symbol
+        snapshot["ts"] = int(now_ts)
+        snapshot["stale"] = True
+        with DERIVATIVES_FLOW_CACHE_LOCK:
+            DERIVATIVES_FLOW_CACHE["ts"] = now_ts
+            DERIVATIVES_FLOW_CACHE["snapshot"] = dict(snapshot)
+        return _normalize_derivatives_flow_snapshot(snapshot)
 
     try:
         oi_resp = HTTP_SESSION.get(
@@ -11374,6 +11426,143 @@ def _log_kline_fallback(source_name, prefix="K線"):
         setattr(_log_kline_fallback, "_state", state)
 
 
+def _tradingview_session_id(prefix):
+    digest = hashlib.sha1(f"{prefix}:{time.time()}:{os.getpid()}:{threading.get_ident()}".encode()).hexdigest()[:12]
+    return f"{prefix}_{digest}"
+
+
+def _tradingview_message(method, params):
+    payload = json.dumps({"m": method, "p": params}, separators=(",", ":"))
+    return f"~m~{len(payload)}~m~{payload}"
+
+
+def _parse_tradingview_messages(raw):
+    messages = []
+    text = str(raw or "")
+    cursor = 0
+    while True:
+        start = text.find("~m~", cursor)
+        if start < 0:
+            break
+        length_start = start + 3
+        length_end = text.find("~m~", length_start)
+        if length_end < 0:
+            break
+        try:
+            payload_len = int(text[length_start:length_end])
+        except Exception:
+            cursor = length_end + 3
+            continue
+        payload_start = length_end + 3
+        payload = text[payload_start : payload_start + payload_len]
+        cursor = payload_start + payload_len
+        try:
+            messages.append(json.loads(payload))
+        except Exception:
+            continue
+    return messages
+
+
+def _tradingview_symbol(symbol):
+    symbol = str(symbol or "ETHUSDT").upper().strip()
+    if symbol in TRADINGVIEW_SYMBOL_MAP:
+        return TRADINGVIEW_SYMBOL_MAP[symbol]
+    if symbol.endswith("USDT"):
+        return f"BINANCE:{symbol}.P"
+    return f"BINANCE:{symbol}"
+
+
+def _tradingview_bar_count(interval, limit, start_time_ms=None, end_time_ms=None):
+    requested = max(1, min(10000, _safe_int(limit, 100)))
+    interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
+    if start_time_ms is not None:
+        end_ms = int(_safe_float(end_time_ms, time.time() * 1000))
+        span = max(0, end_ms - int(_safe_float(start_time_ms, 0.0)))
+        requested = max(requested, int(span // max(1, interval_ms)) + 8)
+    return max(1, min(10000, requested))
+
+
+def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
+    tv_interval = TRADINGVIEW_INTERVAL_MAP.get(str(interval))
+    if not tv_interval:
+        raise RuntimeError(f"TradingView 不支援週期: {interval}")
+
+    chart_session = _tradingview_session_id("cs")
+    tv_symbol = _tradingview_symbol(symbol)
+    bar_count = _tradingview_bar_count(interval, limit, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
+    ws = None
+    try:
+        ws = websocket.create_connection(
+            TRADINGVIEW_WS_URL,
+            timeout=max(3, _safe_int(timeout, 10)),
+            header=["Origin: https://www.tradingview.com"],
+        )
+        symbol_payload = json.dumps(
+            {"symbol": tv_symbol, "adjustment": "splits", "session": "extended"},
+            separators=(",", ":"),
+        )
+        for method, params in (
+            ("set_auth_token", ["unauthorized_user_token"]),
+            ("chart_create_session", [chart_session, ""]),
+            ("resolve_symbol", [chart_session, "symbol_1", f"={symbol_payload}"]),
+            ("create_series", [chart_session, "s1", "s1", "symbol_1", tv_interval, bar_count]),
+        ):
+            ws.send(_tradingview_message(method, params))
+
+        deadline = time.time() + max(5, _safe_int(timeout, 10))
+        while time.time() < deadline:
+            raw = ws.recv()
+            for message in _parse_tradingview_messages(raw):
+                method = message.get("m")
+                if method == "critical_error":
+                    raise RuntimeError(f"TradingView critical_error: {message.get('p')}")
+                if method != "timescale_update":
+                    continue
+                payload = message.get("p")
+                if not isinstance(payload, list) or len(payload) < 2 or not isinstance(payload[1], dict):
+                    continue
+                series = (payload[1].get("s1") or {}).get("s")
+                if not isinstance(series, list):
+                    continue
+                parsed = []
+                for bar in series:
+                    values = bar.get("v") if isinstance(bar, dict) else None
+                    if not isinstance(values, list) or len(values) < 5:
+                        continue
+                    open_ms = int(_safe_float(values[0], 0.0) * 1000)
+                    if start_time_ms is not None and open_ms < int(_safe_float(start_time_ms, 0.0)):
+                        continue
+                    if end_time_ms is not None and open_ms > int(_safe_float(end_time_ms, 0.0)):
+                        continue
+                    interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
+                    volume = _safe_float(values[5], 0.0) if len(values) > 5 else 0.0
+                    parsed.append(
+                        [
+                            open_ms,
+                            str(_safe_float(values[1], 0.0)),
+                            str(_safe_float(values[2], 0.0)),
+                            str(_safe_float(values[3], 0.0)),
+                            str(_safe_float(values[4], 0.0)),
+                            str(volume),
+                            open_ms + interval_ms - 1,
+                            "0",
+                            0,
+                            "0",
+                            "0",
+                            "0",
+                        ]
+                    )
+                if parsed:
+                    return parsed[-max(1, min(10000, _safe_int(limit, 100))) :]
+        raise RuntimeError("TradingView K線逾時或無資料")
+    finally:
+        try:
+            if ws is not None:
+                ws.close()
+        except Exception:
+            pass
+
+
 def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10, prefix="K線"):
     params = {
         "symbol": str(symbol or "ETHUSDT").upper(),
@@ -11403,6 +11592,39 @@ def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, e
     raise RuntimeError("; ".join(errors) or f"{prefix}來源全部失敗")
 
 
+def _fetch_market_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10, prefix="K線"):
+    errors = []
+    try:
+        rows = _fetch_tradingview_kline_rows(
+            symbol,
+            interval,
+            limit=limit,
+            start_time_ms=start_time_ms,
+            end_time_ms=end_time_ms,
+            timeout=timeout,
+        )
+        if rows:
+            return rows, "tradingview"
+        errors.append("tradingview: empty")
+    except Exception as exc:
+        errors.append(f"tradingview: {exc}")
+        _log_kline_source_failure("tradingview", exc, prefix=prefix)
+
+    if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
+        raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 來源失敗")
+
+    rows, source = _fetch_binance_kline_rows(
+        symbol,
+        interval,
+        limit=limit,
+        start_time_ms=start_time_ms,
+        end_time_ms=end_time_ms,
+        timeout=timeout,
+        prefix=prefix,
+    )
+    return rows, f"binance_{source}"
+
+
 def get_kline(interval, limit=100):
     now = time.time()
     limit = max(1, min(1500, int(limit)))
@@ -11413,7 +11635,7 @@ def get_kline(interval, limit=100):
             return data
 
     try:
-        data, _ = _fetch_binance_kline_rows("ETHUSDT", interval, limit=limit, timeout=10, prefix=f"{interval} K線")
+        data, _ = _fetch_market_kline_rows("ETHUSDT", interval, limit=limit, timeout=10, prefix=f"{interval} K線")
     except Exception:
         if interval in KLINE_CACHE:
             data, _ = KLINE_CACHE[interval]
