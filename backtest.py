@@ -397,8 +397,47 @@ def _summarize_mlx_factors(df):
     return _summarize_grouped_trades(factor_df, "factor")
 
 
-def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source="futures"):
+def _iter_backtest_due_dates(start_dt, end_dt):
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=dt.timezone.utc)
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=dt.timezone.utc)
+    due_hour = min(23, max(0, eth._safe_int(os.getenv("DAILY_MIN_TRADE_HOUR", 22), 22)))
+    due_minute = min(59, max(0, eth._safe_int(os.getenv("DAILY_MIN_TRADE_MINUTE", 30), 30)))
+    cursor = start_dt.astimezone(TAIPEI_TZ).date()
+    end_date = end_dt.astimezone(TAIPEI_TZ).date()
+    while cursor <= end_date:
+        due_local = dt.datetime(cursor.year, cursor.month, cursor.day, due_hour, due_minute, tzinfo=TAIPEI_TZ)
+        due_utc = due_local.astimezone(dt.timezone.utc)
+        if start_dt <= due_utc < end_dt:
+            yield cursor.isoformat()
+        cursor += dt.timedelta(days=1)
+
+
+def _summarize_trade_day_coverage(df, start_dt, end_dt):
+    all_dates = list(_iter_backtest_due_dates(start_dt, end_dt))
+    if df.empty or "opened_at" not in df.columns:
+        trade_dates = set()
+    else:
+        opened = pd.to_datetime(df["opened_at"], errors="coerce", utc=True).dropna()
+        trade_dates = {ts.tz_convert(TAIPEI_TZ).date().isoformat() for ts in opened}
+    missing = [value for value in all_dates if value not in trade_dates]
+    daily_min_trades = 0
+    if not df.empty and "host_logic_mode" in df.columns:
+        daily_min_trades = int((df["host_logic_mode"].astype(str) == "daily_minimum").sum())
+    return {
+        "calendar_days": int(len(all_dates)),
+        "trade_days": int(len(trade_dates)),
+        "missing_trade_days": int(len(missing)),
+        "missing_trade_day_examples": missing[:10],
+        "daily_min_trades": daily_min_trades,
+    }
+
+
+def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source="futures", coverage_start_dt=None):
+    coverage_start_dt = coverage_start_dt or start_dt
     if not trades:
+        day_coverage = _summarize_trade_day_coverage(pd.DataFrame(), coverage_start_dt, end_dt)
         return {
             "symbol": symbol,
             "start": start_dt.isoformat(),
@@ -429,6 +468,7 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source
             "by_direction": {},
             "by_strategy_version": {},
             "by_mlx_factor": {},
+            "trade_day_coverage": day_coverage,
         }
 
     df = pd.DataFrame(trades)
@@ -477,6 +517,7 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source
         "by_direction": _summarize_grouped_trades(df, "direction"),
         "by_strategy_version": _summarize_grouped_trades(df, "strategy_version"),
         "by_mlx_factor": _summarize_mlx_factors(df),
+        "trade_day_coverage": _summarize_trade_day_coverage(df, coverage_start_dt, end_dt),
     }
 
 
@@ -486,6 +527,81 @@ def _write_csv_atomic(frame, path_str):
     tmp_path = out_path.with_name(f"{out_path.name}.tmp")
     frame.to_csv(tmp_path, index=False)
     os.replace(tmp_path, out_path)
+
+
+TAIPEI_TZ = dt.timezone(dt.timedelta(hours=8))
+
+
+def _taipei_trade_date(ts):
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=dt.timezone.utc)
+    return ts.astimezone(TAIPEI_TZ).date().isoformat()
+
+
+def _daily_min_due_for_backtest(ts, traded_dates):
+    if not eth._is_truthy(os.getenv("DAILY_MIN_TRADE_ENABLED", "1")):
+        return False
+    due_hour = min(23, max(0, eth._safe_int(os.getenv("DAILY_MIN_TRADE_HOUR", 22), 22)))
+    due_minute = min(59, max(0, eth._safe_int(os.getenv("DAILY_MIN_TRADE_MINUTE", 30), 30)))
+    local_ts = ts.astimezone(TAIPEI_TZ) if ts.tzinfo is not None else ts.replace(tzinfo=dt.timezone.utc).astimezone(TAIPEI_TZ)
+    return _taipei_trade_date(ts) not in traded_dates and (local_ts.hour, local_ts.minute) >= (due_hour, due_minute)
+
+
+def _apply_daily_min_backtest_plan(decision, frame_now, current_price):
+    plan = eth._build_daily_min_trade_plan(
+        current_price,
+        decision.get("atr", 0.0),
+        frame_now["15m"],
+        frame_now["5m"],
+        decision.get("htf", 0),
+        decision.get("mid_trend", 0),
+        macro_bias=decision.get("macro_bias", 0.0),
+        news_bias=0.0,
+        breakout=decision.get("breakout", 0),
+        volume_spike=bool(decision.get("volume_spike", False)),
+        regime=decision.get("regime", "range"),
+    )
+    final = str(plan.get("final") or "觀望")
+    if final.startswith("觀望"):
+        return final, float(decision.get("score", 0.5)), decision
+
+    direction = str(plan.get("direction") or "")
+    score = 0.62 if direction == "long" else 0.38
+    daily_decision = dict(decision)
+    daily_decision.update(
+        {
+            "final": final,
+            "tp": float(plan.get("tp")),
+            "sl": float(plan.get("sl")),
+            "position_size": float(plan.get("position_size", 0.0)),
+            "score": score,
+            "host_logic_applied": True,
+            "primary_indicator": "mlx_daily_minimum",
+        }
+    )
+    host_logic = daily_decision.get("host_opening_logic")
+    if not isinstance(host_logic, dict):
+        host_logic = {}
+    host_logic = dict(host_logic)
+    host_logic.update(
+        {
+            "direction": direction,
+            "mode": "daily_minimum",
+            "confidence": max(float(host_logic.get("confidence", 0.0) or 0.0), 0.55),
+            "reasons": list(host_logic.get("reasons") or []) + ["backtest_daily_min_trade"],
+        }
+    )
+    daily_decision["host_opening_logic"] = host_logic
+    return final, score, daily_decision
+
+
+def _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price):
+    if not _daily_min_due_for_backtest(ts, traded_dates):
+        return None
+    final, score, daily_decision = _apply_daily_min_backtest_plan(decision, frame_now, current_price)
+    if final.startswith("觀望"):
+        return None
+    return final, score, daily_decision
 
 
 def _noop(*args, **kwargs):
@@ -531,6 +647,7 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
     size = float(decision["position_size"])
     if size <= 0:
         size = 0.2
+    host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
     size = float(min(1.0, max(size, 0.1)))
     max_size, min_size = eth._derive_scaling_bounds(size)
     raw_features = decision.get("features") if isinstance(decision.get("features"), dict) else {}
@@ -587,7 +704,7 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "repeated_resistance_tests": int(decision.get("repeated_resistance_tests", 0)),
         "repeated_test_pressure": float(decision.get("repeated_test_pressure", 0.0)),
         "content_override": decision.get("content_override") if isinstance(decision.get("content_override"), dict) else {},
-        "host_opening_logic": decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {},
+        "host_opening_logic": host_logic,
         "host_logic_applied": bool(decision.get("host_logic_applied", False)),
         "learned_entry_logic": decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {},
         "primary_indicator": str(decision.get("primary_indicator") or ""),
@@ -929,6 +1046,8 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
         trades = []
         learning_samples = []
         open_trade = None
+        traded_dates = set()
+        first_decision_ts = None
 
         trade_cooldown_sec = 300
         min_price_change = 0.002
@@ -980,6 +1099,18 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                     losing_streak = 0 if trade_record["trade_return"] > 0 else (losing_streak + 1)
                     open_trade = None
 
+            if (
+                open_trade is not None
+                and eth._is_truthy(os.getenv("BACKTEST_DAILY_MIN_ROLLOVER_ENABLED", "1"))
+                and _daily_min_due_for_backtest(ts, traded_dates)
+            ):
+                equity, trade_record, learning_sample = _close_trade(open_trade, current_price, "DAILY_MIN_ROLLOVER", ts, equity)
+                trades.append(trade_record)
+                if learning_sample is not None:
+                    learning_samples.append(learning_sample)
+                losing_streak = 0 if trade_record["trade_return"] > 0 else (losing_streak + 1)
+                open_trade = None
+
             if open_trade is not None:
                 atr_5m = float(max(bar_high - bar_low, 0.0))
                 open_trade = _apply_trade_management(open_trade, current_price, atr_5m, ts)
@@ -991,6 +1122,8 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             frame_now = {name: frame.loc[:ts] for name, frame in frame_map.items()}
             if any(len(frame_now[key]) < 30 for key in ("15m", "30m", "1h", "4h")):
                 continue
+            if first_decision_ts is None:
+                first_decision_ts = ts
 
             sr_frames = {key: frame_now.get(key) for key in ("1d", "12h", "4h", "1h", "30m")}
             sr_analysis = eth.analyze_multi_tf_sr_frames(current_price, sr_frames, tf_cfg=sr_cfg)
@@ -1029,6 +1162,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             final = str(decision["final"])
             current_direction = eth.get_signal_direction(final)
             last_direction_simple = eth.get_signal_direction(last_trade_signal) if last_trade_signal else None
+            daily_min_forced = False
 
             if current_direction == last_direction_simple:
                 if last_entry_price is not None:
@@ -1049,13 +1183,22 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             last_signal_value = score
 
             if final.startswith("觀望"):
-                continue
-            if decision["fake_breakout"] and abs(score - 0.5) < 0.22:
-                continue
-            if "做多" in final and decision["resistance_hits"] >= 2 and score < 0.72:
-                continue
-            if "做空" in final and decision["support_hits"] >= 2 and score > 0.28:
-                continue
+                forced = _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price)
+                if forced is not None:
+                    final, score, decision = forced
+                    daily_min_forced = True
+                if final.startswith("觀望"):
+                    continue
+            if (not daily_min_forced) and (
+                decision["fake_breakout"] and abs(score - 0.5) < 0.22
+                or ("做多" in final and decision["resistance_hits"] >= 2 and score < 0.72)
+                or ("做空" in final and decision["support_hits"] >= 2 and score > 0.28)
+            ):
+                forced = _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price)
+                if forced is None:
+                    continue
+                final, score, decision = forced
+                daily_min_forced = True
 
             entry = current_price
             direction = "long" if "做多" in final else "short"
@@ -1063,6 +1206,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             last_trade_time = ts_sec
             last_trade_signal = final
             last_entry_price = entry
+            traded_dates.add(_taipei_trade_date(ts))
 
         if open_trade is not None:
             last_bar = base_rows.iloc[-1]
@@ -1071,7 +1215,16 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             trades.append(trade_record)
 
     data_source = str(base_5m.attrs.get("kline_source") or "futures")
-    return base_5m, trades, summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source=data_source), learning_samples
+    coverage_start_dt = first_decision_ts or (base_rows.index[warmup_bars] if len(base_rows) > warmup_bars else start_dt)
+    return base_5m, trades, summarize_trades(
+        trades,
+        start_dt,
+        end_dt,
+        symbol,
+        model_loaded,
+        data_source=data_source,
+        coverage_start_dt=coverage_start_dt,
+    ), learning_samples
 
 
 def main():
@@ -1102,6 +1255,14 @@ def main():
     print(f"Avg RR/AI edge: {summary['avg_rr_at_entry']}/{summary['avg_net_edge_rate_pct']}%")
     print(f"Long/Short: {summary['long_trades']}/{summary['short_trades']}")
     print(f"Exit reasons: {json.dumps(summary['exit_reason_counts'], ensure_ascii=False)}")
+    coverage = summary.get("trade_day_coverage") or {}
+    if coverage:
+        print(
+            "Trade-day coverage: "
+            f"{coverage.get('trade_days', 0)}/{coverage.get('calendar_days', 0)} days, "
+            f"missing={coverage.get('missing_trade_days', 0)}, "
+            f"daily_min={coverage.get('daily_min_trades', 0)}"
+        )
     top_factors = sorted(
         (summary.get("by_mlx_factor") or {}).items(),
         key=lambda item: (item[1].get("trades", 0), item[1].get("win_rate", 0.0)),

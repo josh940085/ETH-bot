@@ -268,7 +268,7 @@ COPY_TRADE_MAX_LEVERAGE = 5
 PANEL_DEFAULT_MAX_MARGIN_USDT = 100.0
 DEFAULT_MINI_APP_URL = "https://josh940085.github.io/ETH-bot/"
 COPY_TRADE_SYMBOL = "ETHUSDT"
-COPY_TRADE_MIN_QTY = 0.01
+COPY_TRADE_MIN_QTY = 0.012
 BINANCE_POSITION_SYNC_GRACE_SEC = 90
 BINANCE_PROTECTION_ORDER_TYPES = {"STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"}
 BINANCE_PROTECTION_CLIENT_PREFIX = "ethbot_"
@@ -5876,10 +5876,16 @@ def _is_daily_min_position():
     return (opened_dt.hour, opened_dt.minute) >= (due_hour, due_minute)
 
 
-def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro_bias=0.0, news_bias=0.0, breakout=0, volume_spike=False):
+def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro_bias=0.0, news_bias=0.0, breakout=0, volume_spike=False, regime="range"):
     """Create the small end-of-day trade from current structure, never a blind side."""
     entry = max(0.0, _safe_float(price, 0.0))
-    direction = "long" if (_safe_int(htf, 0) + _safe_int(mid_trend, 0)) >= 0 else "short"
+    regime_name = str(regime or "range")
+    if regime_name in {"bear_trend", "bear_trend_strong"}:
+        direction = "short"
+    elif regime_name in {"bull_trend", "bull_trend_strong"}:
+        direction = "long"
+    else:
+        direction = "long" if (_safe_int(htf, 0) + _safe_int(mid_trend, 0)) >= 0 else "short"
     atr_ref = max(_safe_float(atr, 0.0), entry * 0.001, 1e-6)
     if direction == "long":
         structural_sl = _safe_float(df_15m["low"].tail(10).min(), entry)
@@ -7467,7 +7473,8 @@ def maybe_shrink_tp_after_hold(current_price=None, now_ts=None):
         except Exception as e:
             sync_msg = f"\n⚠️ Binance TP 同步失敗: {e}"
 
-    print(f"⏱️ 持倉已超4小時，只縮TP | 新TP: {active_trade['tp']:.2f} | SL維持: {active_trade['sl']:.2f}")
+    if not _is_truthy(os.getenv("ETH_BOT_DISABLE_LIVE", "0")):
+        print(f"⏱️ 持倉已超4小時，只縮TP | 新TP: {active_trade['tp']:.2f} | SL維持: {active_trade['sl']:.2f}")
     send_telegram(
         f"⏱️ 持倉已超4小時，只縮減止盈\n"
         f"方向: {active_trade['direction']} | 進場均價: {entry_ref:.2f}\n"
@@ -7931,14 +7938,42 @@ def get_td_sequential_setup(df, completed_only=True):
 # Market Regime（市場狀態）
 # =============================
 def detect_market_regime(df_1h, df_4h):
-    trend_1h = df_1h["close"].iloc[-1] - df_1h["ma25"].iloc[-1]
-    trend_4h = df_4h["close"].iloc[-1] - df_4h["ma25"].iloc[-1]
+    close_1h = max(_safe_float(df_1h["close"].iloc[-1], 0.0), 1e-9)
+    close_4h = max(_safe_float(df_4h["close"].iloc[-1], 0.0), 1e-9)
+    ma25_1h = max(_safe_float(df_1h["ma25"].iloc[-1], close_1h), 1e-9)
+    ma25_4h = max(_safe_float(df_4h["ma25"].iloc[-1], close_4h), 1e-9)
+    trend_1h = close_1h - ma25_1h
+    trend_4h = close_4h - ma25_4h
+    trend_1h_rate = trend_1h / close_1h
+    trend_4h_rate = trend_4h / close_4h
 
     # ===== 4H 強度（新增）=====
-    strength_4h = df_4h["ma25"].iloc[-1] - df_4h["ma25"].iloc[-5]
+    strength_4h = ma25_4h - _safe_float(df_4h["ma25"].iloc[-5], ma25_4h)
+    strength_4h_rate = strength_4h / ma25_4h
 
     # ===== 波動（用1H判斷市場活躍度）=====
-    vol = (df_1h["high"].iloc[-1] - df_1h["low"].iloc[-1]) / df_1h["close"].iloc[-1]
+    vol = (
+        _safe_float(df_1h["high"].iloc[-1], close_1h)
+        - _safe_float(df_1h["low"].iloc[-1], close_1h)
+    ) / close_1h
+
+    # 震盪不是只有價格剛好等於均線。用主播式區間邏輯：
+    # 4H 乖離小、MA 斜率小、波動收斂，或 1H/4H 方向互打時，先視為區間。
+    range_trend_threshold = max(0.002, _safe_float(os.getenv("MARKET_RANGE_TREND_RATE", 0.006), 0.006))
+    range_strength_threshold = max(0.001, _safe_float(os.getenv("MARKET_RANGE_STRENGTH_RATE", 0.003), 0.003))
+    range_vol_threshold = max(0.004, _safe_float(os.getenv("MARKET_RANGE_VOL_RATE", 0.012), 0.012))
+    weak_4h = (
+        abs(trend_4h_rate) <= range_trend_threshold
+        and abs(strength_4h_rate) <= range_strength_threshold
+        and vol <= range_vol_threshold
+    )
+    timeframe_conflict = (
+        trend_1h_rate * trend_4h_rate < 0
+        and abs(strength_4h_rate) <= range_strength_threshold * 1.4
+        and vol <= range_vol_threshold * 1.15
+    )
+    if weak_4h or timeframe_conflict:
+        return "range"
 
     # ===== v2 分類（強弱趨勢）=====
     # 多頭
@@ -10325,6 +10360,31 @@ def build_trade_signal_snapshot(
                 final = "觀望（主指標30m MACD未支持做多）"
             elif "做空" in final and mid_trend != -1:
                 final = "觀望（主指標30m MACD未支持做空）"
+        if (
+            not final.startswith("觀望")
+            and _is_truthy(os.getenv("TRADE_USE_MLX_BACKTEST_PROFILE_FILTER", "1"))
+            and not content_override.get("applied")
+        ):
+            host_mode = str(host_opening_logic.get("mode") or "wait")
+            direction_name = "long" if "做多" in final else "short"
+            profile_ok = False
+            if (
+                host_mode == "breakdown_after_support_tests"
+                and direction_name == "short"
+                and regime in {"bear_trend", "bear_trend_strong", "bull_trend"}
+            ):
+                profile_ok = True
+            elif host_mode == "trend_pullback_long" and direction_name == "long" and regime == "bull_trend_strong":
+                profile_ok = True
+            elif (
+                regime == "range"
+                and direction_name == "long"
+                and host_mode in {"support_reclaim", "breakout_after_pressure_tests"}
+            ):
+                profile_ok = True
+            if not profile_ok:
+                final = "觀望（MLX回測輪廓不佳）"
+                position_size = 0.0
     final = _classify_wait_state(
         final,
         repeated_support_tests=repeated_support_tests,
@@ -12858,6 +12918,7 @@ def run_bot():
                     news_bias=news_bias,
                     breakout=breakout,
                     volume_spike=bool(decision.get("volume_spike")),
+                    regime=regime,
                 )
                 final = daily_plan["final"]
                 sl = daily_plan["sl"]
