@@ -5420,6 +5420,141 @@ def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0
     POSITION_PANEL_STATE["close_hits"] = hits[:10]
 
 
+def _build_sl_strategy_review(direction, entry, tp, sl, close_price, atr_ref, context, *, stop_atr, planned_rr, stop_overshoot, alignment_score):
+    """Classify why an SL happened and return executable guard hints."""
+    direction = _normalize_trade_direction(direction)
+    context = context if isinstance(context, dict) else {}
+    expected_sign = 1 if direction == "long" else -1
+
+    score = _safe_float(context.get("score"), 0.5)
+    ai_prob = _safe_float(context.get("ai_prob"), score)
+    ai_long_prob = _safe_float(context.get("ai_long_prob"), ai_prob)
+    ai_short_prob = _safe_float(context.get("ai_short_prob"), 1.0 - ai_prob)
+    net_edge = _safe_float(context.get("net_edge_rate_est"), 0.0)
+    risk_rate = _safe_float(context.get("risk_rate"), abs(entry - sl) / max(entry, 1e-9))
+    reward_rate = _safe_float(context.get("reward_rate"), abs(tp - entry) / max(entry, 1e-9))
+    sr_bias = _safe_float(context.get("sr_bias"), 0.0)
+    support_hits = _safe_int(context.get("support_hits"), 0)
+    resistance_hits = _safe_int(context.get("resistance_hits"), 0)
+    repeated_support_tests = _safe_int(context.get("repeated_support_tests"), 0)
+    repeated_resistance_tests = _safe_int(context.get("repeated_resistance_tests"), 0)
+    repeated_test_pressure = _safe_float(context.get("repeated_test_pressure"), 0.0)
+    breakout = _safe_int(context.get("breakout"), 0)
+    htf = _safe_int(context.get("htf"), 0)
+    mid_trend = _safe_int(context.get("mid_trend"), 0)
+    macro_bias = _safe_float(context.get("macro_bias"), 0.0)
+    derivatives_pressure = _safe_float(context.get("derivatives_pressure"), 0.0)
+    rsi_15m = _safe_float(context.get("rsi_15m"), 50.0)
+    ema50_deviation = _safe_float(context.get("ema50_deviation_15m"), 0.0)
+    taker_buy_ratio = _safe_float(context.get("taker_buy_ratio"), 0.5)
+    content_override = context.get("content_override") if isinstance(context.get("content_override"), dict) else {}
+    learned_entry_logic = context.get("learned_entry_logic") if isinstance(context.get("learned_entry_logic"), dict) else {}
+
+    issue_codes = []
+    issue_details = []
+    optimization_actions = []
+
+    def add_issue(code, detail, action):
+        if code not in issue_codes:
+            issue_codes.append(code)
+            issue_details.append(detail)
+            optimization_actions.append(action)
+
+    if stop_atr < max(0.50, _safe_float(os.getenv("SL_REVIEW_MIN_STOP_ATR", "0.65"), 0.65)):
+        add_issue("sl_too_tight", f"SL距離只有 {stop_atr:.2f} ATR", "提高最小SL距離或等回踩後再進場")
+    if planned_rr < max(1.1, _safe_float(os.getenv("TRADE_MIN_ACCEPT_RR", 1.8), 1.8)):
+        add_issue("rr_too_low", f"進場RR {planned_rr:.2f} 不足", "降低追單，要求TP空間覆蓋SL與成本")
+    if net_edge <= _safe_float(os.getenv("SL_REVIEW_MIN_EDGE_RATE", "0.0012"), 0.0012):
+        add_issue("edge_too_low", f"期望值 {net_edge*100:.3f}% 偏低", "提高AI期望值門檻，同方向需重新確認")
+    if risk_rate < _safe_float(os.getenv("SL_REVIEW_MIN_RISK_RATE", "0.003"), 0.003):
+        add_issue("risk_distance_too_small", f"風險距離 {risk_rate*100:.3f}% 過小", "避免把SL放在短線雜訊範圍內")
+    if alignment_score <= 0:
+        add_issue("indicator_not_aligned", f"多項指標同向不足 score={alignment_score:+d}", "同方向再進場需等4H/30m/SR至少兩項同向")
+
+    if direction == "long":
+        direction_prob = ai_long_prob
+        if resistance_hits >= 1 and breakout != 1:
+            add_issue("long_into_resistance", f"多單進場時上方壓力 {resistance_hits} 個且未突破", "多單靠近壓力需等突破確認或回踩支撐")
+        if repeated_resistance_tests >= 2 and breakout != 1:
+            add_issue("failed_resistance_break", f"壓力連測 {repeated_resistance_tests} 次未突破", "壓力連測未破時禁止追多")
+        if sr_bias < -0.12 or support_hits == 0:
+            add_issue("weak_support_for_long", f"支撐偏置 {sr_bias:+.2f} / 支撐數 {support_hits}", "多單需靠近支撐承接或掃低收回")
+        if htf < 0 or mid_trend < 0:
+            add_issue("long_against_trend", f"4H={htf} 30m={mid_trend}", "逆高週期多單需縮小倉位並等短線轉強")
+        if rsi_15m >= 68 or ema50_deviation > 0.018:
+            add_issue("long_chased_high", f"RSI={rsi_15m:.1f} EMA50偏離={ema50_deviation*100:.2f}%", "多單避免急拉後追高，改等回踩")
+        if derivatives_pressure < -0.12 or taker_buy_ratio < 0.45:
+            add_issue("derivatives_against_long", f"衍生品壓力 {derivatives_pressure:+.2f} 買盤 {taker_buy_ratio:.2f}", "衍生品反向時多單降權")
+    else:
+        direction_prob = ai_short_prob
+        if support_hits >= 1 and breakout != -1:
+            add_issue("short_into_support", f"空單進場時下方支撐 {support_hits} 個且未跌破", "空單靠近支撐需等跌破確認或反彈失敗")
+        if repeated_support_tests >= 2 and breakout != -1:
+            add_issue("failed_support_break", f"支撐連測 {repeated_support_tests} 次未跌破", "支撐連測未破時禁止追空")
+        if sr_bias > 0.12 or resistance_hits == 0:
+            add_issue("weak_resistance_for_short", f"支撐壓力偏置 {sr_bias:+.2f} / 壓力數 {resistance_hits}", "空單需靠近壓力反彈失敗或跌破支撐")
+        if htf > 0 or mid_trend > 0:
+            add_issue("short_against_trend", f"4H={htf} 30m={mid_trend}", "逆高週期空單需縮小倉位並等短線轉弱")
+        if rsi_15m <= 32 or ema50_deviation < -0.018:
+            add_issue("short_chased_low", f"RSI={rsi_15m:.1f} EMA50偏離={ema50_deviation*100:.2f}%", "空單避免急跌後追空，改等反彈壓力")
+        if derivatives_pressure > 0.12 or taker_buy_ratio > 0.55:
+            add_issue("derivatives_against_short", f"衍生品壓力 {derivatives_pressure:+.2f} 買盤 {taker_buy_ratio:.2f}", "衍生品反向時空單降權")
+
+    if direction_prob < max(0.42, _safe_float(os.getenv("TRADE_MIN_DIRECTION_WIN_PROB", 0.42), 0.42)):
+        add_issue("direction_probability_low", f"方向勝率 {direction_prob:.2f} 偏低", "提高該方向最低勝率門檻")
+    if abs(repeated_test_pressure) >= 0.15 and repeated_test_pressure * expected_sign < 0:
+        add_issue("repeated_test_pressure_against", f"連續測試壓力 {repeated_test_pressure:+.2f} 反向", "連續測試壓力反向時等待確認，不提前開")
+    if macro_bias * expected_sign < -0.35:
+        add_issue("macro_against", f"宏觀 {macro_bias:+.2f} 反向", "宏觀反向時提高RR與期望值門檻")
+    if content_override.get("applied") and str(content_override.get("direction")) != direction:
+        add_issue("host_signal_conflict", f"MLX主訊號={content_override.get('direction')}", "主播/MLX主訊號反向時禁止同方向開倉")
+    elif content_override.get("usable") and not content_override.get("applied"):
+        add_issue("host_signal_not_confirmed", "主播/MLX方向未通過衝突檢查", "主播方向未確認時不可作為開單理由")
+    if learned_entry_logic:
+        long_setup = _safe_float(learned_entry_logic.get("long_setup"), 0.0)
+        short_setup = _safe_float(learned_entry_logic.get("short_setup"), 0.0)
+        if direction == "long" and long_setup < short_setup + 0.25:
+            add_issue("learned_logic_not_supporting_long", f"MLX多空分 {long_setup:.2f}/{short_setup:.2f}", "多單需等MLX學習邏輯重新偏多")
+        if direction == "short" and short_setup < long_setup + 0.25:
+            add_issue("learned_logic_not_supporting_short", f"MLX多空分 {long_setup:.2f}/{short_setup:.2f}", "空單需等MLX學習邏輯重新偏空")
+
+    if stop_overshoot >= 0.25:
+        add_issue("slippage_or_fast_break", f"觸發超出SL {stop_overshoot:.2f} ATR", "波動急放大時降低倉位並加大確認")
+
+    replay_snapshot = {
+        "score": round(score, 4),
+        "ai_prob": round(ai_prob, 4),
+        "direction_prob": round(direction_prob, 4),
+        "net_edge_rate_est": round(net_edge, 6),
+        "risk_rate": round(risk_rate, 6),
+        "reward_rate": round(reward_rate, 6),
+        "htf": htf,
+        "mid_trend": mid_trend,
+        "breakout": breakout,
+        "sr_bias": round(sr_bias, 4),
+        "support_hits": support_hits,
+        "resistance_hits": resistance_hits,
+        "repeated_support_tests": repeated_support_tests,
+        "repeated_resistance_tests": repeated_resistance_tests,
+        "repeated_test_pressure": round(repeated_test_pressure, 4),
+        "macro_bias": round(macro_bias, 4),
+        "derivatives_pressure": round(derivatives_pressure, 4),
+        "rsi_15m": round(rsi_15m, 2),
+        "ema50_deviation_15m": round(ema50_deviation, 5),
+        "taker_buy_ratio": round(taker_buy_ratio, 4),
+        "primary_indicator": str(context.get("primary_indicator") or ""),
+        "strategy_version": str(context.get("strategy_version") or STRATEGY_VERSION),
+    }
+    severity = min(5, max(1, len(issue_codes)))
+    return {
+        "issue_codes": issue_codes,
+        "issue_details": issue_details,
+        "optimization_actions": optimization_actions[:8],
+        "replay_snapshot": replay_snapshot,
+        "severity": severity,
+    }
+
+
 def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, candle_low, atr, context=None):
     """Review the SL plan at execution time and retain a short re-entry guard."""
     direction = _normalize_trade_direction(direction)
@@ -5477,6 +5612,23 @@ def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, 
     if stop_overshoot >= 0.25:
         issues.append(f"觸發超出SL {stop_overshoot:.2f} ATR")
 
+    strategy_review = _build_sl_strategy_review(
+        direction,
+        entry,
+        tp,
+        sl,
+        close_price,
+        atr_ref,
+        context,
+        stop_atr=stop_atr,
+        planned_rr=planned_rr,
+        stop_overshoot=stop_overshoot,
+        alignment_score=alignment_score,
+    )
+    for detail in strategy_review.get("issue_details", []):
+        if detail not in issues:
+            issues.append(detail)
+
     requires_revalidation = bool(issues)
     verdict = "需重新確認" if requires_revalidation else "SL設定合理，屬正常風控出場"
     review = {
@@ -5494,6 +5646,10 @@ def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, 
         "alignment_score": alignment_score,
         "indicators": indicators,
         "issues": issues,
+        "issue_codes": strategy_review.get("issue_codes", []),
+        "optimization_actions": strategy_review.get("optimization_actions", []),
+        "replay_snapshot": strategy_review.get("replay_snapshot", {}),
+        "strategy_optimization_severity": strategy_review.get("severity", 1),
         "requires_revalidation": requires_revalidation,
         "verdict": verdict,
     }
@@ -5516,8 +5672,81 @@ def _recent_sl_review_guard_reason(final):
     )
     if not same_direction:
         return ""
-    issue = str((review.get("issues") or ["等待15m重新確認"])[0])
+    issue_codes = review.get("issue_codes") if isinstance(review.get("issue_codes"), list) else []
+    issue_code = str(issue_codes[0]) if issue_codes else ""
+    code_block_map = {
+        "sl_too_tight": "SL距離過近",
+        "rr_too_low": "RR不足",
+        "edge_too_low": "期望值不足",
+        "risk_distance_too_small": "風險距離太小",
+        "indicator_not_aligned": "指標未共振",
+        "long_into_resistance": "多單打到壓力",
+        "failed_resistance_break": "壓力未突破",
+        "weak_support_for_long": "多單缺少支撐",
+        "long_against_trend": "多單逆勢",
+        "long_chased_high": "多單追高",
+        "derivatives_against_long": "衍生品反多",
+        "short_into_support": "空單打到支撐",
+        "failed_support_break": "支撐未跌破",
+        "weak_resistance_for_short": "空單缺少壓力",
+        "short_against_trend": "空單逆勢",
+        "short_chased_low": "空單追低",
+        "derivatives_against_short": "衍生品反空",
+        "direction_probability_low": "方向勝率偏低",
+        "repeated_test_pressure_against": "連續測試壓力反向",
+        "macro_against": "宏觀反向",
+        "host_signal_conflict": "MLX主訊號衝突",
+        "host_signal_not_confirmed": "MLX方向未確認",
+        "learned_logic_not_supporting_long": "MLX不支持多單",
+        "learned_logic_not_supporting_short": "MLX不支持空單",
+        "slippage_or_fast_break": "快速破位",
+    }
+    issue = code_block_map.get(issue_code) or str((review.get("issues") or ["等待15m重新確認"])[0])
     return f"觀望（SL後檢討防護-{issue}）"
+
+
+def _build_sl_review_context_from_live(
+    *,
+    htf=0,
+    mid_trend=0,
+    sr_analysis=None,
+    macro_bias=0.0,
+    derivatives_flow=None,
+    td_exhaustion=False,
+    decision=None,
+):
+    sr_analysis = sr_analysis if isinstance(sr_analysis, dict) else {}
+    derivatives_flow = derivatives_flow if isinstance(derivatives_flow, dict) else {}
+    decision = decision if isinstance(decision, dict) else {}
+    return {
+        "strategy_version": STRATEGY_VERSION,
+        "htf": htf,
+        "mid_trend": mid_trend,
+        "sr_bias": sr_analysis.get("bias"),
+        "support_hits": sr_analysis.get("support_hits"),
+        "resistance_hits": sr_analysis.get("resistance_hits"),
+        "macro_bias": macro_bias,
+        "derivatives_pressure": derivatives_flow.get("derivatives_pressure", decision.get("derivatives_pressure")),
+        "taker_buy_ratio": derivatives_flow.get("taker_buy_ratio", decision.get("taker_buy_ratio")),
+        "open_interest_change": derivatives_flow.get("open_interest_change", decision.get("open_interest_change")),
+        "td_exhaustion": td_exhaustion,
+        "score": decision.get("score"),
+        "ai_prob": decision.get("ai_prob"),
+        "ai_long_prob": decision.get("ai_long_prob"),
+        "ai_short_prob": decision.get("ai_short_prob"),
+        "net_edge_rate_est": decision.get("net_edge_rate_est"),
+        "risk_rate": decision.get("risk_rate"),
+        "reward_rate": decision.get("reward_rate"),
+        "rsi_15m": decision.get("rsi_15m"),
+        "ema50_deviation_15m": decision.get("ema50_deviation_15m"),
+        "breakout": decision.get("breakout"),
+        "repeated_support_tests": decision.get("repeated_support_tests"),
+        "repeated_resistance_tests": decision.get("repeated_resistance_tests"),
+        "repeated_test_pressure": decision.get("repeated_test_pressure"),
+        "content_override": decision.get("content_override"),
+        "learned_entry_logic": decision.get("learned_entry_logic"),
+        "primary_indicator": decision.get("primary_indicator"),
+    }
 
 
 TAIPEI_TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -11718,11 +11947,15 @@ def run_bot():
                         sl_review = _review_stop_loss_event(
                             active_trade["direction"], active_trade.get("avg_entry", active_trade.get("entry")),
                             active_trade.get("tp"), active_trade.get("sl"), current, candle_high, candle_low, atr,
-                            {
-                                "htf": htf, "mid_trend": mid_trend, "sr_bias": sr_analysis.get("bias"),
-                                "macro_bias": macro_bias, "derivatives_pressure": derivatives_flow.get("derivatives_pressure"),
-                                "td_exhaustion": td_setup_15m["up_9"],
-                            },
+                            _build_sl_review_context_from_live(
+                                htf=htf,
+                                mid_trend=mid_trend,
+                                sr_analysis=sr_analysis,
+                                macro_bias=macro_bias,
+                                derivatives_flow=derivatives_flow,
+                                td_exhaustion=td_setup_15m["up_9"],
+                                decision=locals().get("decision"),
+                            ),
                         )
                         record_sl_review(sl_review)
                         active_trade["open"] = False
@@ -11745,7 +11978,11 @@ def run_bot():
                             _build_trade_close_message("SL", active_trade["direction"], current, candle_high, candle_low)
                             + f"\n\n🔎 SL檢討：{sl_review['verdict']}\n"
                             + f"風險 {sl_review['stop_atr']:.2f} ATR｜RR {sl_review['planned_rr']:.2f}｜技術分數 {sl_review['alignment_score']:+d}\n"
-                            + "；".join(sl_review["issues"] or sl_review["indicators"]),
+                            + "；".join(sl_review["issues"] or sl_review["indicators"])
+                            + (
+                                "\n策略優化: " + "；".join((sl_review.get("optimization_actions") or [])[:3])
+                                if sl_review.get("optimization_actions") else ""
+                            ),
                             priority=True,
                         )
 
@@ -11800,11 +12037,15 @@ def run_bot():
                         sl_review = _review_stop_loss_event(
                             active_trade["direction"], active_trade.get("avg_entry", active_trade.get("entry")),
                             active_trade.get("tp"), active_trade.get("sl"), current, candle_high, candle_low, atr,
-                            {
-                                "htf": htf, "mid_trend": mid_trend, "sr_bias": sr_analysis.get("bias"),
-                                "macro_bias": macro_bias, "derivatives_pressure": derivatives_flow.get("derivatives_pressure"),
-                                "td_exhaustion": td_setup_15m["down_9"],
-                            },
+                            _build_sl_review_context_from_live(
+                                htf=htf,
+                                mid_trend=mid_trend,
+                                sr_analysis=sr_analysis,
+                                macro_bias=macro_bias,
+                                derivatives_flow=derivatives_flow,
+                                td_exhaustion=td_setup_15m["down_9"],
+                                decision=locals().get("decision"),
+                            ),
                         )
                         record_sl_review(sl_review)
                         active_trade["open"] = False
@@ -11827,7 +12068,11 @@ def run_bot():
                             _build_trade_close_message("SL", active_trade["direction"], current, candle_high, candle_low)
                             + f"\n\n🔎 SL檢討：{sl_review['verdict']}\n"
                             + f"風險 {sl_review['stop_atr']:.2f} ATR｜RR {sl_review['planned_rr']:.2f}｜技術分數 {sl_review['alignment_score']:+d}\n"
-                            + "；".join(sl_review["issues"] or sl_review["indicators"]),
+                            + "；".join(sl_review["issues"] or sl_review["indicators"])
+                            + (
+                                "\n策略優化: " + "；".join((sl_review.get("optimization_actions") or [])[:3])
+                                if sl_review.get("optimization_actions") else ""
+                            ),
                             priority=True,
                         )
 
