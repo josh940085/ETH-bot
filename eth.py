@@ -143,6 +143,7 @@ TRADINGVIEW_INTERVAL_MAP = {
     "1h": "60",
     "2h": "120",
     "4h": "240",
+    "12h": "720",
     "1d": "D",
     "1w": "W",
     "1M": "M",
@@ -156,6 +157,7 @@ KLINE_INTERVAL_MS = {
     "1h": 60 * 60 * 1000,
     "2h": 2 * 60 * 60 * 1000,
     "4h": 4 * 60 * 60 * 1000,
+    "12h": 12 * 60 * 60 * 1000,
     "1d": 24 * 60 * 60 * 1000,
     "1w": 7 * 24 * 60 * 60 * 1000,
     "1M": 31 * 24 * 60 * 60 * 1000,
@@ -11594,6 +11596,80 @@ def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, e
 
 def _fetch_market_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10, prefix="K線"):
     errors = []
+    if str(interval) == "12h":
+        try:
+            source_start = None
+            if start_time_ms is not None:
+                source_start = int(_safe_float(start_time_ms, 0.0)) - KLINE_INTERVAL_MS["12h"]
+            source_rows, source_name = _fetch_market_kline_rows(
+                symbol,
+                "4h",
+                limit=max(12, _safe_int(limit, 100) * 3 + 6),
+                start_time_ms=source_start,
+                end_time_ms=end_time_ms,
+                timeout=timeout,
+                prefix=f"{prefix}-4h合成",
+            )
+            buckets = {}
+            for row in source_rows:
+                try:
+                    open_ms = int(_safe_float(row[0], 0.0))
+                    bucket_ms = (open_ms // KLINE_INTERVAL_MS["12h"]) * KLINE_INTERVAL_MS["12h"]
+                    bucket = buckets.setdefault(
+                        bucket_ms,
+                        {
+                            "open_time": bucket_ms,
+                            "open": _safe_float(row[1], 0.0),
+                            "high": _safe_float(row[2], 0.0),
+                            "low": _safe_float(row[3], 0.0),
+                            "close": _safe_float(row[4], 0.0),
+                            "volume": 0.0,
+                            "last_open": open_ms,
+                        },
+                    )
+                    if open_ms < bucket.get("first_open", open_ms):
+                        bucket["open"] = _safe_float(row[1], bucket["open"])
+                        bucket["first_open"] = open_ms
+                    bucket["high"] = max(_safe_float(bucket.get("high"), 0.0), _safe_float(row[2], 0.0))
+                    bucket["low"] = min(_safe_float(bucket.get("low"), _safe_float(row[3], 0.0)), _safe_float(row[3], 0.0))
+                    if open_ms >= _safe_int(bucket.get("last_open"), 0):
+                        bucket["close"] = _safe_float(row[4], bucket["close"])
+                        bucket["last_open"] = open_ms
+                    bucket["volume"] = _safe_float(bucket.get("volume"), 0.0) + _safe_float(row[5], 0.0)
+                except Exception:
+                    continue
+            parsed = []
+            for bucket_ms in sorted(buckets):
+                if start_time_ms is not None and bucket_ms < int(_safe_float(start_time_ms, 0.0)):
+                    continue
+                if end_time_ms is not None and bucket_ms > int(_safe_float(end_time_ms, 0.0)):
+                    continue
+                bucket = buckets[bucket_ms]
+                parsed.append(
+                    [
+                        bucket_ms,
+                        str(_safe_float(bucket.get("open"), 0.0)),
+                        str(_safe_float(bucket.get("high"), 0.0)),
+                        str(_safe_float(bucket.get("low"), 0.0)),
+                        str(_safe_float(bucket.get("close"), 0.0)),
+                        str(_safe_float(bucket.get("volume"), 0.0)),
+                        bucket_ms + KLINE_INTERVAL_MS["12h"] - 1,
+                        "0",
+                        0,
+                        "0",
+                        "0",
+                        "0",
+                    ]
+                )
+            if parsed:
+                return parsed[-max(1, min(1500, _safe_int(limit, 100))) :], f"{source_name}_resampled_12h"
+            errors.append("tradingview_4h_resampled_12h: empty")
+        except Exception as exc:
+            errors.append(f"tradingview_4h_resampled_12h: {exc}")
+            _log_kline_source_failure("tradingview_4h_resampled_12h", exc, prefix=prefix)
+        if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
+            raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 12h 合成失敗")
+
     try:
         rows = _fetch_tradingview_kline_rows(
             symbol,
