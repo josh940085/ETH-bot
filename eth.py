@@ -960,6 +960,10 @@ def _load_position_panel_state():
             "break_even_ts": 0,
             "time_horizon": "short",
             "max_hold_sec": SHORT_TRADE_MAX_HOLD_SEC,
+            "daily_trade_date": "",
+            "daily_trade_opened": False,
+            "daily_trade_source": "",
+            "daily_trade_opened_ts": 0,
         }
 
     try:
@@ -1000,6 +1004,10 @@ def _load_position_panel_state():
             "break_even_ts": 0,
             "time_horizon": "short",
             "max_hold_sec": SHORT_TRADE_MAX_HOLD_SEC,
+            "daily_trade_date": "",
+            "daily_trade_opened": False,
+            "daily_trade_source": "",
+            "daily_trade_opened_ts": 0,
         }
 
     close_hits = raw.get("close_hits")
@@ -1042,6 +1050,10 @@ def _load_position_panel_state():
         "break_even_ts": int(raw.get("break_even_ts", 0) or 0),
         "time_horizon": _normalize_trade_time_horizon(raw.get("time_horizon")),
         "max_hold_sec": float(raw.get("max_hold_sec", _trade_max_hold_sec(raw.get("time_horizon"))) or 0.0),
+        "daily_trade_date": str(raw.get("daily_trade_date") or ""),
+        "daily_trade_opened": bool(raw.get("daily_trade_opened", False)),
+        "daily_trade_source": str(raw.get("daily_trade_source") or ""),
+        "daily_trade_opened_ts": int(raw.get("daily_trade_opened_ts", 0) or 0),
     }
 
 
@@ -5527,10 +5539,34 @@ def _daily_min_trade_due(now=None):
 
 
 def _mark_daily_trade_opened(source):
+    existing_source = str(POSITION_PANEL_STATE.get("daily_trade_source") or "")
+    if source == "restored_position" and existing_source == "daily_minimum":
+        source = existing_source
     POSITION_PANEL_STATE["daily_trade_date"] = _taipei_trade_date()
     POSITION_PANEL_STATE["daily_trade_opened"] = True
     POSITION_PANEL_STATE["daily_trade_source"] = str(source or "signal")
     POSITION_PANEL_STATE["daily_trade_opened_ts"] = int(time.time())
+
+
+def _is_daily_min_position():
+    source = str(POSITION_PANEL_STATE.get("daily_trade_source") or "")
+    if source == "daily_minimum":
+        return True
+    if not _is_truthy(os.getenv("RESTORED_DAILY_MIN_MANAGEMENT_ENABLED", "1")):
+        return False
+    if source != "restored_position":
+        return False
+    if not bool(POSITION_PANEL_STATE.get("daily_trade_opened", False)):
+        return False
+    if str(POSITION_PANEL_STATE.get("daily_trade_date") or "") != _taipei_trade_date():
+        return False
+    opened_ts = _safe_float(POSITION_PANEL_STATE.get("daily_trade_opened_ts"), 0.0)
+    if opened_ts <= 0:
+        return False
+    opened_dt = datetime.datetime.fromtimestamp(opened_ts, TAIPEI_TZ)
+    due_hour = min(23, max(0, _safe_int(os.getenv("DAILY_MIN_TRADE_HOUR", 22), 22)))
+    due_minute = min(59, max(0, _safe_int(os.getenv("DAILY_MIN_TRADE_MINUTE", 30), 30)))
+    return (opened_dt.hour, opened_dt.minute) >= (due_hour, due_minute)
 
 
 def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro_bias=0.0, news_bias=0.0, breakout=0, volume_spike=False):
@@ -6393,7 +6429,7 @@ def maybe_activate_auto_break_even(current_price, atr=None, now_ts=None):
 
     open_ts = _safe_float(active_trade.get("open_time"), 0.0)
     min_hold_sec = max(0.0, _safe_float_env_names(("AUTO_BREAK_EVEN_MIN_HOLD_SEC",), 600.0))
-    daily_min_position = str(POSITION_PANEL_STATE.get("daily_trade_source") or "") == "daily_minimum"
+    daily_min_position = _is_daily_min_position()
     if daily_min_position:
         min_hold_sec = min(
             min_hold_sec,
@@ -6525,7 +6561,7 @@ def maybe_take_quick_profit_reduce(current_price, atr=None, now_ts=None):
 
     earned_r = _safe_float(progress.get("earned_r_multiple"), 0.0)
     profit_progress = _safe_float(progress.get("profit_progress"), 0.0)
-    daily_min_position = str(POSITION_PANEL_STATE.get("daily_trade_source") or "") == "daily_minimum"
+    daily_min_position = _is_daily_min_position()
     trigger_r = max(0.25, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_TRIGGER_R", 0.65), 0.65))
     trigger_progress = max(0.15, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_TP_PROGRESS", 0.35), 0.35))
     if daily_min_position:
@@ -11476,7 +11512,7 @@ def run_bot():
 
             # 命中止盈止損前提下，持倉中允許補倉/減倉
             if active_trade["open"]:
-                if str(POSITION_PANEL_STATE.get("daily_trade_source") or "") == "daily_minimum":
+                if _is_daily_min_position():
                     _enforce_daily_min_trade_size(
                         _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05),
                         current,
