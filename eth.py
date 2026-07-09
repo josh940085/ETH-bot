@@ -148,14 +148,6 @@ TRADINGVIEW_INTERVAL_MAP = {
     "1w": "W",
     "1M": "M",
 }
-TRADINGVIEW_AUTH_TOKEN = str(os.getenv("TRADINGVIEW_AUTH_TOKEN", "") or "").strip()
-TRADINGVIEW_COOKIE = str(os.getenv("TRADINGVIEW_COOKIE", "") or "").strip()
-TRADINGVIEW_FORCE_AUTH = str(os.getenv("TRADINGVIEW_FORCE_AUTH", "0") or "0").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 KLINE_INTERVAL_MS = {
     "1m": 60 * 1000,
     "3m": 3 * 60 * 1000,
@@ -11735,26 +11727,6 @@ def _tradingview_symbol(symbol):
     return f"BINANCE:{symbol}"
 
 
-def _tradingview_auth_token():
-    token = str(os.getenv("TRADINGVIEW_AUTH_TOKEN", TRADINGVIEW_AUTH_TOKEN) or "").strip()
-    if token:
-        return token
-    if TRADINGVIEW_FORCE_AUTH:
-        raise RuntimeError("TRADINGVIEW_FORCE_AUTH=1 but TRADINGVIEW_AUTH_TOKEN is missing")
-    return "unauthorized_user_token"
-
-
-def _tradingview_headers():
-    headers = [
-        "Origin: https://www.tradingview.com",
-        "User-Agent: Mozilla/5.0",
-    ]
-    cookie = str(os.getenv("TRADINGVIEW_COOKIE", TRADINGVIEW_COOKIE) or "").strip()
-    if cookie:
-        headers.append(f"Cookie: {cookie}")
-    return headers
-
-
 def _tradingview_bar_count(interval, limit, start_time_ms=None, end_time_ms=None):
     requested = max(1, min(10000, _safe_int(limit, 100)))
     interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
@@ -11828,14 +11800,14 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
         ws = websocket.create_connection(
             TRADINGVIEW_WS_URL,
             timeout=max(3, _safe_int(timeout, 10)),
-            header=_tradingview_headers(),
+            header=["Origin: https://www.tradingview.com"],
         )
         symbol_payload = json.dumps(
             {"symbol": tv_symbol, "adjustment": "splits", "session": "extended"},
             separators=(",", ":"),
         )
         for method, params in (
-            ("set_auth_token", [_tradingview_auth_token()]),
+            ("set_auth_token", ["unauthorized_user_token"]),
             ("chart_create_session", [chart_session, ""]),
             ("resolve_symbol", [chart_session, "symbol_1", f"={symbol_payload}"]),
             ("create_series", [chart_session, "s1", "s1", "symbol_1", tv_interval, bar_count]),
