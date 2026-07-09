@@ -11737,6 +11737,47 @@ def _tradingview_bar_count(interval, limit, start_time_ms=None, end_time_ms=None
     return max(1, min(10000, requested))
 
 
+def _tradingview_requested_bars(interval, limit, start_time_ms=None, end_time_ms=None):
+    requested = max(1, _safe_int(limit, 100))
+    interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
+    if start_time_ms is not None:
+        end_ms = int(_safe_float(end_time_ms, time.time() * 1000))
+        span = max(0, end_ms - int(_safe_float(start_time_ms, 0.0)))
+        requested = max(requested, int(span // max(1, interval_ms)) + 8)
+    return max(1, requested)
+
+
+def _parse_tradingview_series_rows(series, interval):
+    parsed = []
+    interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
+    if not isinstance(series, list):
+        return parsed
+    for bar in series:
+        values = bar.get("v") if isinstance(bar, dict) else None
+        if not isinstance(values, list) or len(values) < 5:
+            continue
+        open_ms = int(_safe_float(values[0], 0.0) * 1000)
+        volume = _safe_float(values[5], 0.0) if len(values) > 5 else 0.0
+        parsed.append(
+            [
+                open_ms,
+                str(_safe_float(values[1], 0.0)),
+                str(_safe_float(values[2], 0.0)),
+                str(_safe_float(values[3], 0.0)),
+                str(_safe_float(values[4], 0.0)),
+                str(volume),
+                open_ms + interval_ms - 1,
+                "0",
+                0,
+                "0",
+                "0",
+                "0",
+            ]
+        )
+    parsed.sort(key=lambda row: row[0])
+    return parsed
+
+
 def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
     tv_interval = TRADINGVIEW_INTERVAL_MAP.get(str(interval))
     if not tv_interval:
@@ -11744,7 +11785,16 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
 
     chart_session = _tradingview_session_id("cs")
     tv_symbol = _tradingview_symbol(symbol)
-    bar_count = _tradingview_bar_count(interval, limit, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
+    requested_bars = _tradingview_requested_bars(interval, limit, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
+    max_paged_bars = max(
+        10000,
+        min(750000, _safe_int(os.getenv("TRADINGVIEW_MAX_PAGED_BARS", 600000), 600000)),
+    )
+    if requested_bars > max_paged_bars:
+        raise RuntimeError(
+            f"TradingView requested {requested_bars} bars exceeds TRADINGVIEW_MAX_PAGED_BARS={max_paged_bars}"
+        )
+    bar_count = min(10000, requested_bars)
     ws = None
     try:
         ws = websocket.create_connection(
@@ -11764,9 +11814,29 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
         ):
             ws.send(_tradingview_message(method, params))
 
-        deadline = time.time() + max(5, _safe_int(timeout, 10))
+        timeout_sec = max(5, _safe_int(timeout, 10))
+        if requested_bars > 10000:
+            timeout_sec = max(timeout_sec, min(240, 15 + requested_bars // 2500))
+        try:
+            ws.settimeout(max(5, min(15, timeout_sec)))
+        except Exception:
+            pass
+        deadline = time.time() + timeout_sec
+        accumulated_rows = {}
+        last_loaded_count = 0
+        last_oldest_open = None
+        requested_more = False
         while time.time() < deadline:
-            raw = ws.recv()
+            try:
+                raw = ws.recv()
+            except Exception as exc:
+                if accumulated_rows:
+                    oldest_open = min(accumulated_rows)
+                    raise RuntimeError(
+                        f"TradingView returned only {len(accumulated_rows)} {interval} bars; "
+                        f"oldest_open={oldest_open}, requested_start={start_time_ms}, requested_bars={requested_bars}"
+                    ) from exc
+                raise
             for message in _parse_tradingview_messages(raw):
                 method = message.get("m")
                 if method == "critical_error":
@@ -11779,36 +11849,53 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
                 series = (payload[1].get("s1") or {}).get("s")
                 if not isinstance(series, list):
                     continue
-                parsed = []
-                for bar in series:
-                    values = bar.get("v") if isinstance(bar, dict) else None
-                    if not isinstance(values, list) or len(values) < 5:
-                        continue
-                    open_ms = int(_safe_float(values[0], 0.0) * 1000)
-                    if start_time_ms is not None and open_ms < int(_safe_float(start_time_ms, 0.0)):
-                        continue
-                    if end_time_ms is not None and open_ms > int(_safe_float(end_time_ms, 0.0)):
-                        continue
-                    interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
-                    volume = _safe_float(values[5], 0.0) if len(values) > 5 else 0.0
-                    parsed.append(
-                        [
-                            open_ms,
-                            str(_safe_float(values[1], 0.0)),
-                            str(_safe_float(values[2], 0.0)),
-                            str(_safe_float(values[3], 0.0)),
-                            str(_safe_float(values[4], 0.0)),
-                            str(volume),
-                            open_ms + interval_ms - 1,
-                            "0",
-                            0,
-                            "0",
-                            "0",
-                            "0",
-                        ]
+                parsed_all = _parse_tradingview_series_rows(series, interval)
+                if not parsed_all:
+                    continue
+                for row in parsed_all:
+                    accumulated_rows[int(row[0])] = row
+                parsed_all = [accumulated_rows[key] for key in sorted(accumulated_rows)]
+                oldest_open = int(parsed_all[0][0])
+                loaded_count = len(parsed_all)
+                needs_older_start = start_time_ms is not None and oldest_open > int(_safe_float(start_time_ms, 0.0))
+                needs_more_limit = start_time_ms is None and loaded_count < min(requested_bars, max_paged_bars)
+                if (needs_older_start or needs_more_limit) and loaded_count < max_paged_bars:
+                    no_progress = (
+                        requested_more
+                        and loaded_count <= last_loaded_count
+                        and oldest_open == last_oldest_open
                     )
+                    if no_progress:
+                        if needs_older_start:
+                            raise RuntimeError(
+                                "TradingView pagination made no progress before requested start time"
+                            )
+                        needs_more_limit = False
+                    last_loaded_count = loaded_count
+                    last_oldest_open = oldest_open
+                    request_count = min(10000, max(1, min(requested_bars, max_paged_bars) - loaded_count))
+                    if request_count > 0 and not no_progress:
+                        ws.send(_tradingview_message("request_more_data", [chart_session, "s1", request_count]))
+                        requested_more = True
+                        continue
+                if needs_older_start and loaded_count >= max_paged_bars:
+                    raise RuntimeError(
+                        f"TradingView pagination stopped at {loaded_count} bars before requested start time; "
+                        f"increase TRADINGVIEW_MAX_PAGED_BARS above {max_paged_bars} or use a shorter window"
+                    )
+
+                parsed = []
+                start_ms = int(_safe_float(start_time_ms, 0.0)) if start_time_ms is not None else None
+                end_ms = int(_safe_float(end_time_ms, 0.0)) if end_time_ms is not None else None
+                for row in parsed_all:
+                    open_ms = int(row[0])
+                    if start_ms is not None and open_ms < start_ms:
+                        continue
+                    if end_ms is not None and open_ms > end_ms:
+                        continue
+                    parsed.append(row)
                 if parsed:
-                    return parsed[-max(1, min(10000, _safe_int(limit, 100))) :]
+                    return parsed[-max(1, min(max_paged_bars, _safe_int(limit, 100))) :]
         raise RuntimeError("TradingView K線逾時或無資料")
     finally:
         try:

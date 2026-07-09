@@ -73,11 +73,6 @@ def _resolve_timerange(args):
 def _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=1500):
     step_ms = INTERVAL_MS[interval]
     required_bars = int(max(1, (int(end_ms) - int(start_ms)) // step_ms + 8))
-    if required_bars > 10000:
-        raise RuntimeError(
-            f"requested {required_bars} {interval} bars; TradingView websocket fetch is limited to 10000 bars. "
-            "Run a shorter window or add historical paging before validating multi-year ranges."
-        )
     rows, source_name = eth._fetch_market_kline_rows(
         symbol,
         interval,
