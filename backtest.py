@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import datetime as dt
+import io
 import json
 import os
 import warnings
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -31,12 +33,18 @@ INTERVAL_MS = {
 
 
 def _parse_args():
-    parser = argparse.ArgumentParser(description="Replay ETH-bot strategy on historical TradingView klines.")
+    parser = argparse.ArgumentParser(description="Replay ETH-bot strategy on historical market klines.")
     parser.add_argument("--symbol", default="ETHUSDT", help="Trading symbol, e.g. ETHUSDT")
     parser.add_argument("--days", type=int, default=30, help="Lookback days when start/end are not provided")
     parser.add_argument("--start", help="UTC start time, e.g. 2026-05-01 or 2026-05-01T00:00:00")
     parser.add_argument("--end", help="UTC end time, e.g. 2026-05-22 or 2026-05-22T00:00:00")
     parser.add_argument("--warmup-bars", type=int, default=1500, help="5m warmup bars before evaluating signals")
+    parser.add_argument(
+        "--data-source",
+        choices=("auto", "binance-history", "tradingview"),
+        default=os.getenv("BACKTEST_DATA_SOURCE", "auto"),
+        help="Historical kline source. auto uses Binance official monthly archives first.",
+    )
     parser.add_argument("--trades-out", help="Optional CSV path for trade log export")
     parser.add_argument("--summary-out", help="Optional JSON path for summary export")
     parser.add_argument("--learn-out", help="Optional CSV path for AI learning sample export")
@@ -49,6 +57,9 @@ def _parse_utc(raw):
     text = str(raw).strip()
     if not text:
         return None
+    if text.lower() in {"last-month", "previous-month", "上個月"}:
+        now = dt.datetime.now(dt.timezone.utc)
+        return dt.datetime(now.year, now.month, 1, tzinfo=dt.timezone.utc)
     if "T" in text:
         dt_obj = dt.datetime.fromisoformat(text)
     else:
@@ -61,13 +72,157 @@ def _parse_utc(raw):
 
 
 def _resolve_timerange(args):
-    end_dt = _parse_utc(args.end) or dt.datetime.now(dt.timezone.utc)
     start_dt = _parse_utc(args.start)
+    end_dt = _parse_utc(args.end)
+    if end_dt is None:
+        now = dt.datetime.now(dt.timezone.utc)
+        if start_dt is not None:
+            end_dt = dt.datetime(now.year, now.month, 1, tzinfo=dt.timezone.utc)
+        else:
+            end_dt = now
     if start_dt is None:
         start_dt = end_dt - dt.timedelta(days=max(1, int(args.days)))
     if start_dt >= end_dt:
         raise SystemExit("start must be earlier than end")
     return start_dt, end_dt
+
+
+def _month_start(value):
+    return dt.datetime(value.year, value.month, 1, tzinfo=dt.timezone.utc)
+
+
+def _next_month(value):
+    if value.month == 12:
+        return dt.datetime(value.year + 1, 1, 1, tzinfo=dt.timezone.utc)
+    return dt.datetime(value.year, value.month + 1, 1, tzinfo=dt.timezone.utc)
+
+
+def _iter_months(start_dt, end_dt):
+    cursor = _month_start(start_dt)
+    while cursor < end_dt:
+        yield cursor.year, cursor.month
+        cursor = _next_month(cursor)
+
+
+def _iter_days(start_dt, end_dt):
+    cursor = dt.datetime(start_dt.year, start_dt.month, start_dt.day, tzinfo=dt.timezone.utc)
+    while cursor < end_dt:
+        yield cursor.year, cursor.month, cursor.day
+        cursor += dt.timedelta(days=1)
+
+
+def _binance_history_zip_url(symbol, interval, year, month, day=None):
+    symbol = str(symbol or "ETHUSDT").upper().strip()
+    interval = str(interval)
+    if day is not None:
+        return (
+            "https://data.binance.vision/data/futures/um/daily/klines/"
+            f"{symbol}/{interval}/{symbol}-{interval}-{year:04d}-{month:02d}-{day:02d}.zip"
+        )
+    return (
+        "https://data.binance.vision/data/futures/um/monthly/klines/"
+        f"{symbol}/{interval}/{symbol}-{interval}-{year:04d}-{month:02d}.zip"
+    )
+
+
+def _binance_history_cache_path(symbol, interval, year, month, day=None):
+    symbol = str(symbol or "ETHUSDT").upper().strip()
+    interval = str(interval)
+    folder = "daily" if day is not None else "monthly"
+    suffix = f"{year:04d}-{month:02d}-{day:02d}" if day is not None else f"{year:04d}-{month:02d}"
+    return Path(
+        eth.data_path(
+            "historical_klines",
+            "binance_futures_um",
+            folder,
+            symbol,
+            interval,
+            f"{symbol}-{interval}-{suffix}.zip",
+        )
+    )
+
+
+def _download_binance_history_zip(symbol, interval, year, month, day=None):
+    cache_path = _binance_history_cache_path(symbol, interval, year, month, day=day)
+    if cache_path.exists() and cache_path.stat().st_size > 0:
+        return cache_path
+
+    url = _binance_history_zip_url(symbol, interval, year, month, day=day)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    response = eth.HTTP_SESSION.get(url, timeout=30)
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    tmp_path.write_bytes(response.content)
+    tmp_path.replace(cache_path)
+    return cache_path
+
+
+def _read_binance_history_zip(path):
+    with zipfile.ZipFile(path) as archive:
+        csv_names = [name for name in archive.namelist() if name.endswith(".csv")]
+        if not csv_names:
+            return pd.DataFrame()
+        with archive.open(csv_names[0]) as fh:
+            return pd.read_csv(io.BytesIO(fh.read()))
+
+
+def _fetch_klines_from_binance_history(symbol, interval, start_ms, end_ms):
+    if interval != "5m":
+        raise RuntimeError(f"Binance history source only supports base 5m backtests, got {interval}")
+    start_dt = dt.datetime.fromtimestamp(int(start_ms) / 1000, tz=dt.timezone.utc)
+    end_dt = dt.datetime.fromtimestamp(int(end_ms) / 1000, tz=dt.timezone.utc)
+    frames = []
+    missing = []
+    downloaded = 0
+    daily_loaded = 0
+    for year, month in _iter_months(start_dt, end_dt):
+        path = _download_binance_history_zip(symbol, interval, year, month)
+        if path is None:
+            month_start = dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
+            month_end = _next_month(month_start)
+            day_start = max(start_dt, month_start)
+            day_end = min(end_dt, month_end)
+            for day_year, day_month, day in _iter_days(day_start, day_end):
+                day_path = _download_binance_history_zip(symbol, interval, day_year, day_month, day=day)
+                if day_path is None:
+                    missing.append(f"{day_year:04d}-{day_month:02d}-{day:02d}")
+                    continue
+                daily_loaded += 1
+                frame = _read_binance_history_zip(day_path)
+                if not frame.empty:
+                    frames.append(frame)
+            continue
+        downloaded += 1
+        frame = _read_binance_history_zip(path)
+        if not frame.empty:
+            frames.append(frame)
+
+    if not frames:
+        raise RuntimeError(f"No Binance historical monthly klines found; missing={','.join(missing[:6])}")
+
+    raw = pd.concat(frames, ignore_index=True)
+    required = ["open_time", "open", "high", "low", "close", "volume", "close_time"]
+    if not set(required).issubset(set(raw.columns)):
+        raise RuntimeError(f"Binance historical CSV columns invalid: {list(raw.columns)}")
+    raw = raw[(raw["open_time"] >= int(start_ms)) & (raw["open_time"] <= int(end_ms))]
+    if raw.empty:
+        raise RuntimeError("Binance historical monthly files loaded but no rows matched requested range")
+    raw = raw.drop_duplicates(subset=["open_time"]).sort_values("open_time")
+    raw["close_time"] = pd.to_datetime(raw["close_time"], unit="ms", utc=True)
+    for col in ["open", "high", "low", "close", "volume"]:
+        raw[col] = raw[col].astype(float)
+    frame = raw.set_index("close_time")[["open", "high", "low", "close", "volume"]]
+    source_parts = []
+    if downloaded:
+        source_parts.append(f"{downloaded}m")
+    if daily_loaded:
+        source_parts.append(f"{daily_loaded}d")
+    frame.attrs["kline_source"] = f"binance_history_um:{'+'.join(source_parts) or 'cached'}"
+    if missing:
+        frame.attrs["kline_missing_months"] = missing
+    return frame
 
 
 def _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=1500):
@@ -113,15 +268,47 @@ def _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=1
     return frame
 
 
-def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500):
-    try:
-        frame = _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=limit)
-    except Exception as exc:
-        raise SystemExit(f"No klines returned from TradingView market data source: {exc}") from exc
-    if not frame.empty:
-        print(f"📈 回測K線來源: {frame.attrs.get('kline_source', 'unknown')}")
-        return frame
-    raise SystemExit("No klines returned from TradingView market data source")
+def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500, data_source="auto"):
+    source = str(data_source or "auto").strip().lower()
+    errors = []
+    if source in {"auto", "binance-history"}:
+        try:
+            frame = _fetch_klines_from_binance_history(symbol, interval, start_ms, end_ms)
+            if not frame.empty:
+                if source == "auto":
+                    last_close_ms = int(frame.index.max().timestamp() * 1000)
+                    interval_ms = INTERVAL_MS.get(interval, 5 * 60 * 1000)
+                    if end_ms - last_close_ms > interval_ms:
+                        try:
+                            tail = _fetch_klines_from_market_source(
+                                symbol,
+                                interval,
+                                last_close_ms + 1,
+                                end_ms,
+                                limit=max(12, int((end_ms - last_close_ms) // interval_ms) + 8),
+                            )
+                            if not tail.empty:
+                                frame = pd.concat([frame, tail]).sort_index()
+                                frame = frame[~frame.index.duplicated(keep="last")]
+                                frame.attrs["kline_source"] = f"{frame.attrs.get('kline_source', 'binance_history')}+{tail.attrs.get('kline_source', 'market_tail')}"
+                        except Exception as tail_exc:
+                            print(f"⚠️ Binance歷史資料尾段未補齊，TradingView尾段失敗: {tail_exc}")
+                print(f"📈 回測K線來源: {frame.attrs.get('kline_source', 'binance_history')}")
+                return frame
+        except Exception as exc:
+            errors.append(f"binance-history: {exc}")
+            if source == "binance-history":
+                raise SystemExit(f"No klines returned from Binance historical data source: {exc}") from exc
+    if source in {"auto", "tradingview"}:
+        try:
+            frame = _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=limit)
+        except Exception as exc:
+            errors.append(f"tradingview: {exc}")
+            raise SystemExit(f"No klines returned from market data sources: {'; '.join(errors)}") from exc
+        if not frame.empty:
+            print(f"📈 回測K線來源: {frame.attrs.get('kline_source', 'unknown')}")
+            return frame
+    raise SystemExit(f"No klines returned from market data sources: {'; '.join(errors)}")
 
 
 def resample_ohlcv(frame, rule):
@@ -709,12 +896,13 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
     }, learning_sample
 
 
-def run_backtest(symbol, start_dt, end_dt, warmup_bars):
+def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
     base_5m = fetch_futures_klines(
         symbol=symbol,
         interval="5m",
         start_ms=int(start_dt.timestamp() * 1000),
         end_ms=int(end_dt.timestamp() * 1000),
+        data_source=data_source,
     )
     if base_5m.empty:
         raise SystemExit("No klines returned from TradingView market data")
@@ -889,7 +1077,13 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars):
 def main():
     args = _parse_args()
     start_dt, end_dt = _resolve_timerange(args)
-    base_5m, trades, summary, learning_samples = run_backtest(args.symbol, start_dt, end_dt, args.warmup_bars)
+    base_5m, trades, summary, learning_samples = run_backtest(
+        args.symbol,
+        start_dt,
+        end_dt,
+        args.warmup_bars,
+        data_source=args.data_source,
+    )
 
     print("Backtest Summary")
     print(f"Symbol: {summary['symbol']}")
