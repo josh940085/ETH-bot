@@ -120,6 +120,9 @@ LATEST_STATE = {"open": False, "ts": 0}
 STATE_LOCK = asyncio.Lock()
 CLIENTS = set()
 CLIENTS_LOCK = asyncio.Lock()
+MARKET_DATA_CACHE = {}
+MARKET_DATA_LOCK = asyncio.Lock()
+MARKET_DATA_TTL_SEC = max(3.0, _safe_float_env("POSITION_PANEL_MARKET_DATA_TTL_SEC", 8.0))
 PANEL_ERROR_LOG_ENABLED = _safe_bool_env("POSITION_PANEL_ERROR_LOG_ENABLED", True)
 APP_VERSION_RE = re.compile(r'const\s+APP_VERSION\s*=\s*["\']([^"\']*)["\'];')
 
@@ -245,6 +248,43 @@ def _extract_panel_session_http(request: Request) -> str:
 
 def _extract_panel_session_ws(websocket: WebSocket) -> str:
     return str(websocket.query_params.get("panel_session", "") or "").strip()
+
+
+def _normalize_market_symbol(symbol: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9]", "", str(symbol or "ETHUSDT")).upper()
+    return clean if clean else "ETHUSDT"
+
+
+def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
+    os.environ.setdefault("ETH_BOT_DISABLE_LIVE", "1")
+    import eth  # noqa: WPS433 - lazy import keeps panel startup light and disables live side effects.
+
+    rows, source = eth._fetch_market_kline_rows(
+        symbol,
+        interval,
+        limit=limit,
+        timeout=10,
+        prefix="面板TradingView K線",
+    )
+    interval_ms = getattr(eth, "KLINE_INTERVAL_MS", {}).get(interval, 60 * 1000)
+    parsed = []
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            open_ms = int(float(row[0]))
+            parsed.append(
+                {
+                    "ts": open_ms,
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": float(row[5]) if len(row) > 5 else 0.0,
+                    "close_ts": open_ms + int(interval_ms) - 1,
+                }
+            )
+        except Exception:
+            continue
+    return parsed, str(source or "tradingview")
 
 
 def _parse_telegram_init_data(init_data: str) -> dict:
@@ -474,6 +514,47 @@ async def local_backtest_summary():
 @app.get("/healthz")
 async def healthz():
     return {"ok": True, "ts": int(time.time())}
+
+
+@app.get("/api/market/klines")
+async def get_market_klines(request: Request):
+    if not _viewer_authorized_http(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    symbol = _normalize_market_symbol(request.query_params.get("symbol", "ETHUSDT"))
+    interval = str(request.query_params.get("interval", "1m") or "1m").strip()
+    if interval not in {"1m", "4h"}:
+        raise HTTPException(status_code=400, detail="unsupported interval")
+    try:
+        limit = max(1, min(500, int(str(request.query_params.get("limit", "32")).strip())))
+    except Exception:
+        limit = 32
+
+    cache_key = f"{symbol}:{interval}:{limit}"
+    now_ts = time.time()
+    async with MARKET_DATA_LOCK:
+        cached = MARKET_DATA_CACHE.get(cache_key)
+        if cached and now_ts - float(cached.get("ts", 0.0)) < MARKET_DATA_TTL_SEC:
+            return JSONResponse(dict(cached.get("payload") or {}))
+
+    try:
+        rows, source = await asyncio.to_thread(_fetch_market_klines_sync, symbol, interval, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"market data unavailable: {exc}") from exc
+    if not rows:
+        raise HTTPException(status_code=502, detail="market data empty")
+
+    payload = {
+        "ok": True,
+        "symbol": symbol,
+        "interval": interval,
+        "source": source,
+        "rows": rows,
+        "ts": int(now_ts),
+    }
+    async with MARKET_DATA_LOCK:
+        MARKET_DATA_CACHE[cache_key] = {"ts": now_ts, "payload": payload}
+    return JSONResponse(payload)
 
 
 @app.get("/api/panel/state")

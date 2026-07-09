@@ -1201,45 +1201,58 @@
     applyPositionPayload(data, picked.base);
   }
 
+  function buildMarketDataUrl(interval, limit) {
+    const base = REMOTE_STATE_URL || (location.protocol.startsWith("http") ? location.href : "");
+    if (!base) return "";
+    let url;
+    try {
+      url = new URL(base, location.href);
+    } catch (_) {
+      return "";
+    }
+    url.pathname = "/api/market/klines";
+    url.search = "";
+    url.searchParams.set("symbol", PAIR);
+    url.searchParams.set("interval", interval);
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("t", String(Date.now()));
+    return url.toString();
+  }
+
+  async function fetchPanelMarketKlines(interval, limit, timeoutMs) {
+    const url = buildMarketDataUrl(interval, limit);
+    if (!url) return [];
+    const data = await fetchJsonWithTimeout(url, timeoutMs, {
+      headers: buildViewerAuthHeaders(),
+    });
+    const rows = data && Array.isArray(data.rows) ? data.rows : [];
+    return rows
+      .map((row) => ({
+        ts: Number(row && row.ts),
+        open: Number(row && row.open),
+        high: Number(row && row.high),
+        low: Number(row && row.low),
+        close: Number(row && row.close),
+        volume: Number((row && row.volume) || 0),
+      }))
+      .filter((row) => Number.isFinite(row.ts) && Number.isFinite(row.open) && Number.isFinite(row.high) && Number.isFinite(row.low) && Number.isFinite(row.close));
+  }
+
   // ── 取得即時價格 ──
   async function fetchPrice() {
-    const [lastTrade, premiumIndex] = await Promise.all([
-      fetchJsonWithTimeout(
-        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${PAIR}`,
-        PRICE_FETCH_TIMEOUT_MS
-      ),
-      fetchJsonWithTimeout(
-        `https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${PAIR}`,
-        PRICE_FETCH_TIMEOUT_MS
-      ),
-    ]);
-    const px = parseFloat((lastTrade && lastTrade.price) || 0);
+    const rows = await fetchPanelMarketKlines("1m", 2, PRICE_FETCH_TIMEOUT_MS);
+    const latest = rows[rows.length - 1] || {};
+    const px = Number(latest.close);
     if (Number.isFinite(px) && px > 0) {
       livePrice = px;
-    }
-    const markPx = parseFloat((premiumIndex && premiumIndex.markPrice) || 0);
-    if (Number.isFinite(markPx) && markPx > 0) {
-      liveMarkPrice = markPx;
+      liveMarkPrice = px;
     }
   }
 
   async function fetchFourHourKlines() {
     const now = Date.now();
     if (KLINES_4H.length && now - KLINES_4H_FETCH_TS < KLINE_REFRESH_INTERVAL_MS) return;
-    const data = await fetchJsonWithTimeout(
-      `https://fapi.binance.com/fapi/v1/klines?symbol=${PAIR}&interval=4h&limit=32`,
-      KLINE_FETCH_TIMEOUT_MS
-    );
-    if (!Array.isArray(data)) return;
-    const parsed = data
-      .map((row) => ({
-        ts: Number(row && row[0]),
-        open: Number(row && row[1]),
-        high: Number(row && row[2]),
-        low: Number(row && row[3]),
-        close: Number(row && row[4]),
-      }))
-      .filter((row) => Number.isFinite(row.open) && Number.isFinite(row.high) && Number.isFinite(row.low) && Number.isFinite(row.close));
+    const parsed = await fetchPanelMarketKlines("4h", 32, KLINE_FETCH_TIMEOUT_MS);
     if (!parsed.length) return;
     KLINES_4H = parsed;
     KLINES_4H_FETCH_TS = now;
