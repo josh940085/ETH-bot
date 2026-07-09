@@ -755,6 +755,9 @@ def _perform_manual_close():
     active_trade["position_qty"] = 0.0
     active_trade["add_count"] = 0
     active_trade["reduce_count"] = 0
+    active_trade["quick_reduce_count"] = 0
+    active_trade["quick_reduce_ts"] = 0.0
+    active_trade["daily_min_size_enforce_ts"] = 0.0
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
     active_trade["time_horizon"] = "short"
@@ -3485,13 +3488,25 @@ def fetch_macro_rss_news():
 
     aggregated = []
     for feed_url, source_name in feeds:
+        now_feed = time.time()
+        cooldown_key = f"rss_cooldown_until_{source_name.lower()}"
+        cooldown_until = _safe_float(getattr(fetch_macro_rss_news, cooldown_key, 0.0), 0.0)
+        if cooldown_until > now_feed:
+            continue
         try:
             aggregated.extend(fetch_rss_news(feed_url, source_name))
+            setattr(fetch_macro_rss_news, f"rss_fail_count_{source_name.lower()}", 0)
         except Exception as e:
-            now_err = time.time()
+            now_err = now_feed
             key = f"rss_err_{source_name.lower()}"
+            fail_key = f"rss_fail_count_{source_name.lower()}"
+            fail_count = _safe_int(getattr(fetch_macro_rss_news, fail_key, 0), 0) + 1
+            setattr(fetch_macro_rss_news, fail_key, fail_count)
+            if fail_count >= max(2, _safe_int(os.getenv("RSS_SOURCE_COOLDOWN_FAILS", 3), 3)):
+                cooldown_sec = max(300, _safe_int(os.getenv("RSS_SOURCE_FAIL_COOLDOWN_SEC", 3600), 3600))
+                setattr(fetch_macro_rss_news, cooldown_key, now_err + cooldown_sec)
             last_err = getattr(fetch_macro_rss_news, key, 0)
-            if now_err - last_err > 60:
+            if now_err - last_err > 300:
                 print(f"⚠️ {source_name} RSS error:", repr(e))
                 setattr(fetch_macro_rss_news, key, now_err)
 
@@ -5126,6 +5141,9 @@ def sync_active_trade_from_binance(send_notice=False):
     active_trade["min_size"] = min_size
     active_trade["add_count"] = max(0, _safe_int(active_trade.get("add_count"), 0)) if preserve_local_state else 0
     active_trade["reduce_count"] = max(0, _safe_int(active_trade.get("reduce_count"), 0)) if preserve_local_state else 0
+    active_trade["quick_reduce_count"] = max(0, _safe_int(active_trade.get("quick_reduce_count"), 0)) if preserve_local_state else 0
+    active_trade["quick_reduce_ts"] = _safe_float(active_trade.get("quick_reduce_ts"), 0.0) if preserve_local_state else 0.0
+    active_trade["daily_min_size_enforce_ts"] = _safe_float(active_trade.get("daily_min_size_enforce_ts"), 0.0) if preserve_local_state else 0.0
     active_trade["last_adjust_ts"] = _safe_float(active_trade.get("last_adjust_ts"), 0.0) if preserve_local_state else 0.0
     active_trade["scale_add_paused"] = bool(active_trade.get("scale_add_paused", False)) if preserve_local_state else False
     active_trade["scale_add_pause_reason"] = str(active_trade.get("scale_add_pause_reason") or "") if preserve_local_state else ""
@@ -5515,7 +5533,7 @@ def _mark_daily_trade_opened(source):
     POSITION_PANEL_STATE["daily_trade_opened_ts"] = int(time.time())
 
 
-def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend):
+def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro_bias=0.0, news_bias=0.0, breakout=0, volume_spike=False):
     """Create the small end-of-day trade from current structure, never a blind side."""
     entry = max(0.0, _safe_float(price, 0.0))
     direction = "long" if (_safe_int(htf, 0) + _safe_int(mid_trend, 0)) >= 0 else "short"
@@ -5534,8 +5552,31 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend):
         sl = entry + risk
         tp = entry - risk * 1.5
         final = "⏰ 每日保底做空"
-    size = min(0.10, max(0.05, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.08), 0.08)))
-    return {"direction": direction, "final": final, "sl": sl, "tp": tp, "position_size": size}
+    base_size = min(
+        0.08,
+        max(0.03, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05)),
+    )
+    sign = 1 if direction == "long" else -1
+    macro_score = _safe_float(macro_bias, 0.0) + _safe_float(news_bias, 0.0) * 0.25
+    against_macro = macro_score * sign < -0.25
+    local_confirmed = (_safe_int(breakout, 0) == sign) or bool(volume_spike)
+    if against_macro:
+        base_size = min(
+            base_size,
+            max(0.02, _safe_float(os.getenv("DAILY_MIN_TRADE_AGAINST_MACRO_SIZE_RATIO", 0.025), 0.025)),
+        )
+        if not local_confirmed:
+            final = f"觀望（每日最低單逆宏觀，等待5m/15m確認）"
+            base_size = 0.0
+    return {
+        "direction": direction,
+        "final": final,
+        "sl": sl,
+        "tp": tp,
+        "position_size": base_size,
+        "against_macro": against_macro,
+        "local_confirmed": local_confirmed,
+    }
 
 
 def _recent_tp_sl_stats(limit=5):
@@ -5765,6 +5806,9 @@ def sync_position_panel(current_price=None):
             "scale_reduce_room": scale_reduce_room,
             "add_count": _safe_int(active_trade.get("add_count"), 0),
             "reduce_count": _safe_int(active_trade.get("reduce_count"), 0),
+            "quick_reduce_count": _safe_int(active_trade.get("quick_reduce_count"), 0),
+            "quick_reduce_ts": _safe_int(active_trade.get("quick_reduce_ts"), 0),
+            "daily_min_size_enforce_ts": _safe_int(active_trade.get("daily_min_size_enforce_ts"), 0),
             "last_adjust_ts": _safe_int(active_trade.get("last_adjust_ts"), 0),
             "scale_add_paused": bool(active_trade.get("scale_add_paused", False)),
             "scale_add_pause_reason": str(active_trade.get("scale_add_pause_reason") or ""),
@@ -5830,6 +5874,9 @@ def sync_position_panel(current_price=None):
             "scale_reduce_room": 0.0,
             "add_count": 0,
             "reduce_count": 0,
+            "quick_reduce_count": 0,
+            "quick_reduce_ts": 0,
+            "daily_min_size_enforce_ts": 0,
             "last_adjust_ts": 0,
             "scale_add_paused": False,
             "scale_add_pause_reason": "",
@@ -5994,6 +6041,66 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
         return True, f"補倉實單成功 qty={final_qty:.3f}"
     except Exception as e:
         return False, f"{('減倉' if reduce else '補倉')}實單失敗: {e}"
+
+
+def _enforce_daily_min_trade_size(planned_size, current_price):
+    if not (_get_follow_mode_enabled() and _is_real_copy_enabled()):
+        return ""
+    if not active_trade.get("open"):
+        return ""
+    direction = str(active_trade.get("direction") or "")
+    actual_size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+    target_size = max(
+        0.0,
+        min(
+            0.10,
+            _safe_float(
+                planned_size,
+                _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05),
+            ),
+        ),
+    )
+    max_actual = min(
+        0.12,
+        max(
+            target_size + 0.025,
+            target_size * max(1.15, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_TOLERANCE_MULT", 1.35), 1.35)),
+        ),
+    )
+    if direction not in {"long", "short"} or actual_size <= max_actual:
+        return ""
+    now_ts = time.time()
+    last_ts = _safe_float(active_trade.get("daily_min_size_enforce_ts"), 0.0)
+    cooldown = max(60.0, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_ENFORCE_COOLDOWN_SEC", 300), 300))
+    if now_ts - last_ts < cooldown:
+        return ""
+    active_trade["daily_min_size_enforce_ts"] = now_ts
+    reduce_delta = actual_size - target_size
+    if reduce_delta <= 0:
+        return ""
+    ok, msg = _execute_copy_trade_scale(
+        direction,
+        reduce_delta,
+        reduce=True,
+        mark_price=current_price,
+    )
+    if not ok:
+        warning = (
+            f"⚠️ 每日最低單倉位校正失敗\n"
+            f"計畫: {target_size*100:.1f}% | 實際: {actual_size*100:.1f}%\n"
+            f"{msg}"
+        )
+        send_private_telegram(warning, priority=True)
+        return warning
+    sync_active_trade_from_binance(send_notice=False)
+    corrected = _safe_float(active_trade.get("size"), target_size)
+    notice = (
+        f"🧯 每日最低單倉位已校正\n"
+        f"計畫: {target_size*100:.1f}% | 原實際: {actual_size*100:.1f}% | 校正後: {corrected*100:.1f}%\n"
+        f"{msg}"
+    )
+    send_telegram(notice, priority=True)
+    return notice
 
 
 def _estimate_trade_cost_rate_est(hold_hours=None) -> float:
@@ -6286,6 +6393,12 @@ def maybe_activate_auto_break_even(current_price, atr=None, now_ts=None):
 
     open_ts = _safe_float(active_trade.get("open_time"), 0.0)
     min_hold_sec = max(0.0, _safe_float_env_names(("AUTO_BREAK_EVEN_MIN_HOLD_SEC",), 600.0))
+    daily_min_position = str(POSITION_PANEL_STATE.get("daily_trade_source") or "") == "daily_minimum"
+    if daily_min_position:
+        min_hold_sec = min(
+            min_hold_sec,
+            max(60.0, _safe_float(os.getenv("DAILY_MIN_BREAK_EVEN_MIN_HOLD_SEC", 120), 120)),
+        )
     if open_ts > 0 and (resolved_now_ts - open_ts) < min_hold_sec:
         return False
     hold_hours = max(0.0, (resolved_now_ts - open_ts) / 3600.0) if open_ts > 0 else 0.0
@@ -6322,6 +6435,11 @@ def maybe_activate_auto_break_even(current_price, atr=None, now_ts=None):
         _safe_float_env_names(("AUTO_BREAK_EVEN_MIN_PROFIT_RATE",), 0.0065),
     )
     min_gap_atr_factor = max(0.25, _safe_float_env_names(("AUTO_BREAK_EVEN_MIN_GAP_ATR_FACTOR",), 0.35))
+    if daily_min_position:
+        trigger_r = min(trigger_r, max(0.45, _safe_float(os.getenv("DAILY_MIN_BREAK_EVEN_TRIGGER_R", 0.65), 0.65)))
+        trigger_tp_progress = min(trigger_tp_progress, max(0.25, _safe_float(os.getenv("DAILY_MIN_BREAK_EVEN_TP_PROGRESS", 0.32), 0.32)))
+        min_profit_rate = min(min_profit_rate, max(buffer_rate + 0.0005, _safe_float(os.getenv("DAILY_MIN_BREAK_EVEN_MIN_PROFIT_RATE", 0.0022), 0.0022)))
+        min_gap_atr_factor = min(min_gap_atr_factor, max(0.12, _safe_float(os.getenv("DAILY_MIN_BREAK_EVEN_MIN_GAP_ATR_FACTOR", 0.18), 0.18)))
 
     favorable_move_rate = (px - entry) / entry if direction == "long" else (entry - px) / entry
     gap_abs = (px - target) if direction == "long" else (target - px)
@@ -6377,6 +6495,71 @@ def maybe_activate_auto_break_even(current_price, atr=None, now_ts=None):
         f"SL: {old_sl:.2f} → {new_sl:.2f}\n"
         f"觸發條件: R={earned_r_multiple:.2f} | TP進度={profit_progress*100:.1f}% | 趨勢分數={trend_score:.2f}"
         f"{sync_msg}",
+        priority=True,
+    )
+    return True
+
+
+def maybe_take_quick_profit_reduce(current_price, atr=None, now_ts=None):
+    if not _is_truthy(os.getenv("QUICK_PROFIT_REDUCE_ENABLED", "1")):
+        return False
+    if not active_trade.get("open"):
+        return False
+    direction = str(active_trade.get("direction") or "")
+    entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+    size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+    min_size = max(0.0, _safe_float(active_trade.get("min_size"), 0.0))
+    progress = _calc_scaling_progress(direction, entry, current_price, active_trade.get("tp"), active_trade.get("sl"))
+    if direction not in {"long", "short"} or not progress or size <= min_size + 1e-9:
+        return False
+
+    now_ts = _safe_float(now_ts, 0.0) or time.time()
+    last_ts = _safe_float(active_trade.get("quick_reduce_ts"), 0.0)
+    cooldown = max(180.0, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_COOLDOWN_SEC", 900), 900))
+    if now_ts - last_ts < cooldown:
+        return False
+    max_count = max(0, _safe_int(os.getenv("QUICK_PROFIT_REDUCE_MAX_COUNT", 1), 1))
+    current_count = max(0, _safe_int(active_trade.get("quick_reduce_count"), 0))
+    if current_count >= max_count:
+        return False
+
+    earned_r = _safe_float(progress.get("earned_r_multiple"), 0.0)
+    profit_progress = _safe_float(progress.get("profit_progress"), 0.0)
+    daily_min_position = str(POSITION_PANEL_STATE.get("daily_trade_source") or "") == "daily_minimum"
+    trigger_r = max(0.25, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_TRIGGER_R", 0.65), 0.65))
+    trigger_progress = max(0.15, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_TP_PROGRESS", 0.35), 0.35))
+    if daily_min_position:
+        trigger_r = min(trigger_r, max(0.20, _safe_float(os.getenv("DAILY_MIN_QUICK_REDUCE_TRIGGER_R", 0.35), 0.35)))
+        trigger_progress = min(trigger_progress, max(0.12, _safe_float(os.getenv("DAILY_MIN_QUICK_REDUCE_TP_PROGRESS", 0.22), 0.22)))
+    if earned_r < trigger_r and profit_progress < trigger_progress:
+        return False
+
+    step = max(0.02, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_STEP", 0.06), 0.06))
+    delta = min(step, size - min_size)
+    if delta <= 0:
+        return False
+
+    real_copy_enabled = _get_follow_mode_enabled() and _is_real_copy_enabled()
+    if real_copy_enabled:
+        ok, scale_msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
+        if not ok:
+            send_private_telegram(f"⚠️ 快速鎖利減倉略過：{scale_msg}", priority=True)
+            return False
+        sync_active_trade_from_binance(send_notice=False)
+    else:
+        active_trade["size"] = max(min_size, size - delta)
+        scale_msg = "虛擬減倉完成"
+
+    active_trade["quick_reduce_count"] = current_count + 1
+    active_trade["quick_reduce_ts"] = now_ts
+    active_trade["last_adjust_ts"] = now_ts
+    sync_position_panel(current_price)
+    send_telegram(
+        f"➖ 快速鎖利減倉\n"
+        f"方向: {direction} | 現價: {current_price:.2f}\n"
+        f"R={earned_r:.2f} | TP進度={profit_progress*100:.1f}%\n"
+        f"減倉目標: -{delta*100:.1f}% | 目前倉位: {_safe_float(active_trade.get('size'), 0.0)*100:.1f}%\n"
+        f"{scale_msg}",
         priority=True,
     )
     return True
@@ -7086,6 +7269,9 @@ active_trade = {
     "min_size": 0.15,
     "add_count": 0,
     "reduce_count": 0,
+    "quick_reduce_count": 0,
+    "quick_reduce_ts": 0.0,
+    "daily_min_size_enforce_ts": 0.0,
     "last_adjust_ts": 0.0,
     "scale_add_paused": False,
     "scale_add_pause_reason": "",
@@ -7111,6 +7297,9 @@ def _reset_active_trade_state():
     active_trade["position_qty"] = 0.0
     active_trade["add_count"] = 0
     active_trade["reduce_count"] = 0
+    active_trade["quick_reduce_count"] = 0
+    active_trade["quick_reduce_ts"] = 0.0
+    active_trade["daily_min_size_enforce_ts"] = 0.0
     active_trade["last_adjust_ts"] = 0.0
     active_trade["scale_add_paused"] = False
     active_trade["scale_add_pause_reason"] = ""
@@ -7166,6 +7355,9 @@ def restore_active_trade_from_panel():
     active_trade["min_size"] = min_size
     active_trade["add_count"] = max(0, _safe_int(raw.get("add_count"), 0))
     active_trade["reduce_count"] = max(0, _safe_int(raw.get("reduce_count"), 0))
+    active_trade["quick_reduce_count"] = max(0, _safe_int(raw.get("quick_reduce_count"), 0))
+    active_trade["quick_reduce_ts"] = _safe_float(raw.get("quick_reduce_ts"), 0.0)
+    active_trade["daily_min_size_enforce_ts"] = _safe_float(raw.get("daily_min_size_enforce_ts"), 0.0)
     active_trade["last_adjust_ts"] = _safe_float(raw.get("last_adjust_ts"), 0.0)
     active_trade["scale_add_paused"] = bool(raw.get("scale_add_paused", False))
     active_trade["scale_add_pause_reason"] = str(raw.get("scale_add_pause_reason") or "")
@@ -11149,6 +11341,9 @@ def run_bot():
                         active_trade["position_qty"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["quick_reduce_count"] = 0
+                        active_trade["quick_reduce_ts"] = 0.0
+                        active_trade["daily_min_size_enforce_ts"] = 0.0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
                         active_trade["time_horizon"] = "short"
@@ -11181,6 +11376,9 @@ def run_bot():
                         active_trade["position_qty"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["quick_reduce_count"] = 0
+                        active_trade["quick_reduce_ts"] = 0.0
+                        active_trade["daily_min_size_enforce_ts"] = 0.0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
                         active_trade["time_horizon"] = "short"
@@ -11225,6 +11423,9 @@ def run_bot():
                         active_trade["position_qty"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["quick_reduce_count"] = 0
+                        active_trade["quick_reduce_ts"] = 0.0
+                        active_trade["daily_min_size_enforce_ts"] = 0.0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
                         active_trade["time_horizon"] = "short"
@@ -11257,6 +11458,9 @@ def run_bot():
                         active_trade["position_qty"] = 0.0
                         active_trade["add_count"] = 0
                         active_trade["reduce_count"] = 0
+                        active_trade["quick_reduce_count"] = 0
+                        active_trade["quick_reduce_ts"] = 0.0
+                        active_trade["daily_min_size_enforce_ts"] = 0.0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
                         active_trade["time_horizon"] = "short"
@@ -11272,8 +11476,14 @@ def run_bot():
 
             # 命中止盈止損前提下，持倉中允許補倉/減倉
             if active_trade["open"]:
+                if str(POSITION_PANEL_STATE.get("daily_trade_source") or "") == "daily_minimum":
+                    _enforce_daily_min_trade_size(
+                        _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05),
+                        current,
+                    )
+                quick_reduced = maybe_take_quick_profit_reduce(current, atr=atr)
                 be_triggered = maybe_activate_auto_break_even(current, atr=atr)
-                if not be_triggered:
+                if not quick_reduced and not be_triggered:
                     manage_position_scaling(current, atr=atr)
 
             # ===== 持倉超過4小時，只縮減止盈範圍 =====
@@ -11361,12 +11571,26 @@ def run_bot():
             learned_entry_logic = decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {}
             entry = price
             daily_min_trade = _daily_min_trade_due()
+            daily_plan = {}
             if daily_min_trade:
-                daily_plan = _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend)
+                daily_plan = _build_daily_min_trade_plan(
+                    price,
+                    atr,
+                    df_15m,
+                    df_5m,
+                    htf,
+                    mid_trend,
+                    macro_bias=macro_bias,
+                    news_bias=news_bias,
+                    breakout=breakout,
+                    volume_spike=bool(decision.get("volume_spike")),
+                )
                 final = daily_plan["final"]
                 sl = daily_plan["sl"]
                 tp = daily_plan["tp"]
                 position_size = daily_plan["position_size"]
+                if final.startswith("觀望"):
+                    daily_min_trade = False
 
             if not daily_min_trade:
                 sl_guard_reason = _recent_sl_guard_reason(
@@ -11513,7 +11737,10 @@ def run_bot():
                 final = td_entry_block_reason
                 reason.append("九轉反向開倉濾網（等待其他確認）")
             elif daily_min_trade:
-                reason.append("每日最低一單：22:30 後小倉位結構單")
+                daily_note = "每日最低一單：22:30 後小倉位結構單"
+                if isinstance(daily_plan, dict) and daily_plan.get("against_macro"):
+                    daily_note += "（逆宏觀已縮小倉位）"
+                reason.append(daily_note)
             elif td_setup_15m["up_9"]:
                 reason.append(f"15m上漲九轉 Setup {td_setup_15m['up_count']}（封鎖新多單）")
             elif td_setup_15m["down_9"]:
@@ -11691,12 +11918,18 @@ def run_bot():
                 if base_size <= 0:
                     base_size = 0.2
                 base_size = _cap_initial_position_size(base_size)
+                planned_open_size = base_size
                 active_trade["size"] = float(min(1.0, max(base_size, 0.1)))
+                if daily_min_trade:
+                    active_trade["size"] = float(max(base_size, 0.01))
                 max_size, min_size = _derive_scaling_bounds(active_trade["size"])
                 active_trade["max_size"] = max_size
                 active_trade["min_size"] = min_size
                 active_trade["add_count"] = 0
                 active_trade["reduce_count"] = 0
+                active_trade["quick_reduce_count"] = 0
+                active_trade["quick_reduce_ts"] = 0.0
+                active_trade["daily_min_size_enforce_ts"] = 0.0
                 active_trade["last_adjust_ts"] = 0.0
                 active_trade["scale_add_paused"] = False
                 active_trade["scale_add_pause_reason"] = ""
@@ -11734,6 +11967,10 @@ def run_bot():
                         active_trade["open"] = True
                         _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
                         sync_active_trade_from_binance(send_notice=False)
+                        if daily_min_trade:
+                            correction_msg = _enforce_daily_min_trade_size(planned_open_size, price)
+                            if correction_msg:
+                                msg += f"\n\n{correction_msg}"
                         mlx_episode_id = record_actual_trade_open(
                             direction=direction,
                             entry_price=_safe_float(active_trade.get("avg_entry", active_trade.get("entry")), entry),
