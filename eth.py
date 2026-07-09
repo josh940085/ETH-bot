@@ -5165,6 +5165,8 @@ def sync_active_trade_from_binance(send_notice=False):
     active_trade["scale_add_paused"] = bool(active_trade.get("scale_add_paused", False)) if preserve_local_state else False
     active_trade["scale_add_pause_reason"] = str(active_trade.get("scale_add_pause_reason") or "") if preserve_local_state else ""
     active_trade["scale_add_pause_ts"] = _safe_float(active_trade.get("scale_add_pause_ts"), 0.0) if preserve_local_state else 0.0
+    active_trade["last_scale_skip_notify_key"] = str(active_trade.get("last_scale_skip_notify_key") or "") if preserve_local_state else ""
+    active_trade["last_scale_skip_notify_ts"] = _safe_float(active_trade.get("last_scale_skip_notify_ts"), 0.0) if preserve_local_state else 0.0
     prev_open_time = _safe_float(active_trade.get("open_time"), 0.0)
     active_trade["open_time"] = prev_open_time if preserve_local_state and prev_open_time > 0 else time.time()
     active_trade["tp_sl_adjusted_4h"] = bool(active_trade.get("tp_sl_adjusted_4h", False)) if preserve_local_state else False
@@ -6601,7 +6603,14 @@ def maybe_take_quick_profit_reduce(current_price, atr=None, now_ts=None):
                 active_trade["quick_reduce_ts"] = now_ts
                 active_trade["last_adjust_ts"] = now_ts
                 sync_position_panel(current_price)
-            send_private_telegram(f"⚠️ 快速鎖利減倉略過：{scale_msg}", priority=True)
+                print(f"🔕 快速鎖利減倉略過但不推 Telegram: {scale_msg}")
+                return False
+            _notify_scale_skip(
+                f"⚠️ 快速鎖利減倉略過：{scale_msg}",
+                private=True,
+                key=f"quick_reduce_order:{scale_msg}",
+                now_ts=now_ts,
+            )
             return False
         sync_active_trade_from_binance(send_notice=False)
     else:
@@ -6827,6 +6836,26 @@ def _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing
     }
 
 
+def _notify_scale_skip(message, private=False, priority=True, key=None, now_ts=None):
+    """Limit repeated scale skip alerts while preserving the first visible warning."""
+    now_ts = _safe_float(now_ts, 0.0) or time.time()
+    cooldown = max(300.0, _safe_float(os.getenv("SCALE_SKIP_NOTIFY_COOLDOWN_SEC", "3600"), 3600))
+    key = str(key or message or "scale_skip")
+    last_key = str(active_trade.get("last_scale_skip_notify_key") or "")
+    last_ts = _safe_float(active_trade.get("last_scale_skip_notify_ts"), 0.0)
+    if key == last_key and now_ts - last_ts < cooldown:
+        print(f"🔕 調倉略過通知已限頻: {message}")
+        return False
+
+    active_trade["last_scale_skip_notify_key"] = key
+    active_trade["last_scale_skip_notify_ts"] = now_ts
+    if private:
+        send_private_telegram(message, priority=priority)
+    else:
+        send_telegram(message, priority=priority)
+    return True
+
+
 def manage_position_scaling(current_price, atr=None, now_ts=None):
     """持倉中的補倉/減倉管理（虛擬倉位）。"""
     if not _is_truthy(os.getenv("TRADE_AUTO_SCALE_ENABLED", "0")):
@@ -6927,12 +6956,14 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                         f" | reward={_safe_float(scale_metrics.get('reward_rate'), 0.0)*100:.3f}%"
                         f" | risk={_safe_float(scale_metrics.get('risk_rate'), 0.0)*100:.3f}%"
                         f" | RR={_safe_float(scale_metrics.get('rr'), 0.0):.2f}"
-                    )
+                )
                 note = f"⚠️ 補倉略過（成本檢查）: {scale_reason}{detail}"
-                if real_copy_enabled:
-                    send_private_telegram(note, priority=True)
-                else:
-                    send_telegram(note, priority=True)
+                _notify_scale_skip(
+                    note,
+                    private=real_copy_enabled,
+                    key=f"add_cost:{scale_reason}",
+                    now_ts=now_ts,
+                )
                 return
 
             if real_copy_enabled:
@@ -6940,7 +6971,12 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                 if not ok:
                     if active_trade.get("scale_add_paused"):
                         sync_position_panel(current_price)
-                    send_private_telegram(f"⚠️ 補倉略過：{scale_msg}", priority=True)
+                    _notify_scale_skip(
+                        f"⚠️ 補倉略過：{scale_msg}",
+                        private=True,
+                        key=f"add_order:{scale_msg}",
+                        now_ts=now_ts,
+                    )
                     return
                 sync_active_trade_from_binance(send_notice=False)
                 active_trade["add_count"] = add_count + 1
@@ -7022,18 +7058,31 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
                         f" | 浮盈={_safe_float(scale_metrics.get('pnl_rate'), 0.0)*100:.3f}%"
                         f" | 出場成本={_safe_float(scale_metrics.get('one_way_exit_cost'), 0.0)*100:.3f}%"
                         f" | 淨鎖利={_safe_float(scale_metrics.get('lock_net_rate'), 0.0)*100:.3f}%"
-                    )
+                )
                 note = f"⚠️ 減倉略過（成本檢查）: {scale_reason}{detail}"
-                if real_copy_enabled:
-                    send_private_telegram(note, priority=True)
-                else:
-                    send_telegram(note, priority=True)
+                _notify_scale_skip(
+                    note,
+                    private=real_copy_enabled,
+                    key=f"reduce_cost:{scale_reason}",
+                    now_ts=now_ts,
+                )
                 return
 
             if real_copy_enabled:
                 ok, scale_msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
                 if not ok:
-                    send_private_telegram(f"⚠️ 減倉略過：{scale_msg}", priority=True)
+                    if "下單量低於最小值" in str(scale_msg):
+                        active_trade["reduce_count"] = max_reduce_count
+                        active_trade["last_adjust_ts"] = now_ts
+                        sync_position_panel(current_price)
+                        print(f"🔕 減倉略過但不推 Telegram: {scale_msg}")
+                        return
+                    _notify_scale_skip(
+                        f"⚠️ 減倉略過：{scale_msg}",
+                        private=True,
+                        key=f"reduce_order:{scale_msg}",
+                        now_ts=now_ts,
+                    )
                     return
                 sync_active_trade_from_binance(send_notice=False)
                 active_trade["reduce_count"] = reduce_count + 1
@@ -7334,6 +7383,8 @@ active_trade = {
     "scale_add_paused": False,
     "scale_add_pause_reason": "",
     "scale_add_pause_ts": 0.0,
+    "last_scale_skip_notify_key": "",
+    "last_scale_skip_notify_ts": 0.0,
     "open_time": None,
     "tp_sl_adjusted_4h": False,
     "time_horizon": "short",
@@ -7362,6 +7413,8 @@ def _reset_active_trade_state():
     active_trade["scale_add_paused"] = False
     active_trade["scale_add_pause_reason"] = ""
     active_trade["scale_add_pause_ts"] = 0.0
+    active_trade["last_scale_skip_notify_key"] = ""
+    active_trade["last_scale_skip_notify_ts"] = 0.0
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
     active_trade["time_horizon"] = "short"
@@ -12212,6 +12265,8 @@ def run_bot():
                 active_trade["scale_add_paused"] = False
                 active_trade["scale_add_pause_reason"] = ""
                 active_trade["scale_add_pause_ts"] = 0.0
+                active_trade["last_scale_skip_notify_key"] = ""
+                active_trade["last_scale_skip_notify_ts"] = 0.0
                 active_trade["open_time"] = time.time()
                 active_trade["tp_sl_adjusted_4h"] = False
                 active_trade["time_horizon"] = _infer_trade_time_horizon(
