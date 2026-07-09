@@ -416,11 +416,16 @@ def _iter_backtest_due_dates(start_dt, end_dt):
 
 def _summarize_trade_day_coverage(df, start_dt, end_dt):
     all_dates = list(_iter_backtest_due_dates(start_dt, end_dt))
+    due_date_set = set(all_dates)
     if df.empty or "opened_at" not in df.columns:
         trade_dates = set()
     else:
         opened = pd.to_datetime(df["opened_at"], errors="coerce", utc=True).dropna()
-        trade_dates = {ts.tz_convert(TAIPEI_TZ).date().isoformat() for ts in opened}
+        trade_dates = {
+            trade_date
+            for trade_date in (ts.tz_convert(TAIPEI_TZ).date().isoformat() for ts in opened)
+            if trade_date in due_date_set
+        }
     missing = [value for value in all_dates if value not in trade_dates]
     daily_min_trades = 0
     if not df.empty and "host_logic_mode" in df.columns:
