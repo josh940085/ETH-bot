@@ -6130,6 +6130,8 @@ def _enforce_daily_min_trade_size(planned_size, current_price):
         return warning
     sync_active_trade_from_binance(send_notice=False)
     corrected = _safe_float(active_trade.get("size"), target_size)
+    if corrected > max_actual:
+        active_trade["daily_min_size_enforce_ts"] = 0.0
     notice = (
         f"🧯 每日最低單倉位已校正\n"
         f"計畫: {target_size*100:.1f}% | 原實際: {actual_size*100:.1f}% | 校正後: {corrected*100:.1f}%\n"
