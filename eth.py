@@ -6581,6 +6581,15 @@ def maybe_take_quick_profit_reduce(current_price, atr=None, now_ts=None):
 
     real_copy_enabled = _get_follow_mode_enabled() and _is_real_copy_enabled()
     if real_copy_enabled:
+        min_delta_ratio = max(0.01, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_MIN_DELTA_RATIO", 0.02), 0.02))
+        if delta < min_delta_ratio:
+            active_trade["quick_reduce_count"] = max_count
+            active_trade["quick_reduce_ts"] = now_ts
+            active_trade["last_adjust_ts"] = now_ts
+            sync_position_panel(current_price)
+            return False
+
+    if real_copy_enabled:
         ok, scale_msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
         if not ok:
             if "下單量低於最小值" in str(scale_msg):
