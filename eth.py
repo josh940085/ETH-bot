@@ -6107,7 +6107,7 @@ def _enforce_daily_min_trade_size(planned_size, current_price):
         return ""
     now_ts = time.time()
     last_ts = _safe_float(active_trade.get("daily_min_size_enforce_ts"), 0.0)
-    cooldown = max(60.0, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_ENFORCE_COOLDOWN_SEC", 300), 300))
+    cooldown = max(30.0, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_ENFORCE_COOLDOWN_SEC", 60), 60))
     if now_ts - last_ts < cooldown:
         return ""
     active_trade["daily_min_size_enforce_ts"] = now_ts
@@ -6132,6 +6132,7 @@ def _enforce_daily_min_trade_size(planned_size, current_price):
     corrected = _safe_float(active_trade.get("size"), target_size)
     if corrected > max_actual:
         active_trade["daily_min_size_enforce_ts"] = 0.0
+        sync_position_panel(current_price)
     notice = (
         f"🧯 每日最低單倉位已校正\n"
         f"計畫: {target_size*100:.1f}% | 原實際: {actual_size*100:.1f}% | 校正後: {corrected*100:.1f}%\n"
