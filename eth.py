@@ -6583,6 +6583,11 @@ def maybe_take_quick_profit_reduce(current_price, atr=None, now_ts=None):
     if real_copy_enabled:
         ok, scale_msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
         if not ok:
+            if "下單量低於最小值" in str(scale_msg):
+                active_trade["quick_reduce_count"] = max_count
+                active_trade["quick_reduce_ts"] = now_ts
+                active_trade["last_adjust_ts"] = now_ts
+                sync_position_panel(current_price)
             send_private_telegram(f"⚠️ 快速鎖利減倉略過：{scale_msg}", priority=True)
             return False
         sync_active_trade_from_binance(send_notice=False)
