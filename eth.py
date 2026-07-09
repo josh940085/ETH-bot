@@ -10217,6 +10217,30 @@ def send_private_telegram(msg, priority=False):
     if not priority and now - LAST_TELEGRAM_TS < 10:
         return False
 
+    dedupe_key = ""
+    dedupe_cache = {}
+    if _is_truthy(os.getenv("TELEGRAM_PRIVATE_DEDUPE_ENABLED", "1")):
+        dedupe_text = str(msg or "").strip()
+        if dedupe_text:
+            dedupe_key = hashlib.sha256(dedupe_text.encode("utf-8", errors="ignore")).hexdigest()
+            dedupe_cache = getattr(send_private_telegram, "_dedupe_cache", {})
+            cooldown = max(
+                30.0,
+                _safe_float(
+                    os.getenv(
+                        "TELEGRAM_PRIVATE_PRIORITY_DEDUPE_SEC" if priority else "TELEGRAM_PRIVATE_DEDUPE_SEC",
+                        180 if priority else 60,
+                    ),
+                    180 if priority else 60,
+                ),
+            )
+            last_sent = _safe_float(dedupe_cache.get(dedupe_key), 0.0)
+            if now - last_sent < cooldown:
+                if now - _safe_float(getattr(send_private_telegram, "_last_dedupe_log_ts", 0.0), 0.0) > 60:
+                    print("🔕 私聊重複通知已略過")
+                    send_private_telegram._last_dedupe_log_ts = now
+                return False
+
     target = _resolve_private_chat_id_for_controls()
     if not TELEGRAM_TOKEN or not target:
         print("⚠️ 私聊目標未設定，略過發送")
@@ -10251,6 +10275,12 @@ def send_private_telegram(msg, priority=False):
             context="eth.send_private_telegram",
         )
         LAST_TELEGRAM_TS = now
+        if dedupe_key:
+            dedupe_cache[dedupe_key] = now
+            if len(dedupe_cache) > 300:
+                cutoff = now - 3600.0
+                dedupe_cache = {key: ts for key, ts in dedupe_cache.items() if _safe_float(ts, 0.0) >= cutoff}
+            send_private_telegram._dedupe_cache = dedupe_cache
         print("✅ 私聊通知已送出")
         return True
     except Exception as e:
