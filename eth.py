@@ -11132,6 +11132,19 @@ def _log_kline_source_failure(source_name, exc, prefix="K線"):
         setattr(_log_kline_source_failure, "_state", state)
 
 
+def _log_kline_fallback(source_name, prefix="K線"):
+    now_ts = time.time()
+    state = getattr(_log_kline_fallback, "_state", {})
+    key = f"{prefix}:{source_name}"
+    last_ts = _safe_float(state.get(key), 0.0) if isinstance(state, dict) else 0.0
+    if now_ts - last_ts >= 300:
+        print(f"♻️ Futures {prefix}不可用，改用 {source_name}")
+        if not isinstance(state, dict):
+            state = {}
+        state[key] = now_ts
+        setattr(_log_kline_fallback, "_state", state)
+
+
 def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10, prefix="K線"):
     params = {
         "symbol": str(symbol or "ETHUSDT").upper(),
@@ -11151,7 +11164,7 @@ def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, e
             rows = response.json()
             if isinstance(rows, list) and rows:
                 if source_name != "futures":
-                    print(f"♻️ Futures {prefix}不可用，改用 {source_name}")
+                    _log_kline_fallback(source_name, prefix=prefix)
                 return rows, source_name
             errors.append(f"{source_name}: empty")
         except Exception as exc:
