@@ -129,6 +129,11 @@ NEWS_RETRAIN_MIN_INTERVAL_SEC = 900.0
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
+BINANCE_KLINE_SOURCES = (
+    ("futures", "https://fapi.binance.com/fapi/v1/klines"),
+    ("spot", "https://api.binance.com/api/v3/klines"),
+    ("vision_spot", "https://data-api.binance.vision/api/v3/klines"),
+)
 
 TRANSLATION_CACHE = {}
 
@@ -1801,18 +1806,14 @@ def _fetch_binance_host_validation_klines(symbol, start_ts, hours=24):
     if not symbol or start_ts <= 0:
         return []
     try:
-        response = requests.get(
-            "https://fapi.binance.com/fapi/v1/klines",
-            params={
-                "symbol": symbol,
-                "interval": "1h",
-                "startTime": int(start_ts * 1000),
-                "limit": max(6, min(48, _safe_int(hours, 24) + 3)),
-            },
+        rows, _ = _fetch_binance_kline_rows(
+            symbol,
+            "1h",
+            limit=max(6, min(48, _safe_int(hours, 24) + 3)),
+            start_time_ms=int(start_ts * 1000),
             timeout=max(3, _safe_int(os.getenv("BINANCE_HOST_VALIDATION_TIMEOUT_SEC", 8), 8)),
+            prefix="主播直播走勢驗證K線",
         )
-        response.raise_for_status()
-        rows = response.json()
     except Exception as exc:
         print(f"⚠️ 主播直播走勢驗證K線抓取失敗 {symbol}: {exc}")
         return []
@@ -11118,6 +11119,48 @@ if LIVE_RUNTIME_ENABLED:
 # =============================
 # API（簡化 + CACHE）
 # =============================
+def _log_kline_source_failure(source_name, exc, prefix="K線"):
+    now_ts = time.time()
+    state = getattr(_log_kline_source_failure, "_state", {})
+    key = f"{prefix}:{source_name}:{type(exc).__name__}:{str(exc)[:80]}"
+    last_ts = _safe_float(state.get(key), 0.0) if isinstance(state, dict) else 0.0
+    if now_ts - last_ts >= 300:
+        print(f"⚠️ {prefix}來源失敗，改試下一個: {source_name} | {exc}")
+        if not isinstance(state, dict):
+            state = {}
+        state[key] = now_ts
+        setattr(_log_kline_source_failure, "_state", state)
+
+
+def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10, prefix="K線"):
+    params = {
+        "symbol": str(symbol or "ETHUSDT").upper(),
+        "interval": str(interval),
+        "limit": max(1, min(1500, _safe_int(limit, 100))),
+    }
+    if start_time_ms is not None:
+        params["startTime"] = int(_safe_float(start_time_ms, 0.0))
+    if end_time_ms is not None:
+        params["endTime"] = int(_safe_float(end_time_ms, 0.0))
+
+    errors = []
+    for source_name, url in BINANCE_KLINE_SOURCES:
+        try:
+            response = HTTP_SESSION.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            rows = response.json()
+            if isinstance(rows, list) and rows:
+                if source_name != "futures":
+                    print(f"♻️ Futures {prefix}不可用，改用 {source_name}")
+                return rows, source_name
+            errors.append(f"{source_name}: empty")
+        except Exception as exc:
+            errors.append(f"{source_name}: {exc}")
+            _log_kline_source_failure(source_name, exc, prefix=prefix)
+            continue
+    raise RuntimeError("; ".join(errors) or f"{prefix}來源全部失敗")
+
+
 def get_kline(interval, limit=100):
     now = time.time()
     limit = max(1, min(1500, int(limit)))
@@ -11127,12 +11170,14 @@ def get_kline(interval, limit=100):
         if now - ts < KLINE_TTL.get(interval, 10) and len(data) >= limit:
             return data
 
-    url = "https://fapi.binance.com/fapi/v1/klines"
-    data = requests.get(url, params={
-        "symbol": "ETHUSDT",
-        "interval": interval,
-        "limit": limit
-    }).json()
+    try:
+        data, _ = _fetch_binance_kline_rows("ETHUSDT", interval, limit=limit, timeout=10, prefix=f"{interval} K線")
+    except Exception:
+        if interval in KLINE_CACHE:
+            data, _ = KLINE_CACHE[interval]
+            print(f"⚠️ {interval} K線來源失敗，沿用快取")
+            return data
+        raise
 
     df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
