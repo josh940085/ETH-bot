@@ -5502,6 +5502,7 @@ def _build_sl_strategy_review(direction, entry, tp, sl, close_price, atr_ref, co
     ema50_deviation = _safe_float(context.get("ema50_deviation_15m"), 0.0)
     taker_buy_ratio = _safe_float(context.get("taker_buy_ratio"), 0.5)
     content_override = context.get("content_override") if isinstance(context.get("content_override"), dict) else {}
+    host_opening_logic = context.get("host_opening_logic") if isinstance(context.get("host_opening_logic"), dict) else {}
     learned_entry_logic = context.get("learned_entry_logic") if isinstance(context.get("learned_entry_logic"), dict) else {}
 
     issue_codes = []
@@ -5561,9 +5562,24 @@ def _build_sl_strategy_review(direction, entry, tp, sl, close_price, atr_ref, co
     if macro_bias * expected_sign < -0.35:
         add_issue("macro_against", f"宏觀 {macro_bias:+.2f} 反向", "宏觀反向時提高RR與期望值門檻")
     if content_override.get("applied") and str(content_override.get("direction")) != direction:
-        add_issue("host_signal_conflict", f"MLX主訊號={content_override.get('direction')}", "主播/MLX主訊號反向時禁止同方向開倉")
+        add_issue("host_signal_conflict", f"MLX主訊號={content_override.get('direction')}", "MLX主訊號反向時禁止同方向開倉")
     elif content_override.get("usable") and not content_override.get("applied"):
-        add_issue("host_signal_not_confirmed", "主播/MLX方向未通過衝突檢查", "主播方向未確認時不可作為開單理由")
+        add_issue("host_signal_not_confirmed", "MLX方向未通過衝突檢查", "MLX方向未確認時不可作為開單理由")
+    if host_opening_logic:
+        host_direction = str(host_opening_logic.get("direction") or "neutral")
+        host_confidence = _safe_float(host_opening_logic.get("confidence"), 0.0)
+        if host_direction not in {"neutral", direction}:
+            add_issue(
+                "mlx_opening_logic_conflict",
+                f"MLX開單主邏輯={host_direction} 信心={host_confidence:.2f}",
+                "MLX開單主邏輯反向時禁止同方向開倉",
+            )
+        elif host_direction == "neutral" or host_confidence < 0.42:
+            add_issue(
+                "mlx_opening_logic_weak",
+                f"MLX開單主邏輯={host_direction} 信心={host_confidence:.2f}",
+                "MLX開單主邏輯未明確時等待區間邊界或量能確認",
+            )
     if learned_entry_logic:
         long_setup = _safe_float(learned_entry_logic.get("long_setup"), 0.0)
         short_setup = _safe_float(learned_entry_logic.get("short_setup"), 0.0)
@@ -8348,6 +8364,187 @@ def _build_range_trade_reference(
     }
 
 
+def _score_host_opening_logic(
+    *,
+    price,
+    timeframe_kline_view,
+    range_pos,
+    htf,
+    mid_trend,
+    breakout,
+    regime,
+    volume_spike,
+    buy_pressure,
+    sell_pressure,
+    sweep_high,
+    sweep_low,
+    support_hits,
+    resistance_hits,
+    repeated_support_tests,
+    repeated_resistance_tests,
+    repeated_test_pressure,
+    macro_bias,
+):
+    """主播思維開單主訊號：大週期定背景，中週期定方向，15m只找觸發。"""
+    view = timeframe_kline_view if isinstance(timeframe_kline_view, dict) else {}
+    high_score = _safe_float(view.get("high_tf_score"), 0.0)
+    mid_score = _safe_float(view.get("mid_tf_score"), 0.0)
+    low_score = _safe_float(view.get("low_tf_score"), 0.0)
+    pos = max(0.0, min(1.0, _safe_float(range_pos, 0.5)))
+    support_hits = _safe_int(support_hits, 0)
+    resistance_hits = _safe_int(resistance_hits, 0)
+    repeated_support_tests = _safe_int(repeated_support_tests, 0)
+    repeated_resistance_tests = _safe_int(repeated_resistance_tests, 0)
+    repeated_test_pressure = _safe_float(repeated_test_pressure, 0.0)
+    macro_bias = _safe_float(macro_bias, 0.0)
+
+    long_score = 0.0
+    short_score = 0.0
+    long_reasons = []
+    short_reasons = []
+
+    def add(direction, points, reason):
+        nonlocal long_score, short_score
+        if direction == "long":
+            long_score += points
+            long_reasons.append(reason)
+        else:
+            short_score += points
+            short_reasons.append(reason)
+
+    if high_score > 0.20:
+        add("long", min(0.9, 0.45 + high_score * 0.55), "高週期背景偏多")
+    elif high_score < -0.20:
+        add("short", min(0.9, 0.45 + abs(high_score) * 0.55), "高週期背景偏空")
+    else:
+        long_score += 0.05
+        short_score += 0.05
+
+    if mid_score > 0.18:
+        add("long", min(1.1, 0.55 + mid_score * 0.70), "4H/1H方向偏多")
+    elif mid_score < -0.18:
+        add("short", min(1.1, 0.55 + abs(mid_score) * 0.70), "4H/1H方向偏空")
+
+    if low_score > 0.18:
+        add("long", min(0.75, 0.35 + low_score * 0.45), "15m觸發偏多")
+    elif low_score < -0.18:
+        add("short", min(0.75, 0.35 + abs(low_score) * 0.45), "15m觸發偏空")
+
+    if htf == 1:
+        add("long", 0.30, "4H在MA上方")
+    elif htf == -1:
+        add("short", 0.30, "4H在MA下方")
+    if mid_trend == 1:
+        add("long", 0.35, "30m動能支持多方")
+    elif mid_trend == -1:
+        add("short", 0.35, "30m動能支持空方")
+
+    if pos <= 0.24:
+        add("long", 0.45, "低位靠近支撐，不追空")
+        short_score -= 0.35
+    elif pos >= 0.76:
+        add("short", 0.45, "高位靠近壓力，不追多")
+        long_score -= 0.35
+
+    if support_hits > 0:
+        add("long", min(0.55, support_hits * 0.18), "多週期支撐靠近")
+    if resistance_hits > 0:
+        add("short", min(0.55, resistance_hits * 0.18), "多週期壓力靠近")
+
+    if repeated_support_tests >= 2:
+        if breakout == -1 and (volume_spike or sell_pressure) and not sweep_low:
+            add("short", min(1.0, repeated_support_tests * 0.22), "支撐連測後放量跌破")
+            long_score -= 0.45
+        else:
+            add("long", min(0.75, repeated_support_tests * 0.16), "支撐連測未破，偏等承接")
+            short_score -= 0.35
+    if repeated_resistance_tests >= 2:
+        if breakout == 1 and (volume_spike or buy_pressure) and not sweep_high:
+            add("long", min(1.0, repeated_resistance_tests * 0.22), "壓力連測後放量突破")
+            short_score -= 0.45
+        else:
+            add("short", min(0.75, repeated_resistance_tests * 0.16), "壓力連測未破，偏等反彈失敗")
+            long_score -= 0.35
+
+    if breakout == 1:
+        if volume_spike or buy_pressure:
+            add("long", 0.55, "短線突破且有量/買盤確認")
+        else:
+            long_score -= 0.30
+            short_score += 0.20
+            short_reasons.append("突破量能不足，防假突破")
+    elif breakout == -1:
+        if volume_spike or sell_pressure:
+            add("short", 0.55, "短線跌破且有量/賣壓確認")
+        else:
+            short_score -= 0.30
+            long_score += 0.20
+            long_reasons.append("跌破量能不足，防假跌破")
+
+    if sweep_low:
+        add("long", 0.45, "掃低後收回，偏假跌破")
+        short_score -= 0.35
+    if sweep_high:
+        add("short", 0.45, "掃高後收回，偏假突破")
+        long_score -= 0.35
+
+    if regime in {"bull_trend", "bull_trend_strong"}:
+        add("long", 0.35 if regime == "bull_trend" else 0.55, "趨勢結構偏多")
+    elif regime in {"bear_trend", "bear_trend_strong"}:
+        add("short", 0.35 if regime == "bear_trend" else 0.55, "趨勢結構偏空")
+
+    if macro_bias > 0.35:
+        add("long", 0.18, "宏觀輔助偏多")
+    elif macro_bias < -0.35:
+        add("short", 0.18, "宏觀輔助偏空")
+
+    long_score += max(0.0, -repeated_test_pressure) * 0.35
+    short_score += max(0.0, repeated_test_pressure) * 0.35
+
+    long_score = max(0.0, long_score)
+    short_score = max(0.0, short_score)
+    edge = long_score - short_score
+    direction = "neutral"
+    if edge >= 1.05:
+        direction = "long"
+    elif edge <= -1.05:
+        direction = "short"
+    confidence = min(0.88, abs(edge) / 3.8 + max(long_score, short_score) / 10.0)
+    if confidence < 0.42:
+        direction = "neutral"
+
+    mode = "wait"
+    if direction == "long":
+        if repeated_resistance_tests >= 2 and breakout == 1:
+            mode = "breakout_after_pressure_tests"
+        elif pos <= 0.35 or support_hits > 0 or repeated_support_tests >= 2:
+            mode = "support_reclaim"
+        elif mid_score > 0.25 and low_score > 0.15:
+            mode = "trend_pullback_long"
+    elif direction == "short":
+        if repeated_support_tests >= 2 and breakout == -1:
+            mode = "breakdown_after_support_tests"
+        elif pos >= 0.65 or resistance_hits > 0 or repeated_resistance_tests >= 2:
+            mode = "resistance_rejection"
+        elif mid_score < -0.25 and low_score < -0.15:
+            mode = "trend_pullback_short"
+
+    reasons = long_reasons if direction == "long" else short_reasons if direction == "short" else []
+    return {
+        "direction": direction,
+        "confidence": round(confidence, 4),
+        "long_score": round(long_score, 4),
+        "short_score": round(short_score, 4),
+        "edge": round(edge, 4),
+        "mode": mode,
+        "reasons": reasons[:8],
+        "high_tf_score": round(high_score, 4),
+        "mid_tf_score": round(mid_score, 4),
+        "low_tf_score": round(low_score, 4),
+        "range_pos": round(pos, 4),
+    }
+
+
 def _count_consecutive_level_tests(df, level, side, *, tolerance=0.0015):
     level = _safe_float(level, 0.0)
     if df is None or level <= 0 or len(df) == 0:
@@ -9455,6 +9652,8 @@ def build_trade_signal_snapshot(
             "fee_round_trip_rate": 0.0,
             "funding_cost_rate_est": 0.0,
             "content_override": {"enabled": True, "usable": False, "applied": False},
+            "host_opening_logic": {"direction": "neutral", "confidence": 0.0, "reasons": []},
+            "host_logic_applied": False,
         }
 
     price = _safe_float(price, _safe_float(df_5m["close"].iloc[-1], 0.0))
@@ -9682,8 +9881,53 @@ def build_trade_signal_snapshot(
         score = max(0.05, min(score, 0.95))
 
     auxiliary_score = score
+    host_opening_logic = _score_host_opening_logic(
+        price=price,
+        timeframe_kline_view=timeframe_kline_view,
+        range_pos=features.get("range_pos"),
+        htf=htf,
+        mid_trend=mid_trend,
+        breakout=breakout,
+        regime=regime,
+        volume_spike=volume_spike,
+        buy_pressure=buy_pressure,
+        sell_pressure=sell_pressure,
+        sweep_high=sweep_high,
+        sweep_low=sweep_low,
+        support_hits=_safe_int(sr_analysis.get("support_hits"), 0),
+        resistance_hits=_safe_int(sr_analysis.get("resistance_hits"), 0),
+        repeated_support_tests=repeated_support_tests,
+        repeated_resistance_tests=repeated_resistance_tests,
+        repeated_test_pressure=repeated_test_pressure,
+        macro_bias=macro_bias,
+    )
+    host_logic_applied = False
+    if _is_truthy(os.getenv("TRADE_HOST_OPENING_LOGIC_ENABLED", "1")):
+        host_direction = str(host_opening_logic.get("direction") or "neutral")
+        host_confidence = max(0.0, min(0.88, _safe_float(host_opening_logic.get("confidence"), 0.0)))
+        if host_direction in {"long", "short"} and host_confidence >= max(
+            0.38,
+            min(0.70, _safe_float(os.getenv("TRADE_HOST_OPENING_LOGIC_MIN_CONF", 0.42), 0.42)),
+        ):
+            max_swing = max(
+                0.12,
+                min(0.36, _safe_float(os.getenv("TRADE_HOST_OPENING_LOGIC_MAX_SWING", 0.30), 0.30)),
+            )
+            target_score = 0.5 + (max_swing * host_confidence if host_direction == "long" else -max_swing * host_confidence)
+            blend = max(0.25, min(0.82, _safe_float(os.getenv("TRADE_HOST_OPENING_LOGIC_BLEND", 0.62), 0.62)))
+            score = score * (1.0 - blend) + target_score * blend
+            score = max(0.05, min(score, 0.95))
+            host_logic_applied = True
+            prob_floor = max(0.46, min(0.80, 0.50 + host_confidence * 0.28))
+            if host_direction == "long":
+                ai_long_prob = max(ai_long_prob, prob_floor)
+                ai_prob = max(ai_prob, score)
+            else:
+                ai_short_prob = max(ai_short_prob, prob_floor)
+                ai_prob = min(ai_prob, score)
+
     learned_entry_logic = _score_mlx_learned_entry_logic(
-        auxiliary_score,
+        score,
         range_pos=features.get("range_pos"),
         htf=htf,
         mid_trend=mid_trend,
@@ -9760,7 +10004,13 @@ def build_trade_signal_snapshot(
             ai_short_prob = max(ai_short_prob, prob_floor)
             ai_prob = min(ai_prob, max(0.10, score))
 
-    primary_indicator = "mlx_host_strategy" if content_override.get("applied") else "mlx_learned_logic"
+    primary_indicator = (
+        "mlx_host_strategy"
+        if content_override.get("applied")
+        else "mlx_opening_logic"
+        if host_logic_applied
+        else "mlx_learned_logic"
+    )
 
     if _is_truthy(os.getenv("TRADE_USE_CONFLUENCE_PROB_FLOOR", "1")):
         long_confluence = 0.0
@@ -10133,6 +10383,8 @@ def build_trade_signal_snapshot(
         "derivatives_pressure": derivatives_pressure,
         "derivatives_flow_stale": bool(derivatives_flow.get("stale", False)),
         "content_override": content_override,
+        "host_opening_logic": host_opening_logic,
+        "host_logic_applied": bool(host_logic_applied),
         "learned_entry_logic": learned_entry_logic,
         "timeframe_kline_view": timeframe_kline_view,
         "timeframe_kline_summary": timeframe_kline_view.get("summary", ""),
@@ -12501,6 +12753,8 @@ def run_bot():
             repeated_resistance_tests = _safe_int(decision.get("repeated_resistance_tests"), 0)
             repeated_test_pressure = _safe_float(decision.get("repeated_test_pressure"), 0.0)
             content_override = decision.get("content_override") if isinstance(decision.get("content_override"), dict) else {}
+            host_opening_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
+            host_logic_applied = bool(decision.get("host_logic_applied", False))
             learned_entry_logic = decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {}
             entry = price
             daily_min_trade = _daily_min_trade_due()
@@ -12623,6 +12877,18 @@ def run_bot():
             if repeated_support_tests >= 2 or repeated_resistance_tests >= 2:
                 reason.append(
                     f"連續測試壓力（支撐{repeated_support_tests} / 壓力{repeated_resistance_tests} | 方向壓力{repeated_test_pressure:+.2f}）"
+                )
+            if host_opening_logic:
+                host_dir = {"long": "偏多", "short": "偏空", "neutral": "中性"}.get(
+                    str(host_opening_logic.get("direction") or "neutral"),
+                    "中性",
+                )
+                host_reasons = "、".join((host_opening_logic.get("reasons") or [])[:2])
+                host_state = "主訊號" if host_logic_applied else "觀察"
+                reason.append(
+                    f"MLX開單邏輯{host_dir}（{host_state} | 信心{_safe_float(host_opening_logic.get('confidence'), 0.0):.2f}"
+                    + (f" | {host_reasons}" if host_reasons else "")
+                    + "）"
                 )
             if learned_entry_logic:
                 learned_dir = {"long": "偏多", "short": "偏空", "neutral": "中性"}.get(

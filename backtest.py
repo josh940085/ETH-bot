@@ -73,6 +73,11 @@ def _resolve_timerange(args):
 def _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=1500):
     step_ms = INTERVAL_MS[interval]
     required_bars = int(max(1, (int(end_ms) - int(start_ms)) // step_ms + 8))
+    if required_bars > 10000:
+        raise RuntimeError(
+            f"requested {required_bars} {interval} bars; TradingView websocket fetch is limited to 10000 bars. "
+            "Run a shorter window or add historical paging before validating multi-year ranges."
+        )
     rows, source_name = eth._fetch_market_kline_rows(
         symbol,
         interval,
@@ -149,7 +154,7 @@ def build_frame_map(base_5m):
         "1h": eth.calc_indicators(resample_ohlcv(base_5m, "1h")),
         "4h": eth.calc_indicators(resample_ohlcv(base_5m, "4h")),
         "12h": eth.calc_indicators(resample_ohlcv(base_5m, "12h")),
-        "1d": eth.calc_indicators(resample_ohlcv(base_5m, "1d")),
+        "1d": eth.calc_indicators(resample_ohlcv(base_5m, "1D")),
         "1w": eth.calc_indicators(resample_ohlcv(base_5m, "7D")),
     }
     return frame_map
@@ -400,6 +405,8 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "repeated_resistance_tests": int(decision.get("repeated_resistance_tests", 0)),
         "repeated_test_pressure": float(decision.get("repeated_test_pressure", 0.0)),
         "content_override": decision.get("content_override") if isinstance(decision.get("content_override"), dict) else {},
+        "host_opening_logic": decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {},
+        "host_logic_applied": bool(decision.get("host_logic_applied", False)),
         "learned_entry_logic": decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {},
         "primary_indicator": str(decision.get("primary_indicator") or ""),
         "max_favorable_move_pct": 0.0,
@@ -604,6 +611,7 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         }
     sl_review = {}
     if exit_reason == "SL":
+        host_opening_logic = open_trade.get("host_opening_logic") if isinstance(open_trade.get("host_opening_logic"), dict) else {}
         context = {
             "strategy_version": str(open_trade.get("strategy_version", eth.STRATEGY_VERSION)),
             "htf": open_trade.get("htf"),
@@ -628,6 +636,11 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
             "repeated_resistance_tests": open_trade.get("repeated_resistance_tests"),
             "repeated_test_pressure": open_trade.get("repeated_test_pressure"),
             "content_override": open_trade.get("content_override"),
+            "host_opening_logic": open_trade.get("host_opening_logic"),
+            "host_logic_applied": open_trade.get("host_logic_applied"),
+            "host_logic_direction": host_opening_logic.get("direction"),
+            "host_logic_mode": host_opening_logic.get("mode"),
+            "host_logic_confidence": host_opening_logic.get("confidence"),
             "learned_entry_logic": open_trade.get("learned_entry_logic"),
             "primary_indicator": open_trade.get("primary_indicator"),
         }
@@ -672,6 +685,11 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "funding_cost_rate_est_pct": round(float(open_trade.get("funding_cost_rate_est", 0.0)) * 100, 3),
         "support_hits": int(open_trade.get("support_hits", 0)),
         "resistance_hits": int(open_trade.get("resistance_hits", 0)),
+        "host_logic_applied": bool(open_trade.get("host_logic_applied", False)),
+        "host_logic_direction": str((open_trade.get("host_opening_logic") or {}).get("direction") or ""),
+        "host_logic_mode": str((open_trade.get("host_opening_logic") or {}).get("mode") or ""),
+        "host_logic_confidence": round(float((open_trade.get("host_opening_logic") or {}).get("confidence", 0.0)), 4),
+        "host_logic_reasons": json.dumps((open_trade.get("host_opening_logic") or {}).get("reasons") or [], ensure_ascii=False),
         "derivatives_pressure": round(float(open_trade.get("derivatives_pressure", 0.0)), 4),
         "open_interest_change_pct": round(float(open_trade.get("open_interest_change", 0.0)) * 100, 3),
         "mark_premium_rate_pct": round(float(open_trade.get("mark_premium_rate", 0.0)) * 100, 4),
@@ -704,7 +722,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars):
         end_ms=int(end_dt.timestamp() * 1000),
     )
     if base_5m.empty:
-        raise SystemExit("No klines returned from Binance futures API")
+        raise SystemExit("No klines returned from TradingView market data")
 
     frame_map = build_frame_map(base_5m)
     sr_cfg = [
