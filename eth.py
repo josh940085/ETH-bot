@@ -2312,8 +2312,13 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
     validation_evaluated = _safe_int(signal.get("validation_evaluated"), 0)
     validation_accuracy = _safe_float(signal.get("validation_accuracy"), 0.0)
     validation_edge = 0.0
-    if validation_evaluated >= max(3, _safe_int(os.getenv("TRADE_HOST_CONTENT_MIN_VALIDATION_SAMPLES", 5), 5)):
-        validation_edge = max(-0.20, min(0.20, (validation_accuracy - 50.0) / 100.0))
+    min_validation_samples = max(
+        3,
+        _safe_int(os.getenv("TRADE_HOST_CONTENT_MIN_VALIDATION_SAMPLES", 5), 5),
+    )
+    validation_ready = validation_evaluated >= min_validation_samples
+    if validation_ready:
+        validation_edge = max(-0.30, min(0.20, (validation_accuracy - 52.0) / 100.0))
     quality = (
         confidence
         + min(0.30, strength * 0.04)
@@ -2333,7 +2338,20 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
             ),
         ),
     )
-    applied = conflicts <= max_conflicts and quality >= min_quality
+    min_primary_validation_accuracy = max(
+        50.0,
+        _safe_float(os.getenv("TRADE_HOST_CONTENT_PRIMARY_MIN_ACCURACY", 54.0), 54.0),
+    )
+    validation_blocks_primary = (
+        primary_mode
+        and validation_ready
+        and validation_accuracy < min_primary_validation_accuracy
+    )
+    applied = (
+        conflicts <= max_conflicts
+        and quality >= min_quality
+        and not validation_blocks_primary
+    )
 
     payload = dict(signal)
     payload.update(
@@ -2349,6 +2367,8 @@ def _assess_host_content_override(signal, *, htf, mid_trend, macro_bias, sr_bias
             "validation_evaluated": validation_evaluated,
             "validation_accuracy": round(validation_accuracy, 2),
             "validation_edge": round(validation_edge, 3),
+            "validation_ready": validation_ready,
+            "validation_blocks_primary": validation_blocks_primary,
         }
     )
     return payload
@@ -2380,6 +2400,20 @@ def _score_mlx_learned_entry_logic(
     short_setup = 0.0
     reasons = []
     range_pos = max(0.0, min(1.0, _safe_float(range_pos, 0.5)))
+    support_break_confirmed = (
+        repeated_support_tests >= 2
+        and breakout == -1
+        and (volume_spike or sell_pressure)
+        and not sweep_low
+    )
+    support_hold_unconfirmed = repeated_support_tests >= 2 and not support_break_confirmed
+    resistance_break_confirmed = (
+        repeated_resistance_tests >= 2
+        and breakout == 1
+        and (volume_spike or buy_pressure)
+        and not sweep_high
+    )
+    resistance_hold_unconfirmed = repeated_resistance_tests >= 2 and not resistance_break_confirmed
 
     # Learned rule: do not chase; wait for support/resistance behavior first.
     if range_pos <= 0.28:
@@ -2399,18 +2433,20 @@ def _score_mlx_learned_entry_logic(
 
     # Learned rule: repeated tests are useful only with confirmation.
     if repeated_resistance_tests >= 2:
-        if breakout == 1 and (volume_spike or buy_pressure) and not sweep_high:
+        if resistance_break_confirmed:
             long_setup += min(2.0, 0.7 + repeated_resistance_tests * 0.28)
             reasons.append("壓力連續測試後放量突破，偏多")
         else:
             short_setup += min(1.4, 0.5 + repeated_resistance_tests * 0.18)
+            long_setup -= min(0.8, 0.25 + repeated_resistance_tests * 0.10)
             reasons.append("壓力連續測試但未確認突破，偏空等反彈失敗")
     if repeated_support_tests >= 2:
-        if breakout == -1 and (volume_spike or sell_pressure) and not sweep_low:
+        if support_break_confirmed:
             short_setup += min(2.0, 0.7 + repeated_support_tests * 0.28)
             reasons.append("支撐連續測試後跌破，偏空")
         else:
             long_setup += min(1.4, 0.5 + repeated_support_tests * 0.18)
+            short_setup -= min(0.8, 0.25 + repeated_support_tests * 0.10)
             reasons.append("支撐連續測試但未確認跌破，偏多等承接")
 
     if breakout == 1:
@@ -2473,6 +2509,13 @@ def _score_mlx_learned_entry_logic(
     elif repeated_test_pressure < 0:
         short_setup += min(0.35, abs(repeated_test_pressure) * 0.4)
 
+    if support_hold_unconfirmed and not support_break_confirmed:
+        short_setup -= 0.35
+        reasons.append("支撐未破前降低追空權重")
+    if resistance_hold_unconfirmed and not resistance_break_confirmed:
+        long_setup -= 0.35
+        reasons.append("壓力未破前降低追多權重")
+
     setup_delta = long_setup - short_setup
     learned_edge = max(-0.34, min(0.34, setup_delta * 0.11))
     technical_aux = max(-0.06, min(0.06, _safe_float(technical_score, 0.5) - 0.5))
@@ -2486,8 +2529,32 @@ def _score_mlx_learned_entry_logic(
         "long_setup": round(long_setup, 3),
         "short_setup": round(short_setup, 3),
         "technical_aux": round(technical_aux, 3),
+        "support_break_confirmed": support_break_confirmed,
+        "support_hold_unconfirmed": support_hold_unconfirmed,
+        "resistance_break_confirmed": resistance_break_confirmed,
+        "resistance_hold_unconfirmed": resistance_hold_unconfirmed,
         "reasons": reasons[:8],
     }
+
+
+def _classify_wait_state(final, *, repeated_support_tests, repeated_resistance_tests, learned_entry_logic, breakout, volume_spike):
+    final_text = str(final or "")
+    if not final_text.startswith("觀望"):
+        return final_text
+    learned = learned_entry_logic if isinstance(learned_entry_logic, dict) else {}
+    if learned.get("support_hold_unconfirmed"):
+        return "觀望（等支撐跌破或承接確認）"
+    if learned.get("resistance_hold_unconfirmed"):
+        return "觀望（等壓力突破或反彈失敗）"
+    if _safe_int(repeated_support_tests, 0) >= 2 and breakout != -1:
+        return "觀望（支撐連測未跌破）"
+    if _safe_int(repeated_resistance_tests, 0) >= 2 and breakout != 1:
+        return "觀望（壓力連測未突破）"
+    if "逆向共振不足" in final_text:
+        return final_text.replace("逆向共振不足", "等待共振確認")
+    if "低信心" in final_text and not volume_spike:
+        return "觀望（低信心且量能不足）"
+    return final_text
 
 
 def _load_learning_buffer_samples(max_per_label=40):
@@ -5524,12 +5591,40 @@ def _format_tp_sl_win_rate_line(performance_stats=None, *, min_startup_samples=N
     recent = _recent_tp_sl_stats(lookback)
     if recent["total"] > 0:
         recent_rate = recent["tp"] / max(recent["total"], 1)
+        mlx_recent = _recent_mlx_evaluated_stats(max(lookback * 3, 24))
+        mlx_text = ""
+        if mlx_recent["total"] > recent["total"]:
+            mlx_rate = mlx_recent["win"] / max(mlx_recent["total"], 1)
+            mlx_text = f"｜MLX近期評估 {mlx_rate:.2%}（{mlx_recent['win']}/{mlx_recent['total']}）"
         return (
             f"最近TP/SL勝率: {recent_rate:.2%}（{recent['tp']}/{recent['total']}）"
+            f"{mlx_text}"
             f"｜啟動後樣本不足（{startup_total}/{min_samples}）"
         )
 
     return f"TP/SL勝率: 樣本不足（啟動後 {startup_total}/{min_samples}）"
+
+
+def _recent_mlx_evaluated_stats(limit=24):
+    try:
+        with sqlite3.connect(str(MLX_LEARNING_DB_PATH), timeout=5) as connection:
+            rows = connection.execute(
+                """
+                SELECT success
+                FROM analysis_episode
+                WHERE evaluated_at IS NOT NULL
+                  AND success IS NOT NULL
+                  AND direction IN ('long', 'short')
+                ORDER BY evaluated_at DESC
+                LIMIT ?
+                """,
+                (max(1, _safe_int(limit, 24)),),
+            ).fetchall()
+    except Exception:
+        return {"total": 0, "win": 0, "loss": 0}
+    total = len(rows)
+    win = sum(1 for row in rows if _safe_int(row[0], 0) == 1)
+    return {"total": total, "win": win, "loss": max(0, total - win)}
 
 
 def _format_direction_color_text(text):
@@ -8935,9 +9030,15 @@ def build_trade_signal_snapshot(
     elif breakout == -score_direction:
         confluence -= 0.9
     if score_direction == 1 and repeated_resistance_tests >= 2:
-        confluence += min(1.2, repeated_resistance_tests * 0.25)
+        if breakout == 1 and (volume_spike or buy_pressure) and not sweep_high:
+            confluence += min(1.2, repeated_resistance_tests * 0.25)
+        else:
+            confluence -= min(0.7, repeated_resistance_tests * 0.16)
     elif score_direction == -1 and repeated_support_tests >= 2:
-        confluence += min(1.2, repeated_support_tests * 0.25)
+        if breakout == -1 and (volume_spike or sell_pressure) and not sweep_low:
+            confluence += min(1.2, repeated_support_tests * 0.25)
+        else:
+            confluence -= min(0.7, repeated_support_tests * 0.16)
     elif score_direction == 1 and repeated_support_tests >= 2:
         confluence -= min(0.8, repeated_support_tests * 0.18)
     elif score_direction == -1 and repeated_resistance_tests >= 2:
@@ -9105,9 +9206,15 @@ def build_trade_signal_snapshot(
         elif sr_bias < -0.10:
             short_confluence += 0.4
         if repeated_resistance_tests >= 2:
-            long_confluence += min(1.5, repeated_resistance_tests * 0.3)
+            if learned_entry_logic.get("resistance_break_confirmed"):
+                long_confluence += min(1.5, repeated_resistance_tests * 0.3)
+            else:
+                short_confluence += min(0.8, repeated_resistance_tests * 0.18)
         if repeated_support_tests >= 2:
-            short_confluence += min(1.5, repeated_support_tests * 0.3)
+            if learned_entry_logic.get("support_break_confirmed"):
+                short_confluence += min(1.5, repeated_support_tests * 0.3)
+            else:
+                long_confluence += min(0.8, repeated_support_tests * 0.18)
         if derivatives_pressure > 0.12:
             long_confluence += 0.4
         elif derivatives_pressure < -0.12:
@@ -9278,7 +9385,7 @@ def build_trade_signal_snapshot(
 
             position_size = _cap_initial_position_size(position_size)
 
-    if final != "觀望":
+    if not final.startswith("觀望"):
         final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
 
     point_explain = ""
@@ -9319,6 +9426,30 @@ def build_trade_signal_snapshot(
             )
             if net_edge_rate_est < min_expected_edge_rate:
                 final = "觀望（AI期望值不足）"
+        if (
+            not final.startswith("觀望")
+            and "做多" in final
+            and _is_truthy(os.getenv("TRADE_TIGHTEN_LOW_WINRATE_LONGS", "1"))
+            and not content_override.get("applied")
+        ):
+            long_setup = _safe_float(learned_entry_logic.get("long_setup"), 0.0)
+            short_setup = _safe_float(learned_entry_logic.get("short_setup"), 0.0)
+            support_confirm = bool(learned_entry_logic.get("support_hold_unconfirmed")) or bool(sweep_low)
+            breakout_confirm = breakout == 1 and (volume_spike or buy_pressure) and not sweep_high
+            min_long_prob = max(
+                min_direction_win_prob,
+                _safe_float(os.getenv("TRADE_TIGHT_LONG_MIN_PROB", 0.48), 0.48),
+            )
+            min_long_setup_edge = max(
+                0.15,
+                _safe_float(os.getenv("TRADE_TIGHT_LONG_MIN_SETUP_EDGE", 0.35), 0.35),
+            )
+            if direction_win_prob < min_long_prob:
+                final = "觀望（多單歷史勝率偏低）"
+            elif long_setup < short_setup + min_long_setup_edge and not (support_confirm or breakout_confirm):
+                final = "觀望（多單缺少支撐承接或突破確認）"
+            elif resistance_hits >= 1 and not breakout_confirm and score < 0.72:
+                final = "觀望（多單壓力未突破）"
         if not final.startswith("觀望"):
             sr_bias = _safe_float(sr_analysis.get("bias"), 0.0)
             support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
@@ -9356,6 +9487,14 @@ def build_trade_signal_snapshot(
                 final = "觀望（主指標30m MACD未支持做多）"
             elif "做空" in final and mid_trend != -1:
                 final = "觀望（主指標30m MACD未支持做空）"
+    final = _classify_wait_state(
+        final,
+        repeated_support_tests=repeated_support_tests,
+        repeated_resistance_tests=repeated_resistance_tests,
+        learned_entry_logic=learned_entry_logic,
+        breakout=breakout,
+        volume_spike=volume_spike,
+    )
     return {
         "features": features,
         "score": score,
@@ -11393,7 +11532,7 @@ def run_bot():
             # ===== 訊息格式（進場優先顯示）=====
             msg = ""
 
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 msg += f"📍 進場: {entry:.2f}\n"
 
                 if tp is not None:
@@ -11422,12 +11561,12 @@ def run_bot():
             sr_lines = sr_analysis.get("lines") if isinstance(sr_analysis, dict) else []
             if isinstance(sr_lines, list) and sr_lines:
                 msg += "\n\n🧱 多週期支撐/壓力（K線型態）\n" + "\n".join([f"- {line}" for line in sr_lines[:5]])
-            # Fix spam log（觀望不要一直print）
-            if final != "觀望":
+            # Fix spam log（觀望不要一直 print）
+            if not final.startswith("觀望"):
                 print(msg)
 
             # 強制單也必須再次經過自動修正，避免繞過前面的保護
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
 
             # ===== 開單頻率 + 訊號去重（核心修正）=====
@@ -11454,7 +11593,7 @@ def run_bot():
                     if abs(score - last_signal) < MIN_SIGNAL_DIFF:
                         final = "觀望（防洗單-信號重複）"
 
-            if final != "觀望" and not daily_min_trade:
+            if not final.startswith("觀望") and not daily_min_trade:
                 # ===== 冷卻防洗單 =====
                 if now_ts - last_trade_time < TRADE_COOLDOWN:
                     final = "觀望（冷卻中）"
@@ -11499,7 +11638,7 @@ def run_bot():
                 pending_entry_confirmation = None
                 continue
 
-            if final != "觀望":
+            if not final.startswith("觀望"):
                 direction = "long" if "做多" in final else "short"
 
                 if entry_confirm_enabled and not daily_min_trade:
