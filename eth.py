@@ -10281,7 +10281,8 @@ def send_private_telegram(msg, priority=False):
                 cutoff = now - 3600.0
                 dedupe_cache = {key: ts for key, ts in dedupe_cache.items() if _safe_float(ts, 0.0) >= cutoff}
             send_private_telegram._dedupe_cache = dedupe_cache
-        print("✅ 私聊通知已送出")
+        summary = str(msg or "").strip().splitlines()[0][:48]
+        print(f"✅ 私聊通知已送出: {summary}" if summary else "✅ 私聊通知已送出")
         return True
     except Exception as e:
         _note_telegram_delivery_event(
