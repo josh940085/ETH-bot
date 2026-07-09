@@ -3493,10 +3493,11 @@ def fetch_macro_rss_news():
         ("https://www.coindesk.com/arc/outboundfeeds/rss/", "CoinDesk"),
         ("https://cointelegraph.com/rss", "Cointelegraph"),
 
-        # 4. 外匯分析 - 替換失效來源
-        ("https://www.forexlive.com/feed/", "ForexLive"),
+        # 4. 外匯分析
         ("https://www.investing.com/rss/forex.rss", "Technical Analysis"),
     ]
+    if _is_truthy(os.getenv("RSS_ENABLE_FOREXLIVE", "0")):
+        feeds.append(("https://www.forexlive.com/feed/", "ForexLive"))
 
     aggregated = []
     for feed_url, source_name in feeds:
@@ -3518,8 +3519,8 @@ def fetch_macro_rss_news():
                 cooldown_sec = max(300, _safe_int(os.getenv("RSS_SOURCE_FAIL_COOLDOWN_SEC", 3600), 3600))
                 setattr(fetch_macro_rss_news, cooldown_key, now_err + cooldown_sec)
             last_err = getattr(fetch_macro_rss_news, key, 0)
-            if now_err - last_err > 300:
-                print(f"⚠️ {source_name} RSS error:", repr(e))
+            if now_err - last_err > max(300, _safe_int(os.getenv("RSS_ERROR_LOG_INTERVAL_SEC", 1800), 1800)):
+                print(f"⚠️ {source_name} RSS 暫時略過，已進入冷卻:", repr(e))
                 setattr(fetch_macro_rss_news, key, now_err)
 
     dedup = []
@@ -10120,6 +10121,11 @@ def send_telegram(msg, priority=False, include_private=True):
         targets = _get_notification_chat_ids()
     else:
         targets = []  # 群聊推播已停用
+
+    if not targets and _is_truthy(os.getenv("TELEGRAM_FALLBACK_PRIVATE_WHEN_NO_BROADCAST_TARGET", "1")):
+        private_target = _resolve_private_chat_id_for_controls()
+        if private_target:
+            targets = [private_target]
 
     if not TELEGRAM_TOKEN or not targets:
         print("⚠️ Telegram 目標未設定，略過發送")
