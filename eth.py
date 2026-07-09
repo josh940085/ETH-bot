@@ -11431,7 +11431,6 @@ def run_bot():
                         "━━━━━━━━━━━━━━"
                     )
                     print("\n" + snapshot_header)
-                    send_telegram(snapshot_header, priority=True, include_private=False)
                     run_bot.startup_news_snapshot_sent = True
 
                 new_news = new_news[:15]
