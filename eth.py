@@ -7606,9 +7606,10 @@ def get_macro_bias():
 
     # ===== BTC（相對性核心）=====
     try:
-        btc_url = "https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT"
-        btc_data = HTTP_SESSION.get(btc_url, timeout=3).json()
-        btc_change = float(btc_data["priceChangePercent"]) / 100
+        btc_rows, _ = _fetch_market_kline_rows("BTCUSDT", "1h", limit=25, timeout=5, prefix="BTC宏觀K線")
+        btc_open = _safe_float(btc_rows[0][1], 0.0) if btc_rows else 0.0
+        btc_close = _safe_float(btc_rows[-1][4], 0.0) if btc_rows else 0.0
+        btc_change = (btc_close - btc_open) / btc_open if btc_open > 0 and btc_close > 0 else 0
     except:
         btc_change = 0
 
