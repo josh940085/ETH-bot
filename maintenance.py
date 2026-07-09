@@ -118,6 +118,7 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "tpsl", "description": "同時設定止盈止損"},
     {"command": "ai", "description": "AI 市場分析"},
     {"command": "news", "description": "取得最新新聞"},
+    {"command": "fix", "description": "即時修正錯誤"},
     {"command": "restart", "description": "重新啟動 bot"},
 ]
 

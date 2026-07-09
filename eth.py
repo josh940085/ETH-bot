@@ -18,6 +18,8 @@ import base64
 import hashlib
 import hmac
 import math
+import subprocess
+import sys
 import pandas as pd
 import numpy as np
 import threading
@@ -209,6 +211,8 @@ DISCORD_WEBHOOK = _get_required_env("DISCORD_WEBHOOK", "", mask=True)
 DISCORD_NEWS = _get_required_env("DISCORD_NEWS", "", mask=True)
 POSITION_PANEL_FILE = data_path("docs", "position.json")
 PENDING_TRAINING_SAMPLE_PATH = data_path("pending_training_sample.json")
+MAINTENANCE_REPORT_FILE = data_path("maintenance_latest_report.json")
+PROGRAM_LOG_FILE = data_path("..", "logs", "program.log").resolve()
 DEFAULT_PAIR = "ETHUSDT"
 DEFAULT_LEV = 10
 COPY_TRADE_MAX_LEVERAGE = 5
@@ -10546,6 +10550,7 @@ def _build_bot_help_text():
         "/tpsl 2300 2350 - 同時設定 TP/SL\n"
         "/ai 問題 - AI 分析市場\n"
         "/news - 取得最新新聞\n"
+        "/fix - 即時修正錯誤\n"
         "/restart - 重啟 bot"
     )
 
@@ -10602,6 +10607,184 @@ def _build_whoami_text(context=None):
         lines.append("建議在和 bot 的私聊視窗內重新送一次 /whoami。")
 
     return "\n".join(lines)
+
+
+REALTIME_FIX_CHECK_LABELS = {
+    "conflict_markers": "程式衝突標記",
+    "dependency_constraints": "套件依賴",
+    "runtime_memory": "記憶體使用與優化",
+    "panel_tunnel_health": "面板連線與隧道",
+    "runtime_storage": "執行資料儲存空間",
+    "runtime_json": "執行狀態 JSON",
+    "entry_confirm_runtime": "進場確認執行狀態",
+    "entry_confirm_candle_id": "進場確認 K 線追蹤",
+    "py_compile": "Python 語法檢查",
+    "import_smoke": "模組載入測試",
+    "telegram_policy": "Telegram 設定",
+    "telegram_watch_risk": "Telegram 發送風險",
+    "model_health": "交易模型健康狀態",
+}
+REALTIME_FIX_STATUS_LABELS = {
+    "ok": "正常",
+    "fixed": "已自動修復",
+    "error": "異常",
+}
+REALTIME_FIX_COMMANDS = {
+    "/fix",
+    "/fix_errors",
+    "/repair",
+    "/修復錯誤",
+    "修復錯誤",
+    "修正錯誤",
+    "即時修復",
+    "即時修正錯誤",
+}
+
+
+def _recent_program_log_errors(limit=5, line_window=260):
+    try:
+        if not PROGRAM_LOG_FILE.exists():
+            return []
+        lines = PROGRAM_LOG_FILE.read_text(encoding="utf-8", errors="ignore").splitlines()[-int(line_window):]
+    except Exception:
+        return []
+
+    keywords = ("Traceback", "Exception", "Error", "ERROR", "錯誤", "失敗", "❌")
+    skips = ("Telegram 已送出", "私聊通知已送出", "新聞監控中", "持倉監控", "ERROR_RATE")
+    findings = []
+    seen = set()
+    for raw_line in reversed(lines):
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        if any(skip in line for skip in skips):
+            continue
+        if not any(keyword in line for keyword in keywords):
+            continue
+        compact = re.sub(r"\s+", " ", line)
+        if compact in seen:
+            continue
+        seen.add(compact)
+        findings.append(compact[:240])
+        if len(findings) >= limit:
+            break
+    return list(reversed(findings))
+
+
+def _format_realtime_fix_reply(report, command_output="", elapsed_sec=0.0):
+    report = report if isinstance(report, dict) else {}
+    status = str(report.get("status") or "error")
+    status_label = REALTIME_FIX_STATUS_LABELS.get(status, status)
+    auto_fix_count = int(report.get("auto_fix_count") or 0)
+    checks = report.get("checks") if isinstance(report.get("checks"), list) else []
+
+    fixed_items = [item for item in checks if item.get("status") == "fixed"]
+    error_items = [item for item in checks if item.get("status") == "error"]
+
+    lines = [
+        "🛠️ 即時錯誤修正完成",
+        f"狀態: {status_label}",
+        f"自動修復: {auto_fix_count} 項",
+        f"耗時: {elapsed_sec:.1f} 秒",
+    ]
+
+    if fixed_items:
+        lines.append("")
+        lines.append("已修復:")
+        for item in fixed_items[:6]:
+            name = str(item.get("name") or "")
+            label = REALTIME_FIX_CHECK_LABELS.get(name, name or "未知項目")
+            detail = str(item.get("detail") or "").strip()
+            lines.append(f"- {label}: {detail[:160]}")
+
+    if error_items:
+        lines.append("")
+        lines.append("仍異常:")
+        for item in error_items[:6]:
+            name = str(item.get("name") or "")
+            label = REALTIME_FIX_CHECK_LABELS.get(name, name or "未知項目")
+            detail = str(item.get("detail") or item.get("error") or "").strip()
+            lines.append(f"- {label}: {detail[:220]}")
+
+    recent_errors = _recent_program_log_errors(limit=4)
+    if recent_errors:
+        lines.append("")
+        lines.append("最近錯誤摘要:")
+        for line in recent_errors:
+            lines.append(f"- {line}")
+
+    if not fixed_items and not error_items and not recent_errors:
+        lines.append("")
+        lines.append("目前沒有偵測到需要即時修正的錯誤。")
+
+    if not checks and command_output:
+        lines.append("")
+        lines.append("maintenance 輸出:")
+        lines.append(str(command_output).strip()[:800])
+
+    return "\n".join(lines)[:3600]
+
+
+def _run_realtime_error_fix():
+    now = time.time()
+    if getattr(_run_realtime_error_fix, "_running", False):
+        return "⏳ 即時錯誤修正正在執行中，完成後會回報。"
+
+    cooldown_sec = max(30.0, _safe_float(os.getenv("REALTIME_FIX_COOLDOWN_SEC", "120"), 120.0))
+    last_run_ts = _safe_float(getattr(_run_realtime_error_fix, "_last_run_ts", 0.0), 0.0)
+    if last_run_ts and now - last_run_ts < cooldown_sec:
+        remain = int(max(1, cooldown_sec - (now - last_run_ts)))
+        return f"⏳ 剛執行過即時修正，請 {remain} 秒後再試。"
+
+    setattr(_run_realtime_error_fix, "_running", True)
+    started = time.time()
+    try:
+        pycache_dir = data_path("..", "pycache").resolve()
+        ensure_parent_dir(pycache_dir / ".keep")
+        env = os.environ.copy()
+        env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
+        timeout_sec = int(max(90.0, _safe_float(os.getenv("REALTIME_FIX_TIMEOUT_SEC", "240"), 240.0)))
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(REPO_DIR / "maintenance.py"),
+                "--skip-smoke-backtest",
+                "--no-notify",
+            ],
+            cwd=str(REPO_DIR),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        output = result.stdout or ""
+        report = _read_json_file(MAINTENANCE_REPORT_FILE, {})
+        if not isinstance(report, dict) or not report:
+            try:
+                report = json.loads(output)
+            except Exception:
+                report = {
+                    "status": "error" if result.returncode else "ok",
+                    "checks": [],
+                    "auto_fix_count": 0,
+                }
+        if result.returncode != 0 and report.get("status") != "error":
+            report["status"] = "error"
+        return _format_realtime_fix_reply(report, output, time.time() - started)
+    except subprocess.TimeoutExpired as exc:
+        output = str(getattr(exc, "stdout", "") or "").strip()
+        return (
+            "⚠️ 即時錯誤修正逾時\n"
+            f"timeout={int(_safe_float(os.getenv('REALTIME_FIX_TIMEOUT_SEC', '240'), 240))}s\n"
+            f"{output[:800]}"
+        ).strip()
+    except Exception as exc:
+        return f"⚠️ 即時錯誤修正啟動失敗: {exc}"
+    finally:
+        setattr(_run_realtime_error_fix, "_running", False)
+        setattr(_run_realtime_error_fix, "_last_run_ts", time.time())
 
 
 # ===== Telegram 指令（AI分析） =====
@@ -10858,6 +11041,12 @@ Volume Spike: {context.get('volume_spike')}
             return "📰 目前沒有抓到新的即時訊息"
         except Exception as e:
             return f"📰 新聞讀取失敗: {e}"
+
+    command_name = text.split(maxsplit=1)[0] if text else ""
+    if command_name in REALTIME_FIX_COMMANDS or text in REALTIME_FIX_COMMANDS:
+        if not is_private_chat:
+            return "即時錯誤修正只允許在私聊執行。"
+        return _run_realtime_error_fix()
 
     if text.startswith("/panel") or text.startswith("/menu"):
         send_control_panel(chat_id)
