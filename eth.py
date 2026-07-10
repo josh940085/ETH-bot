@@ -1860,9 +1860,19 @@ def _fetch_binance_host_validation_klines(symbol, start_ts, hours=24):
             start_time_ms=int(start_ts * 1000),
             timeout=max(3, _safe_int(os.getenv("BINANCE_HOST_VALIDATION_TIMEOUT_SEC", 8), 8)),
             prefix="主播直播走勢驗證K線",
+            source_preference="binance_first",
         )
     except Exception as exc:
-        print(f"⚠️ 主播直播走勢驗證K線抓取失敗 {symbol}: {exc}")
+        now_ts = time.time()
+        state = getattr(_fetch_binance_host_validation_klines, "_fail_log_state", {})
+        key = f"{symbol}:{type(exc).__name__}:{str(exc)[:80]}"
+        last_ts = _safe_float(state.get(key), 0.0) if isinstance(state, dict) else 0.0
+        if now_ts - last_ts >= max(300.0, _safe_float(os.getenv("BINANCE_HOST_VALIDATION_FAIL_LOG_COOLDOWN_SEC", 900), 900)):
+            print(f"⚠️ 主播直播走勢驗證K線抓取失敗 {symbol}: {exc}")
+            if not isinstance(state, dict):
+                state = {}
+            state[key] = now_ts
+            setattr(_fetch_binance_host_validation_klines, "_fail_log_state", state)
         return []
     if not isinstance(rows, list):
         return []
@@ -12365,8 +12375,18 @@ def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, e
     raise RuntimeError("; ".join(errors) or f"{prefix}來源全部失敗")
 
 
-def _fetch_market_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10, prefix="K線"):
+def _fetch_market_kline_rows(
+    symbol,
+    interval,
+    limit=100,
+    start_time_ms=None,
+    end_time_ms=None,
+    timeout=10,
+    prefix="K線",
+    source_preference="tradingview_first",
+):
     errors = []
+    source_preference = str(source_preference or "tradingview_first").lower()
     if str(interval) == "12h":
         try:
             source_start = None
@@ -12440,6 +12460,23 @@ def _fetch_market_kline_rows(symbol, interval, limit=100, start_time_ms=None, en
             _log_kline_source_failure("tradingview_4h_resampled_12h", exc, prefix=prefix)
         if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
             raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 12h 合成失敗")
+
+    if source_preference == "binance_first" and ALLOW_BINANCE_MARKET_DATA_FALLBACK:
+        try:
+            rows, source = _fetch_binance_kline_rows(
+                symbol,
+                interval,
+                limit=limit,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                timeout=timeout,
+                prefix=prefix,
+            )
+            if rows:
+                return rows, f"binance_{source}"
+            errors.append("binance_first: empty")
+        except Exception as exc:
+            errors.append(f"binance_first: {exc}")
 
     if _is_tradingview_in_cooldown(symbol, interval):
         errors.append("tradingview: cooldown")
