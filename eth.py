@@ -5903,7 +5903,20 @@ def _is_daily_min_position():
     return (opened_dt.hour, opened_dt.minute) >= (due_hour, due_minute)
 
 
-def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro_bias=0.0, news_bias=0.0, breakout=0, volume_spike=False, regime="range"):
+def _build_daily_min_trade_plan(
+    price,
+    atr,
+    df_15m,
+    df_5m,
+    htf,
+    mid_trend,
+    macro_bias=0.0,
+    news_bias=0.0,
+    breakout=0,
+    volume_spike=False,
+    regime="range",
+    candlestick_turning=None,
+):
     """Create the small end-of-day trade from current structure, never a blind side."""
     entry = max(0.0, _safe_float(price, 0.0))
     regime_name = str(regime or "range")
@@ -5934,12 +5947,39 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro
         long_score += 0.55
     elif _safe_int(breakout, 0) == -1 and volume_spike:
         short_score += 0.55
+    turn = candlestick_turning if isinstance(candlestick_turning, dict) else {}
+    turn_direction = str(turn.get("direction") or "neutral")
+    turn_count = _safe_int(turn.get("simultaneous_count"), 0)
+    turn_confidence = _safe_float(turn.get("confidence"), 0.0)
+    if (
+        _is_truthy(os.getenv("TRADE_DAILY_MIN_USE_CANDLE_TURNING", "0"))
+        and turn_count >= 2
+        and turn_confidence >= max(0.42, _safe_float(os.getenv("TRADE_MULTI_TF_CANDLE_TURN_MIN_CONF", 0.48), 0.48))
+    ):
+        if turn_direction == "short":
+            short_score += min(1.25, 0.55 + turn_confidence * 0.70)
+            long_score -= min(0.95, 0.35 + turn_confidence * 0.50)
+        elif turn_direction == "long" and long_score >= short_score:
+            long_score += min(0.45, 0.15 + turn_confidence * 0.25)
     direction = "long" if long_score >= short_score else "short"
+    if (
+        regime_name == "bull_trend_strong"
+        and direction == "long"
+        and not (_safe_int(breakout, 0) == 1 and bool(volume_spike))
+    ):
+        direction = "short"
     atr_ref = max(_safe_float(atr, 0.0), entry * 0.001, 1e-6)
     if direction == "long":
         structural_sl = _safe_float(df_15m["low"].tail(10).min(), entry)
         structural_sl = min(structural_sl, _safe_float(df_5m["low"].tail(6).min(), entry))
         risk = max(entry - structural_sl, atr_ref * 0.5)
+        if regime_name == "range":
+            range_floor = max(0.0, recent_low - atr_ref * _safe_float(os.getenv("RANGE_SL_ATR_BUFFER", 0.35), 0.35))
+            range_risk = max(entry - range_floor, atr_ref * _safe_float(os.getenv("RANGE_SL_MIN_ATR", 0.85), 0.85))
+            risk = min(
+                max(risk, range_risk),
+                entry * _safe_float(os.getenv("RANGE_SL_MAX_RISK_RATE", 0.012), 0.012),
+            )
         sl = entry - risk
         tp = entry + risk * 1.5
         final = "⏰ 每日保底做多"
@@ -5947,20 +5987,45 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro
         structural_sl = _safe_float(df_15m["high"].tail(10).max(), entry)
         structural_sl = max(structural_sl, _safe_float(df_5m["high"].tail(6).max(), entry))
         risk = max(structural_sl - entry, atr_ref * 0.5)
+        if regime_name == "range":
+            range_ceiling = recent_high + atr_ref * _safe_float(os.getenv("RANGE_SL_ATR_BUFFER", 0.35), 0.35)
+            range_risk = max(range_ceiling - entry, atr_ref * _safe_float(os.getenv("RANGE_SL_MIN_ATR", 0.85), 0.85))
+            risk = min(
+                max(risk, range_risk),
+                entry * _safe_float(os.getenv("RANGE_SL_MAX_RISK_RATE", 0.012), 0.012),
+            )
         sl = entry + risk
         tp = entry - risk * 1.5
         final = "⏰ 每日保底做空"
-    base_size = min(
-        0.08,
-        max(0.03, _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05)),
-    )
     sign = 1 if direction == "long" else -1
     against_macro = macro_score * sign < -0.25
     local_confirmed = (_safe_int(breakout, 0) == sign) or bool(volume_spike)
+    probe_size = max(
+        0.001,
+        min(0.03, _safe_float(os.getenv("DAILY_MIN_TRADE_PROBE_SIZE_RATIO", 0.001), 0.001)),
+    )
+    base_size = probe_size
+    turn_matches_trade = turn_direction == direction
+    max_size = base_size
+    if turn_matches_trade and turn_direction == "long" and turn_count >= 2 and turn_confidence >= 0.48 and local_confirmed:
+        max_size = min(
+            0.12,
+            max(base_size, _safe_float(os.getenv("DAILY_MIN_TRADE_TURN_LONG_MAX_SIZE_RATIO", base_size * 1.6), base_size * 1.6)),
+        )
+    elif turn_matches_trade and turn_direction == "short" and turn_count >= 2 and turn_confidence >= 0.48 and local_confirmed:
+        max_size = min(
+            0.06,
+            max(base_size, _safe_float(os.getenv("DAILY_MIN_TRADE_TURN_SHORT_MAX_SIZE_RATIO", base_size * 1.25), base_size * 1.25)),
+        )
     if against_macro:
         base_size = min(
             base_size,
             max(0.02, _safe_float(os.getenv("DAILY_MIN_TRADE_AGAINST_MACRO_SIZE_RATIO", 0.025), 0.025)),
+        )
+    if regime_name == "range":
+        base_size = min(
+            base_size,
+            max(probe_size, _safe_float(os.getenv("DAILY_MIN_RANGE_SIZE_RATIO", base_size * 0.75), base_size * 0.75)),
         )
     return {
         "direction": direction,
@@ -5968,9 +6033,11 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro
         "sl": sl,
         "tp": tp,
         "position_size": base_size,
+        "max_position_size": max_size,
         "against_macro": against_macro,
         "local_confirmed": local_confirmed,
         "macro_wait_recommended": bool(against_macro and not local_confirmed),
+        "candlestick_turn_direction": turn_direction,
     }
 
 
@@ -6594,10 +6661,26 @@ SCALING_MARKET_STATE = {
     "support_hits": 0,
     "resistance_hits": 0,
     "sr_bias": 0.0,
+    "volume_ratio": 0.0,
+    "volume_spike": False,
+    "buy_pressure": False,
+    "sell_pressure": False,
 }
 
 
-def _update_scaling_market_state(price, atr, htf, mid_trend, regime, breakout, sr_analysis=None):
+def _update_scaling_market_state(
+    price,
+    atr,
+    htf,
+    mid_trend,
+    regime,
+    breakout,
+    sr_analysis=None,
+    volume_ratio=0.0,
+    volume_spike=False,
+    buy_pressure=False,
+    sell_pressure=False,
+):
     sr_payload = sr_analysis if isinstance(sr_analysis, dict) else {}
     SCALING_MARKET_STATE.update(
         {
@@ -6611,6 +6694,10 @@ def _update_scaling_market_state(price, atr, htf, mid_trend, regime, breakout, s
             "support_hits": max(0, _safe_int(sr_payload.get("support_hits"), 0)),
             "resistance_hits": max(0, _safe_int(sr_payload.get("resistance_hits"), 0)),
             "sr_bias": _safe_float(sr_payload.get("bias"), 0.0),
+            "volume_ratio": max(0.0, _safe_float(volume_ratio, 0.0)),
+            "volume_spike": bool(volume_spike),
+            "buy_pressure": bool(buy_pressure),
+            "sell_pressure": bool(sell_pressure),
         }
     )
 
@@ -7124,11 +7211,18 @@ def _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing
     resistance_hits = max(0, _safe_int(SCALING_MARKET_STATE.get("resistance_hits"), 0))
     sr_bias = _safe_float(SCALING_MARKET_STATE.get("sr_bias"), 0.0)
     breakout = _safe_int(SCALING_MARKET_STATE.get("breakout"), 0)
+    regime = str(SCALING_MARKET_STATE.get("regime") or "range")
+    volume_ratio = max(0.0, _safe_float(SCALING_MARKET_STATE.get("volume_ratio"), 0.0))
+    volume_spike = bool(SCALING_MARKET_STATE.get("volume_spike"))
+    buy_pressure = bool(SCALING_MARKET_STATE.get("buy_pressure"))
+    sell_pressure = bool(SCALING_MARKET_STATE.get("sell_pressure"))
     drawdown_progress = _safe_float(progress.get("drawdown_progress"), 0.0)
     profit_progress = _safe_float(progress.get("profit_progress"), 0.0)
     earned_r_multiple = _safe_float(progress.get("earned_r_multiple"), 0.0)
 
     if direction == "long":
+        regime_aligned = regime not in {"bear_trend", "bear_trend_strong"}
+        volume_confirmed = volume_ratio >= 1.05 and (volume_spike or buy_pressure or breakout == 1)
         direction_reconfirmed = (
             support_hits >= 1
             or sr_bias >= 0.16
@@ -7142,6 +7236,8 @@ def _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing
         )
         target_pressure = resistance_hits >= 1 or sr_bias <= -0.10
     else:
+        regime_aligned = regime not in {"bull_trend", "bull_trend_strong"}
+        volume_confirmed = volume_ratio >= 1.05 and (volume_spike or sell_pressure or breakout == -1)
         direction_reconfirmed = (
             resistance_hits >= 1
             or sr_bias <= -0.16
@@ -7156,8 +7252,8 @@ def _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing
         target_pressure = support_hits >= 1 or sr_bias >= 0.10
 
     # Learned rule: add only when the original direction is valid again.
-    add_ok = bool(direction_reconfirmed and not structure_invalid)
-    add_reason = "方向重新成立，允許補倉" if add_ok else "方向未重新成立，禁止盲目補倉"
+    add_ok = bool(direction_reconfirmed and volume_confirmed and regime_aligned and not structure_invalid)
+    add_reason = "方向、量能與主要趨勢重新成立，允許補倉" if add_ok else "方向、量能或主要趨勢未重新成立，禁止盲目補倉"
     if structure_invalid:
         add_reason = "結構失效，禁止補倉"
 
@@ -7185,6 +7281,9 @@ def _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing
         "resistance_hits": resistance_hits,
         "sr_bias": sr_bias,
         "breakout": breakout,
+        "volume_ratio": volume_ratio,
+        "volume_confirmed": volume_confirmed,
+        "regime_aligned": regime_aligned,
     }
 
 
@@ -7249,6 +7348,10 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     reduce_count = int(active_trade.get("reduce_count", 0))
     scale_add_paused = bool(active_trade.get("scale_add_paused", False))
     break_even_active = bool(active_trade.get("break_even_active", False))
+    trade_source = str(active_trade.get("trade_source") or "")
+    turn_direction = str(active_trade.get("candlestick_turn_direction") or "neutral")
+    turn_count = max(0, _safe_int(active_trade.get("candlestick_turn_count"), 0))
+    turn_confidence = max(0.0, _safe_float(active_trade.get("candlestick_turn_confidence"), 0.0))
     real_copy_enabled = _get_follow_mode_enabled() and _is_real_copy_enabled()
     progress = _calc_scaling_progress(direction, entry, current_price, active_trade.get("tp"), active_trade.get("sl"))
 
@@ -7266,10 +7369,20 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     profit_progress = _safe_float(progress.get("profit_progress"), 0.0)
     earned_r_multiple = _safe_float(progress.get("earned_r_multiple"), 0.0)
     learned_scaling = _assess_mlx_learned_scaling_logic(direction, progress, trend_score, opposing_pressure)
+    daily_min_add_ok = bool(
+        trade_source != "daily_minimum"
+        or (
+            turn_direction == direction
+            and turn_count >= 2
+            and turn_confidence >= 0.48
+            and learned_scaling.get("volume_confirmed")
+        )
+    )
 
     add_trigger = (
         not break_even_active
         and not scale_add_paused
+        and daily_min_add_ok
         and add_count < max_add_count
         and size < max_size - 1e-9
         and min_add_drawdown <= drawdown_progress <= max_add_drawdown
@@ -7742,6 +7855,10 @@ active_trade = {
     "open_time": None,
     "tp_sl_adjusted_4h": False,
     "time_horizon": "short",
+    "trade_source": "",
+    "candlestick_turn_direction": "neutral",
+    "candlestick_turn_count": 0,
+    "candlestick_turn_confidence": 0.0,
 }
 
 
@@ -7758,6 +7875,10 @@ def _reset_active_trade_state():
     active_trade["open"] = False
     active_trade["size"] = 0.0
     active_trade["position_qty"] = 0.0
+    active_trade["trade_source"] = ""
+    active_trade["candlestick_turn_direction"] = "neutral"
+    active_trade["candlestick_turn_count"] = 0
+    active_trade["candlestick_turn_confidence"] = 0.0
     active_trade["add_count"] = 0
     active_trade["reduce_count"] = 0
     active_trade["quick_reduce_count"] = 0
@@ -8457,6 +8578,7 @@ def _build_timeframe_kline_view(higher_tf_context, pattern_map=None):
         (high_tf_score > 0.25 and mid_tf_score < -0.25)
         or (high_tf_score < -0.25 and mid_tf_score > 0.25)
     )
+    turning_point = _score_multi_tf_candlestick_turning(context, patterns)
     host_style_order = (
         "先看月/週/日定大背景，再看4H/1H判斷主要方向與支撐壓力，"
         "最後只用15m找進場觸發；高位不追多、低位不追空，週期衝突時降倉或等待。"
@@ -8467,8 +8589,85 @@ def _build_timeframe_kline_view(higher_tf_context, pattern_map=None):
         "mid_tf_score": round(mid_tf_score, 4),
         "low_tf_score": round(low_tf_score, 4),
         "conflict": bool(conflict),
+        "turning_point": turning_point,
         "views": view,
         "summary": "；".join(summary_parts),
+    }
+
+
+def _score_multi_tf_candlestick_turning(higher_tf_context, pattern_map=None):
+    """多時段K線反轉型態同時出現時，量化變盤機率。"""
+    context = higher_tf_context if isinstance(higher_tf_context, dict) else {}
+    patterns = pattern_map if isinstance(pattern_map, dict) else {}
+    specs = [
+        ("15m", "fifteen_min", 0.70),
+        ("1H", "one_hour", 0.90),
+        ("4H", "four_hour", 1.15),
+        ("1D", "daily", 1.35),
+        ("1W", "weekly", 1.05),
+        ("1M", "monthly", 0.80),
+    ]
+    bullish_reversal = {"看漲吞沒", "錘子線"}
+    bearish_reversal = {"看跌吞沒", "流星線"}
+    bullish_score = 0.0
+    bearish_score = 0.0
+    bullish_count = 0
+    bearish_count = 0
+    reasons = []
+
+    for label, prefix, weight in specs:
+        pattern_name, pattern_bias = patterns.get(prefix, ("", 0))
+        pattern_name = str(pattern_name or "")
+        trend = _safe_int(context.get(f"{prefix}_trend"), 0)
+        range_pos = max(0.0, min(1.0, _safe_float(context.get(f"{prefix}_range_pos"), 0.5)))
+        window_change = _safe_float(context.get(f"{prefix}_window_change_pct"), 0.0)
+
+        if pattern_name in bullish_reversal:
+            if trend <= 0 or range_pos <= 0.42 or window_change < 0:
+                score = weight * (1.15 if range_pos <= 0.30 else 1.0)
+                bullish_score += score
+                bullish_count += 1
+                reasons.append(f"{label}{pattern_name}低位/跌後偏多")
+        elif pattern_name in bearish_reversal:
+            if trend >= 0 or range_pos >= 0.58 or window_change > 0:
+                score = weight * (1.15 if range_pos >= 0.70 else 1.0)
+                bearish_score += score
+                bearish_count += 1
+                reasons.append(f"{label}{pattern_name}高位/漲後偏空")
+        elif pattern_name == "十字星":
+            if range_pos >= 0.74 or (trend > 0 and window_change > 0):
+                bearish_score += weight * 0.55
+                bearish_count += 1
+                reasons.append(f"{label}高位十字星偏空變盤")
+            elif range_pos <= 0.26 or (trend < 0 and window_change < 0):
+                bullish_score += weight * 0.55
+                bullish_count += 1
+                reasons.append(f"{label}低位十字星偏多變盤")
+
+    direction = "neutral"
+    raw_score = bullish_score - bearish_score
+    if raw_score >= 0.65 and bullish_count >= 1:
+        direction = "long"
+    elif raw_score <= -0.65 and bearish_count >= 1:
+        direction = "short"
+
+    simultaneous_count = bullish_count if direction == "long" else bearish_count if direction == "short" else max(bullish_count, bearish_count)
+    simultaneous = simultaneous_count >= 2
+    confidence = 0.0
+    if direction != "neutral":
+        confidence = min(0.88, 0.30 + abs(raw_score) * 0.16 + max(0, simultaneous_count - 1) * 0.12)
+        if simultaneous:
+            confidence = min(0.92, confidence + 0.10)
+
+    return {
+        "direction": direction,
+        "score": round(max(-1.0, min(1.0, raw_score / 3.0)), 4),
+        "confidence": round(confidence, 4),
+        "simultaneous": bool(simultaneous),
+        "simultaneous_count": int(simultaneous_count),
+        "bullish_count": int(bullish_count),
+        "bearish_count": int(bearish_count),
+        "reasons": reasons[:8],
     }
 
 
@@ -8898,6 +9097,9 @@ MODEL_FEATURE_COLUMNS = [
     "multi_tf_sr_bias",
     "multi_tf_support_hits",
     "multi_tf_resistance_hits",
+    "candlestick_turn_score",
+    "candlestick_turn_confidence",
+    "candlestick_turn_count",
     "open_interest_change",
     "mark_premium_rate",
     "funding_rate_live",
@@ -9103,6 +9305,7 @@ def _build_directional_learning_features(features, direction):
         "macro",
         "regime",
         "multi_tf_sr_bias",
+        "candlestick_turn_score",
         "mark_premium_rate",
         "funding_rate_live",
         "derivatives_pressure",
@@ -9642,14 +9845,19 @@ def _predict_estimator_probability_from_features(estimator, features):
             [[_safe_float(features.get(col), 0.0) for col in expected_cols]],
             dtype=np.float32,
         )
-        if isinstance(estimator, RandomForestClassifier) and hasattr(estimator, "estimators_"):
+        if (
+            _is_truthy(os.getenv("BACKTEST_FAST_MODEL_PREDICT", "0"))
+            and isinstance(estimator, RandomForestClassifier)
+            and hasattr(estimator, "estimators_")
+        ):
             classes = list(getattr(estimator, "classes_", []))
             if 1 not in classes:
                 return None
             class_idx = classes.index(1)
+            max_trees = max(1, _safe_int(os.getenv("BACKTEST_FAST_MODEL_TREES", 24), 24))
             total = 0.0
             count = 0
-            for tree in estimator.estimators_:
+            for tree in list(estimator.estimators_)[:max_trees]:
                 total += float(tree.predict_proba(x, check_input=False)[0][class_idx])
                 count += 1
             if count > 0:
@@ -9676,8 +9884,13 @@ def _predict_legacy_trade_probability(features):
             batch_prob = _predict_estimator_probability(model, X_raw)
 
     online_prob = None
+    skip_online_fast = (
+        _is_truthy(os.getenv("BACKTEST_FAST_MODEL_PREDICT", "0"))
+        and _is_truthy(os.getenv("BACKTEST_FAST_MODEL_SKIP_ONLINE", "1"))
+    )
     online_ready = (
-        online_initialized
+        not skip_online_fast
+        and online_initialized
         and online_sample_count >= ONLINE_MODEL_MIN_SAMPLES
         and _has_expected_feature_schema(online_model)
         and hasattr(online_scaler, "n_samples_seen_")
@@ -9685,7 +9898,7 @@ def _predict_legacy_trade_probability(features):
     if online_ready:
         X_online = _prepare_online_feature_frame(X_raw, fit_scaler=False)
         online_prob = _predict_estimator_probability(online_model, X_online)
-    elif batch_prob is None and online_initialized and hasattr(online_scaler, "n_samples_seen_"):
+    elif batch_prob is None and not skip_online_fast and online_initialized and hasattr(online_scaler, "n_samples_seen_"):
         X_online = _prepare_online_feature_frame(X_raw, fit_scaler=False)
         online_prob = _predict_estimator_probability(online_model, X_online)
 
@@ -10102,6 +10315,15 @@ def build_trade_signal_snapshot(
     timeframe_kline_view = _build_timeframe_kline_view(higher_timeframe, timeframe_patterns)
     higher_timeframe["timeframe_kline_view"] = timeframe_kline_view
     higher_timeframe["timeframe_kline_summary"] = timeframe_kline_view.get("summary", "")
+    candlestick_turning = (
+        timeframe_kline_view.get("turning_point")
+        if isinstance(timeframe_kline_view.get("turning_point"), dict)
+        else {}
+    )
+    candlestick_turn_score = _safe_float(candlestick_turning.get("score"), 0.0)
+    candlestick_turn_confidence = _safe_float(candlestick_turning.get("confidence"), 0.0)
+    candlestick_turn_count = _safe_int(candlestick_turning.get("simultaneous_count"), 0)
+    candlestick_turn_direction = str(candlestick_turning.get("direction") or "neutral")
     regime = detect_market_regime(df_1h, df_4h)
 
     trend_4h = df_4h["close"].iloc[-1] - df_4h["ma25"].iloc[-1]
@@ -10202,6 +10424,9 @@ def build_trade_signal_snapshot(
         "repeated_support_tests": repeated_support_tests,
         "repeated_resistance_tests": repeated_resistance_tests,
         "repeated_test_pressure": repeated_test_pressure,
+        "candlestick_turn_score": candlestick_turn_score,
+        "candlestick_turn_confidence": candlestick_turn_confidence,
+        "candlestick_turn_count": candlestick_turn_count,
         "open_interest_change": open_interest_change,
         "mark_premium_rate": mark_premium_rate,
         "funding_rate_live": funding_rate_live,
@@ -10228,6 +10453,8 @@ def build_trade_signal_snapshot(
         elif breakout == -1:
             rule_score -= 0.25
         rule_score += max(-0.25, min(0.25, repeated_test_pressure))
+        if _is_truthy(os.getenv("TRADE_USE_MULTI_TF_CANDLE_TURNING", "1")) and candlestick_turn_count >= 2:
+            rule_score += max(-0.18, min(0.18, candlestick_turn_score * candlestick_turn_confidence))
         rule_score += macro_bias * 0.1
         if triangle == 1:
             rule_score += 0.05
@@ -10301,6 +10528,24 @@ def build_trade_signal_snapshot(
     sr_bias = _safe_float(sr_analysis.get("bias"), 0.0)
     score += max(-0.14, min(0.14, sr_bias * 0.10))
     score += max(-0.18, min(0.18, repeated_test_pressure))
+    if (
+        _is_truthy(os.getenv("TRADE_USE_MULTI_TF_CANDLE_TURNING", "1"))
+        and candlestick_turn_count >= 2
+        and candlestick_turn_confidence >= max(
+            0.42,
+            min(0.80, _safe_float(os.getenv("TRADE_MULTI_TF_CANDLE_TURN_MIN_CONF", 0.48), 0.48)),
+        )
+    ):
+        turn_adjust = max(
+            -0.10,
+            min(
+                0.10,
+                candlestick_turn_score
+                * candlestick_turn_confidence
+                * _safe_float(os.getenv("TRADE_MULTI_TF_CANDLE_TURN_WEIGHT", 0.16), 0.16),
+            ),
+        )
+        score += turn_adjust
     score = max(0.05, min(score, 0.95))
 
     if abs(derivatives_pressure) >= 0.10:
@@ -10488,6 +10733,11 @@ def build_trade_signal_snapshot(
             long_confluence += 0.4
         elif volume_spike and sell_pressure:
             short_confluence += 0.4
+        if candlestick_turn_count >= 2 and candlestick_turn_confidence >= 0.48:
+            if candlestick_turn_direction == "long":
+                long_confluence += min(0.7, 0.25 + candlestick_turn_confidence * 0.45)
+            elif candlestick_turn_direction == "short":
+                short_confluence += min(0.7, 0.25 + candlestick_turn_confidence * 0.45)
         if score >= 0.80:
             long_confluence += 1.0
         elif score <= 0.20:
@@ -10648,6 +10898,29 @@ def build_trade_signal_snapshot(
                     position_size *= 1.2
                 else:
                     position_size *= 0.7
+
+            counter_trend_entry = (
+                ("做多" in final and regime in {"bear_trend", "bear_trend_strong"})
+                or ("做空" in final and regime in {"bull_trend", "bull_trend_strong"})
+            )
+            if counter_trend_entry:
+                position_size = min(
+                    position_size,
+                    max(0.01, _safe_float(os.getenv("TRADE_COUNTER_TREND_MAX_SIZE_RATIO", 0.02), 0.02)),
+                )
+            turn_opposes_entry = (
+                candlestick_turn_count >= 2
+                and candlestick_turn_confidence >= 0.60
+                and (
+                    ("做多" in final and candlestick_turn_direction == "short")
+                    or ("做空" in final and candlestick_turn_direction == "long")
+                )
+            )
+            if turn_opposes_entry:
+                position_size = min(
+                    position_size,
+                    max(0.01, _safe_float(os.getenv("TRADE_OPPOSING_TURN_MAX_SIZE_RATIO", 0.02), 0.02)),
+                )
 
             position_size = _cap_initial_position_size(position_size)
 
@@ -10855,6 +11128,10 @@ def build_trade_signal_snapshot(
         "absorption": absorption,
         "sweep_high": sweep_high,
         "sweep_low": sweep_low,
+        "candlestick_turning": candlestick_turning,
+        "candlestick_turn_score": candlestick_turn_score,
+        "candlestick_turn_confidence": candlestick_turn_confidence,
+        "candlestick_turn_count": candlestick_turn_count,
         "entry_threshold": entry_threshold,
         "pullback_long": pullback_long,
         "pullback_short": pullback_short,
@@ -12924,6 +13201,10 @@ def run_bot():
                 regime=regime,
                 breakout=breakout,
                 sr_analysis=sr_analysis,
+                volume_ratio=decision.get("volume_ratio", 0.0),
+                volume_spike=decision.get("volume_spike", False),
+                buy_pressure=decision.get("buy_pressure", False),
+                sell_pressure=decision.get("sell_pressure", False),
             )
 
             pending_training_sample = _maybe_backfill_pending_training_sample(
@@ -13418,6 +13699,7 @@ def run_bot():
                     breakout=breakout,
                     volume_spike=bool(decision.get("volume_spike")),
                     regime=regime,
+                    candlestick_turning=decision.get("candlestick_turning"),
                 )
                 final = daily_plan["final"]
                 sl = daily_plan["sl"]
@@ -13760,6 +14042,14 @@ def run_bot():
                 active_trade["avg_entry"] = float(entry)
                 active_trade["tp"] = tp
                 active_trade["sl"] = sl
+                active_trade["trade_source"] = "daily_minimum" if daily_min_trade else "signal"
+                active_trade["candlestick_turn_direction"] = str(
+                    (decision.get("candlestick_turning") or {}).get("direction") or "neutral"
+                )
+                active_trade["candlestick_turn_count"] = _safe_int(decision.get("candlestick_turn_count"), 0)
+                active_trade["candlestick_turn_confidence"] = _safe_float(
+                    decision.get("candlestick_turn_confidence"), 0.0
+                )
                 base_size = _safe_float(position_size, 0.0)
                 if base_size <= 0:
                     base_size = 0.2
@@ -13769,6 +14059,11 @@ def run_bot():
                 if daily_min_trade:
                     active_trade["size"] = float(max(base_size, 0.01))
                 max_size, min_size = _derive_scaling_bounds(active_trade["size"])
+                if daily_min_trade and daily_plan.get("max_position_size") is not None:
+                    max_size = max(
+                        active_trade["size"],
+                        _safe_float(daily_plan.get("max_position_size"), active_trade["size"]),
+                    )
                 active_trade["max_size"] = max_size
                 active_trade["min_size"] = min_size
                 active_trade["add_count"] = 0

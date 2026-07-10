@@ -508,6 +508,8 @@ def _load_historical_news_events(start_dt, end_dt):
     if not eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_ENABLED", "1")):
         return []
     events = []
+    hourly_buckets = {}
+    aggregate_hourly = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_AGGREGATE_HOURLY", "1"))
     scan_gzip = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_SCAN_GZIP", "1"))
     start_scan = start_dt - dt.timedelta(hours=8)
     end_scan = end_dt + dt.timedelta(hours=1)
@@ -541,7 +543,34 @@ def _load_historical_news_events(start_dt, end_dt):
                         continue
                     predicted_bias = eth._safe_float(item.get("predicted_bias"), 0.0)
                     confidence = max(0.0, min(1.0, eth._safe_float(item.get("ai_confidence"), 0.35)))
-                    categories = _categorize_news_text(text)
+                    categories = (
+                        _categorize_news_text(text)
+                        if abs(predicted_bias) >= 0.20 or confidence >= 0.45
+                        else ["其他"]
+                    )
+                    if aggregate_hourly:
+                        bucket_ts = news_ts.replace(minute=0, second=0, microsecond=0)
+                        bucket = hourly_buckets.setdefault(
+                            bucket_ts,
+                            {
+                                "weighted": 0.0,
+                                "total_weight": 0.0,
+                                "confidence": 0.0,
+                                "categories": set(),
+                                "count": 0,
+                                "max_abs_bias": 0.0,
+                            },
+                        )
+                        weight = max(0.1, confidence)
+                        bucket["weighted"] += predicted_bias * weight
+                        bucket["total_weight"] += weight
+                        bucket["confidence"] = max(bucket["confidence"], confidence)
+                        bucket["count"] += 1
+                        bucket["max_abs_bias"] = max(bucket["max_abs_bias"], abs(predicted_bias))
+                        for category in categories:
+                            if category != "其他":
+                                bucket["categories"].add(category)
+                        continue
                     events.append(
                         {
                             "ts": news_ts,
@@ -553,6 +582,21 @@ def _load_historical_news_events(start_dt, end_dt):
                     )
         except Exception as exc:
             print(f"⚠️ 歷史新聞資料略過 {path.name}: {exc}")
+    if aggregate_hourly:
+        events = []
+        for bucket_ts, bucket in hourly_buckets.items():
+            total_weight = float(bucket.get("total_weight", 0.0))
+            bias = (float(bucket.get("weighted", 0.0)) / total_weight) if total_weight > 0 else 0.0
+            categories = sorted(bucket.get("categories") or []) or ["其他"]
+            events.append(
+                {
+                    "ts": bucket_ts,
+                    "bias": max(-2.0, min(2.0, bias)),
+                    "confidence": max(0.1, min(1.0, float(bucket.get("confidence", 0.35)))),
+                    "categories": categories,
+                    "text": f"hourly_news_batch:{int(bucket.get('count', 0))}",
+                }
+            )
     events.sort(key=lambda item: item["ts"])
     return events
 
@@ -871,6 +915,7 @@ def _apply_daily_min_backtest_plan(decision, frame_now, current_price):
         breakout=decision.get("breakout", 0),
         volume_spike=bool(decision.get("volume_spike", False)),
         regime=decision.get("regime", "range"),
+        candlestick_turning=decision.get("candlestick_turning"),
     )
     final = str(plan.get("final") or "觀望")
     if final.startswith("觀望"):
@@ -885,6 +930,7 @@ def _apply_daily_min_backtest_plan(decision, frame_now, current_price):
             "tp": float(plan.get("tp")),
             "sl": float(plan.get("sl")),
             "position_size": float(plan.get("position_size", 0.0)),
+            "max_position_size": float(plan.get("max_position_size", plan.get("position_size", 0.0))),
             "score": score,
             "host_logic_applied": True,
             "primary_indicator": "mlx_daily_minimum",
@@ -959,8 +1005,26 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
     if size <= 0:
         size = 0.2
     host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
-    size = float(min(1.0, max(size, 0.1)))
+    regime = str(decision.get("regime") or "range")
+    counter_trend_probe = (
+        (direction == "long" and regime in {"bear_trend", "bear_trend_strong"})
+        or (direction == "short" and regime in {"bull_trend", "bull_trend_strong"})
+    )
+    turn = decision.get("candlestick_turning") if isinstance(decision.get("candlestick_turning"), dict) else {}
+    opposing_turn_probe = (
+        int(decision.get("candlestick_turn_count", 0)) >= 2
+        and float(decision.get("candlestick_turn_confidence", 0.0)) >= 0.60
+        and str(turn.get("direction") or "neutral") not in {"neutral", direction}
+    )
+    min_open_size = 0.001 if (
+        str(host_logic.get("mode") or "") == "daily_minimum"
+        or counter_trend_probe
+        or opposing_turn_probe
+    ) else 0.1
+    size = float(min(1.0, max(size, min_open_size)))
     max_size, min_size = eth._derive_scaling_bounds(size)
+    if "max_position_size" in decision:
+        max_size = max(size, float(decision.get("max_position_size") or size))
     raw_features = decision.get("features") if isinstance(decision.get("features"), dict) else {}
     learn_features = eth._build_directional_learning_features(raw_features, direction)
     decision_for_mlx = dict(decision)
@@ -1021,8 +1085,13 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "repeated_support_tests": int(decision.get("repeated_support_tests", 0)),
         "repeated_resistance_tests": int(decision.get("repeated_resistance_tests", 0)),
         "repeated_test_pressure": float(decision.get("repeated_test_pressure", 0.0)),
+        "candlestick_turning": decision.get("candlestick_turning") if isinstance(decision.get("candlestick_turning"), dict) else {},
+        "candlestick_turn_score": float(decision.get("candlestick_turn_score", 0.0)),
+        "candlestick_turn_confidence": float(decision.get("candlestick_turn_confidence", 0.0)),
+        "candlestick_turn_count": int(decision.get("candlestick_turn_count", 0)),
         "content_override": decision.get("content_override") if isinstance(decision.get("content_override"), dict) else {},
         "host_opening_logic": host_logic,
+        "trade_source": str(host_logic.get("mode") or ""),
         "host_logic_applied": bool(decision.get("host_logic_applied", False)),
         "learned_entry_logic": decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {},
         "primary_indicator": str(decision.get("primary_indicator") or ""),
@@ -1054,6 +1123,12 @@ def _push_trade_state_to_eth(open_trade):
     eth.active_trade["sl"] = float(open_trade["sl"])
     eth.active_trade["open"] = True
     eth.active_trade["size"] = float(open_trade["size"])
+    eth.active_trade["trade_source"] = str(open_trade.get("trade_source") or "")
+    eth.active_trade["candlestick_turn_direction"] = str(
+        (open_trade.get("candlestick_turning") or {}).get("direction") or "neutral"
+    )
+    eth.active_trade["candlestick_turn_count"] = int(open_trade.get("candlestick_turn_count", 0))
+    eth.active_trade["candlestick_turn_confidence"] = float(open_trade.get("candlestick_turn_confidence", 0.0))
     eth.active_trade["max_size"] = float(open_trade.get("max_size", 1.0))
     eth.active_trade["min_size"] = float(open_trade.get("min_size", 0.1))
     eth.active_trade["add_count"] = int(open_trade.get("add_count", 0))
@@ -1309,6 +1384,11 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "funding_cost_rate_est_pct": round(float(open_trade.get("funding_cost_rate_est", 0.0)) * 100, 3),
         "support_hits": int(open_trade.get("support_hits", 0)),
         "resistance_hits": int(open_trade.get("resistance_hits", 0)),
+        "candlestick_turn_direction": str((open_trade.get("candlestick_turning") or {}).get("direction") or ""),
+        "candlestick_turn_count": int(open_trade.get("candlestick_turn_count", 0)),
+        "candlestick_turn_confidence": round(float(open_trade.get("candlestick_turn_confidence", 0.0)), 4),
+        "candlestick_turn_score": round(float(open_trade.get("candlestick_turn_score", 0.0)), 4),
+        "candlestick_turn_reasons": json.dumps((open_trade.get("candlestick_turning") or {}).get("reasons") or [], ensure_ascii=False),
         "host_logic_applied": bool(open_trade.get("host_logic_applied", False)),
         "host_logic_direction": str((open_trade.get("host_opening_logic") or {}).get("direction") or ""),
         "host_logic_mode": str((open_trade.get("host_opening_logic") or {}).get("mode") or ""),
@@ -1457,7 +1537,8 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 open_trade = _apply_trade_management(open_trade, current_price, atr_5m, ts)
                 continue
 
-            if idx % decision_every_bars != 0:
+            daily_min_due_now = _daily_min_due_for_backtest(ts, traded_dates)
+            if idx % decision_every_bars != 0 and not daily_min_due_now:
                 continue
 
             if fast_tail_frames:
@@ -1516,6 +1597,10 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 regime=str(decision["regime"]),
                 breakout=int(decision["breakout"]),
                 sr_analysis=sr_analysis,
+                volume_ratio=decision.get("volume_ratio", 0.0),
+                volume_spike=decision.get("volume_spike", False),
+                buy_pressure=decision.get("buy_pressure", False),
+                sell_pressure=decision.get("sell_pressure", False),
             )
 
             score = float(decision["score"])
