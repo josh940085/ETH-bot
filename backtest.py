@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import datetime as dt
+import gzip
 import io
 import json
 import os
+import re
 import warnings
 import zipfile
 from contextlib import contextmanager
@@ -29,6 +31,35 @@ from mlx_learning import build_trade_factor_tags
 
 INTERVAL_MS = {
     "5m": 5 * 60 * 1000,
+}
+
+
+NEWS_CATEGORY_PATTERNS = {
+    "地緣政治/戰爭": re.compile(
+        r"iran|israel|war|strike|ceasefire|russia|ukraine|conflict|missile|tariff|sanction|section 232|geopolitical",
+        re.I,
+    ),
+    "央行/利率/CPI": re.compile(
+        r"fed|fomc|powell|rate|rates|inflation|cpi|ppi|jobs|payroll|unemployment|yield|treasury",
+        re.I,
+    ),
+    "BTC/ETH價格快訊": re.compile(r"bitcoin|btc|ether|ethereum|eth|crypto|cryptocurrency|token|coin", re.I),
+    "監管/法律": re.compile(r"sec|cftc|regulat|lawsuit|court|legal|senate|congress|etf|probe|investigation", re.I),
+    "交易所/平台": re.compile(r"binance|coinbase|bybit|kraken|okx|exchange|wallet|stablecoin|tether|usdt|circle", re.I),
+    "股市大盤": re.compile(r"u\\.s\\. stocks|us stocks|dow jones|s&p|nasdaq|russell|stocks higher|stocks lower|futures|wall street", re.I),
+    "科技股/AI": re.compile(r"nvidia|apple|microsoft|tesla|meta|amazon|google|alphabet|ai |semiconductor|chip|spacex", re.I),
+    "油價/能源": re.compile(r"oil|crude|brent|wti|energy|opec|gas", re.I),
+    "券商調評/個股目標價": re.compile(r"raises .*price target|cuts .*price target|stock price target|upgrades|downgrades|rating", re.I),
+    "財報/指引": re.compile(r"earnings|revenue|profit|guidance|forecast|q[1-4]|results", re.I),
+}
+
+HIGH_IMPACT_NEWS_CATEGORIES = {
+    "地緣政治/戰爭",
+    "央行/利率/CPI",
+    "BTC/ETH價格快訊",
+    "監管/法律",
+    "交易所/平台",
+    "股市大盤",
 }
 
 
@@ -326,6 +357,227 @@ def resample_ohlcv(frame, rule):
         .dropna()
     )
     return agg
+
+
+def _safe_change(frame, ts, lookback):
+    if frame is None or frame.empty:
+        return 0.0
+    try:
+        current_slice = frame.loc[:ts]
+        previous_slice = frame.loc[: ts - lookback]
+    except Exception:
+        return 0.0
+    if current_slice.empty or previous_slice.empty:
+        return 0.0
+    current = float(current_slice["close"].iloc[-1])
+    previous = float(previous_slice["close"].iloc[-1])
+    if current <= 0 or previous <= 0:
+        return 0.0
+    return (current - previous) / previous
+
+
+def _fetch_yahoo_chart_frame(symbol, start_dt, end_dt, interval="5m"):
+    period1 = int((start_dt - dt.timedelta(days=2)).timestamp())
+    period2 = int(end_dt.timestamp())
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {
+        "period1": period1,
+        "period2": period2,
+        "interval": interval,
+        "includePrePost": "true",
+        "events": "history",
+    }
+    response = eth.HTTP_SESSION.get(url, params=params, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    result = ((payload.get("chart") or {}).get("result") or [None])[0]
+    if not isinstance(result, dict):
+        raise RuntimeError("Yahoo chart empty result")
+    timestamps = result.get("timestamp") or []
+    quote = (((result.get("indicators") or {}).get("quote") or [None])[0]) or {}
+    if not timestamps or not quote:
+        raise RuntimeError("Yahoo chart empty candles")
+    frame = pd.DataFrame(
+        {
+            "open": quote.get("open") or [],
+            "high": quote.get("high") or [],
+            "low": quote.get("low") or [],
+            "close": quote.get("close") or [],
+            "volume": quote.get("volume") or [],
+        },
+        index=pd.to_datetime(timestamps, unit="s", utc=True),
+    )
+    frame = frame.dropna(subset=["open", "high", "low", "close"])
+    for col in ["open", "high", "low", "close", "volume"]:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce").fillna(0.0)
+    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+    frame.attrs["kline_source"] = f"yahoo:{symbol}"
+    return frame
+
+
+def _fetch_optional_macro_frame(symbol, start_dt, end_dt, *, data_source="tradingview"):
+    start_ms = int((start_dt - dt.timedelta(days=2)).timestamp() * 1000)
+    end_ms = int(end_dt.timestamp() * 1000)
+    try:
+        if str(symbol).upper().endswith("USDT"):
+            return fetch_futures_klines(symbol, "5m", start_ms, end_ms, data_source="auto")
+        yahoo_symbol = {
+            "ES1!": "ES=F",
+            "NQ1!": "NQ=F",
+            "DXY": "DX-Y.NYB",
+        }.get(str(symbol).upper())
+        if yahoo_symbol and eth._is_truthy(os.getenv("BACKTEST_MACRO_YAHOO_FIRST", "1")):
+            try:
+                return _fetch_yahoo_chart_frame(yahoo_symbol, start_dt, end_dt)
+            except Exception as yahoo_exc:
+                print(f"⚠️ Yahoo歷史宏觀資料失敗 {yahoo_symbol}: {yahoo_exc}")
+        return _fetch_klines_from_market_source(symbol, "5m", start_ms, end_ms, limit=12000)
+    except Exception as exc:
+        print(f"⚠️ 歷史宏觀資料略過 {symbol}: {exc}")
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+
+def _categorize_news_text(text):
+    text = str(text or "")
+    categories = [name for name, pattern in NEWS_CATEGORY_PATTERNS.items() if pattern.search(text)]
+    return categories or ["其他"]
+
+
+def _iter_news_prediction_files():
+    base = Path(eth.NEWS_PERFORMANCE_LOG)
+    candidates = [base]
+    candidates.extend(sorted(base.parent.glob(base.name + ".*.gz")))
+    for path in candidates:
+        if path.exists() and path.is_file():
+            yield path
+
+
+def _load_historical_news_events(start_dt, end_dt):
+    if not eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_ENABLED", "1")):
+        return []
+    events = []
+    scan_gzip = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_SCAN_GZIP", "1"))
+    start_scan = start_dt - dt.timedelta(hours=8)
+    end_scan = end_dt + dt.timedelta(hours=1)
+    for path in _iter_news_prediction_files():
+        if path.suffix == ".gz" and not scan_gzip:
+            continue
+        opener = gzip.open if path.suffix == ".gz" else open
+        try:
+            with opener(path, "rt", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    raw_ts = item.get("timestamp")
+                    if not raw_ts:
+                        continue
+                    try:
+                        news_ts = dt.datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
+                    except Exception:
+                        continue
+                    if news_ts.tzinfo is None:
+                        news_ts = news_ts.replace(tzinfo=dt.timezone.utc)
+                    news_ts = news_ts.astimezone(dt.timezone.utc)
+                    if news_ts < start_scan or news_ts > end_scan:
+                        continue
+                    text = str(item.get("news") or item.get("news_key") or "").strip()
+                    if not text:
+                        continue
+                    predicted_bias = eth._safe_float(item.get("predicted_bias"), 0.0)
+                    confidence = max(0.0, min(1.0, eth._safe_float(item.get("ai_confidence"), 0.35)))
+                    categories = _categorize_news_text(text)
+                    events.append(
+                        {
+                            "ts": news_ts,
+                            "bias": predicted_bias,
+                            "confidence": confidence,
+                            "categories": categories,
+                            "text": text,
+                        }
+                    )
+        except Exception as exc:
+            print(f"⚠️ 歷史新聞資料略過 {path.name}: {exc}")
+    events.sort(key=lambda item: item["ts"])
+    return events
+
+
+class HistoricalMacroContext:
+    def __init__(self, start_dt, end_dt):
+        self.enabled = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_MACRO_ENABLED", "1"))
+        self.frames = {}
+        self.news_events = _load_historical_news_events(start_dt, end_dt)
+        self.news_event_count = len(self.news_events)
+        if not self.enabled:
+            return
+        symbols = {
+            "btc": "BTCUSDT",
+            "sp": os.getenv("BACKTEST_SP_SYMBOL", "ES1!"),
+            "nq": os.getenv("BACKTEST_NQ_SYMBOL", "NQ1!"),
+            "dxy": os.getenv("BACKTEST_DXY_SYMBOL", "DXY"),
+        }
+        for key, symbol in symbols.items():
+            frame = _fetch_optional_macro_frame(symbol, start_dt, end_dt)
+            if not frame.empty:
+                self.frames[key] = frame
+
+    def snapshot(self, ts):
+        lookback = dt.timedelta(hours=max(1.0, eth._safe_float(os.getenv("BACKTEST_MACRO_LOOKBACK_HOURS", 24), 24)))
+        sp_change = _safe_change(self.frames.get("sp"), ts, lookback)
+        nq_change = _safe_change(self.frames.get("nq"), ts, lookback)
+        btc_change = _safe_change(self.frames.get("btc"), ts, lookback)
+        dxy_change = _safe_change(self.frames.get("dxy"), ts, lookback)
+        news_bias, event_risk, categories = self._news_snapshot(ts)
+        return {
+            "sp_change": sp_change,
+            "nq_change": nq_change,
+            "btc_change": btc_change,
+            "dxy_change": dxy_change,
+            "news_bias": news_bias,
+            "event_risk": event_risk,
+            "news_categories": categories,
+        }
+
+    def _news_snapshot(self, ts):
+        if not self.news_events:
+            return 0.0, 0, []
+        window_hours = max(1.0, eth._safe_float(os.getenv("BACKTEST_NEWS_LOOKBACK_HOURS", 6), 6))
+        start_ts = ts - dt.timedelta(hours=window_hours)
+        weighted = 0.0
+        total_weight = 0.0
+        event_risk = 0
+        categories = []
+        for event in self.news_events:
+            event_ts = event["ts"]
+            if event_ts > ts:
+                break
+            if event_ts < start_ts:
+                continue
+            weight = max(0.1, float(event.get("confidence", 0.35)))
+            bias = max(-2.0, min(2.0, float(event.get("bias", 0.0))))
+            weighted += bias * weight
+            total_weight += weight
+            for category in event.get("categories") or []:
+                if category not in categories:
+                    categories.append(category)
+                if category in HIGH_IMPACT_NEWS_CATEGORIES:
+                    event_risk = max(event_risk, 1)
+            if abs(bias) >= 2.0:
+                event_risk = max(event_risk, 2)
+        if total_weight <= 0:
+            return 0.0, 0, []
+        news_bias = max(-2.0, min(2.0, weighted / total_weight))
+        return news_bias, event_risk, categories[:6]
+
+    def summary(self):
+        return {
+            "enabled": bool(self.enabled),
+            "frames_loaded": sorted(self.frames.keys()),
+            "news_events": int(self.news_event_count),
+        }
 
 
 def build_frame_map(base_5m):
@@ -684,6 +936,13 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "ai_long_prob": float(decision.get("ai_long_prob", 0.5)),
         "ai_short_prob": float(decision.get("ai_short_prob", 0.5)),
         "macro_bias": float(decision.get("macro_bias", 0.0)),
+        "sp_change": float(decision.get("sp_change", 0.0)),
+        "nq_change": float(decision.get("nq_change", 0.0)),
+        "btc_change": float(decision.get("btc_change", 0.0)),
+        "dxy_change": float(decision.get("dxy_change", 0.0)),
+        "news_bias": float(decision.get("news_bias", 0.0)),
+        "event_risk": int(decision.get("event_risk", 0)),
+        "news_categories": list(decision.get("news_categories") or []),
         "entry_threshold": float(decision.get("entry_threshold", 0.0)),
         "total_trade_cost_rate_est": float(decision.get("total_trade_cost_rate_est", 0.0)),
         "fee_round_trip_rate": float(decision.get("fee_round_trip_rate", 0.0)),
@@ -979,6 +1238,13 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "ai_long_prob": round(float(open_trade.get("ai_long_prob", 0.5)), 4),
         "ai_short_prob": round(float(open_trade.get("ai_short_prob", 0.5)), 4),
         "macro_bias": round(float(open_trade.get("macro_bias", 0.0)), 4),
+        "sp_change_pct": round(float(open_trade.get("sp_change", 0.0)) * 100, 3),
+        "nq_change_pct": round(float(open_trade.get("nq_change", 0.0)) * 100, 3),
+        "btc_change_pct": round(float(open_trade.get("btc_change", 0.0)) * 100, 3),
+        "dxy_change_pct": round(float(open_trade.get("dxy_change", 0.0)) * 100, 3),
+        "news_bias": round(float(open_trade.get("news_bias", 0.0)), 4),
+        "event_risk": int(open_trade.get("event_risk", 0)),
+        "news_categories": json.dumps(open_trade.get("news_categories") or [], ensure_ascii=False),
         "entry_threshold": round(float(open_trade.get("entry_threshold", 0.0)), 4),
         "rr_at_entry": round(float(open_trade.get("rr_at_entry", 0.0)), 3),
         "risk_rate_pct": round(float(open_trade.get("risk_rate", 0.0)) * 100, 3),
@@ -1028,6 +1294,9 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
     )
     if base_5m.empty:
         raise SystemExit("No klines returned from TradingView market data")
+
+    macro_context = HistoricalMacroContext(start_dt, end_dt)
+    print(f"🧭 歷史宏觀資料: {json.dumps(macro_context.summary(), ensure_ascii=False)}")
 
     frame_map = build_frame_map(base_5m)
     sr_cfg = [
@@ -1132,6 +1401,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
 
             sr_frames = {key: frame_now.get(key) for key in ("1d", "12h", "4h", "1h", "30m")}
             sr_analysis = eth.analyze_multi_tf_sr_frames(current_price, sr_frames, tf_cfg=sr_cfg)
+            macro_snapshot = macro_context.snapshot(ts)
 
             decision = eth.build_trade_signal_snapshot(
                 df_4h=frame_now["4h"],
@@ -1141,17 +1411,24 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 df_5m=frame_now["5m"],
                 price=current_price,
                 sr_analysis=sr_analysis,
-                sp_change=0.0,
-                nq_change=0.0,
-                btc_change=0.0,
-                dxy_change=0.0,
-                news_bias=0.0,
-                event_risk=0,
+                sp_change=macro_snapshot["sp_change"],
+                nq_change=macro_snapshot["nq_change"],
+                btc_change=macro_snapshot["btc_change"],
+                dxy_change=macro_snapshot["dxy_change"],
+                news_bias=macro_snapshot["news_bias"],
+                event_risk=macro_snapshot["event_risk"],
                 last_signal=last_signal_value,
                 losing_streak=losing_streak,
                 df_1d=frame_now["1d"],
                 df_1w=frame_now["1w"],
             )
+            decision["sp_change"] = macro_snapshot["sp_change"]
+            decision["nq_change"] = macro_snapshot["nq_change"]
+            decision["btc_change"] = macro_snapshot["btc_change"]
+            decision["dxy_change"] = macro_snapshot["dxy_change"]
+            decision["news_bias"] = macro_snapshot["news_bias"]
+            decision["event_risk"] = macro_snapshot["event_risk"]
+            decision["news_categories"] = list(macro_snapshot.get("news_categories") or [])
 
             eth._update_scaling_market_state(
                 price=current_price,
@@ -1221,7 +1498,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
 
     data_source = str(base_5m.attrs.get("kline_source") or "futures")
     coverage_start_dt = first_decision_ts or (base_rows.index[warmup_bars] if len(base_rows) > warmup_bars else start_dt)
-    return base_5m, trades, summarize_trades(
+    summary = summarize_trades(
         trades,
         start_dt,
         end_dt,
@@ -1229,7 +1506,9 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
         model_loaded,
         data_source=data_source,
         coverage_start_dt=coverage_start_dt,
-    ), learning_samples
+    )
+    summary["historical_macro_context"] = macro_context.summary()
+    return base_5m, trades, summary, learning_samples
 
 
 def main():

@@ -133,6 +133,9 @@ TRADINGVIEW_WS_URL = "wss://data.tradingview.com/socket.io/websocket"
 TRADINGVIEW_SYMBOL_MAP = {
     "ETHUSDT": "BINANCE:ETHUSDT.P",
     "BTCUSDT": "BINANCE:BTCUSDT.P",
+    "ES1!": "CME_MINI:ES1!",
+    "NQ1!": "CME_MINI:NQ1!",
+    "DXY": "TVC:DXY",
 }
 TRADINGVIEW_INTERVAL_MAP = {
     "1m": "1",
@@ -5935,9 +5938,6 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro
             base_size,
             max(0.02, _safe_float(os.getenv("DAILY_MIN_TRADE_AGAINST_MACRO_SIZE_RATIO", 0.025), 0.025)),
         )
-        if not local_confirmed:
-            final = f"觀望（每日最低單逆宏觀，等待5m/15m確認）"
-            base_size = 0.0
     return {
         "direction": direction,
         "final": final,
@@ -5946,6 +5946,7 @@ def _build_daily_min_trade_plan(price, atr, df_15m, df_5m, htf, mid_trend, macro
         "position_size": base_size,
         "against_macro": against_macro,
         "local_confirmed": local_confirmed,
+        "macro_wait_recommended": bool(against_macro and not local_confirmed),
     }
 
 
