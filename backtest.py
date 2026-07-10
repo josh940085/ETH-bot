@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import bisect
 import datetime as dt
 import gzip
 import io
@@ -376,6 +377,46 @@ def _safe_change(frame, ts, lookback):
     return (current - previous) / previous
 
 
+def _build_change_index(frame):
+    if frame is None or frame.empty or "close" not in frame.columns:
+        return None
+    work = frame[["close"]].dropna()
+    if work.empty:
+        return None
+    return work.index, work["close"].astype(float).to_numpy()
+
+
+def _safe_change_from_index(change_index, ts, lookback):
+    if not change_index:
+        return 0.0
+    index, closes = change_index
+    try:
+        current_pos = int(index.searchsorted(ts, side="right")) - 1
+        previous_pos = int(index.searchsorted(ts - lookback, side="right")) - 1
+    except Exception:
+        return 0.0
+    if current_pos < 0 or previous_pos < 0:
+        return 0.0
+    current = float(closes[current_pos])
+    previous = float(closes[previous_pos])
+    if current <= 0 or previous <= 0:
+        return 0.0
+    return (current - previous) / previous
+
+
+def _slice_frame_until(frame, index, ts, limit):
+    if frame is None or frame.empty:
+        return frame
+    try:
+        end_pos = int(index.searchsorted(ts, side="right"))
+    except Exception:
+        return frame.loc[:ts].tail(limit)
+    if end_pos <= 0:
+        return frame.iloc[:0]
+    start_pos = max(0, end_pos - int(limit))
+    return frame.iloc[start_pos:end_pos]
+
+
 def _fetch_yahoo_chart_frame(symbol, start_dt, end_dt, interval="5m"):
     period1 = int((start_dt - dt.timedelta(days=2)).timestamp())
     period2 = int(end_dt.timestamp())
@@ -426,6 +467,17 @@ def _fetch_optional_macro_frame(symbol, start_dt, end_dt, *, data_source="tradin
             "NQ1!": "NQ=F",
             "DXY": "DX-Y.NYB",
         }.get(str(symbol).upper())
+        requested_days = max(0.0, (end_dt - start_dt).total_seconds() / 86400.0)
+        max_external_days = max(
+            7.0,
+            eth._safe_float(os.getenv("BACKTEST_EXTERNAL_MACRO_MAX_5M_DAYS", 60), 60),
+        )
+        if yahoo_symbol and requested_days > max_external_days:
+            print(
+                f"⚠️ 長窗口歷史宏觀略過 {symbol}: "
+                f"{requested_days:.0f}天超過外部5m資料上限{max_external_days:.0f}天"
+            )
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
         if yahoo_symbol and eth._is_truthy(os.getenv("BACKTEST_MACRO_YAHOO_FIRST", "1")):
             try:
                 return _fetch_yahoo_chart_frame(yahoo_symbol, start_dt, end_dt)
@@ -509,7 +561,9 @@ class HistoricalMacroContext:
     def __init__(self, start_dt, end_dt):
         self.enabled = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_MACRO_ENABLED", "1"))
         self.frames = {}
+        self.change_indexes = {}
         self.news_events = _load_historical_news_events(start_dt, end_dt)
+        self.news_event_ts = [event["ts"] for event in self.news_events]
         self.news_event_count = len(self.news_events)
         if not self.enabled:
             return
@@ -523,13 +577,16 @@ class HistoricalMacroContext:
             frame = _fetch_optional_macro_frame(symbol, start_dt, end_dt)
             if not frame.empty:
                 self.frames[key] = frame
+                change_index = _build_change_index(frame)
+                if change_index is not None:
+                    self.change_indexes[key] = change_index
 
     def snapshot(self, ts):
         lookback = dt.timedelta(hours=max(1.0, eth._safe_float(os.getenv("BACKTEST_MACRO_LOOKBACK_HOURS", 24), 24)))
-        sp_change = _safe_change(self.frames.get("sp"), ts, lookback)
-        nq_change = _safe_change(self.frames.get("nq"), ts, lookback)
-        btc_change = _safe_change(self.frames.get("btc"), ts, lookback)
-        dxy_change = _safe_change(self.frames.get("dxy"), ts, lookback)
+        sp_change = _safe_change_from_index(self.change_indexes.get("sp"), ts, lookback)
+        nq_change = _safe_change_from_index(self.change_indexes.get("nq"), ts, lookback)
+        btc_change = _safe_change_from_index(self.change_indexes.get("btc"), ts, lookback)
+        dxy_change = _safe_change_from_index(self.change_indexes.get("dxy"), ts, lookback)
         news_bias, event_risk, categories = self._news_snapshot(ts)
         return {
             "sp_change": sp_change,
@@ -546,16 +603,13 @@ class HistoricalMacroContext:
             return 0.0, 0, []
         window_hours = max(1.0, eth._safe_float(os.getenv("BACKTEST_NEWS_LOOKBACK_HOURS", 6), 6))
         start_ts = ts - dt.timedelta(hours=window_hours)
+        start_idx = bisect.bisect_left(self.news_event_ts, start_ts)
+        end_idx = bisect.bisect_right(self.news_event_ts, ts)
         weighted = 0.0
         total_weight = 0.0
         event_risk = 0
         categories = []
-        for event in self.news_events:
-            event_ts = event["ts"]
-            if event_ts > ts:
-                break
-            if event_ts < start_ts:
-                continue
+        for event in self.news_events[start_idx:end_idx]:
             weight = max(0.1, float(event.get("confidence", 0.35)))
             bias = max(-2.0, min(2.0, float(event.get("bias", 0.0))))
             weighted += bias * weight
@@ -1299,6 +1353,19 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
     print(f"🧭 歷史宏觀資料: {json.dumps(macro_context.summary(), ensure_ascii=False)}")
 
     frame_map = build_frame_map(base_5m)
+    frame_indexes = {name: frame.index for name, frame in frame_map.items()}
+    frame_tail_limits = {
+        "5m": 360,
+        "15m": 320,
+        "30m": 280,
+        "1h": 260,
+        "4h": 260,
+        "12h": 220,
+        "1d": 260,
+        "1w": 260,
+    }
+    fast_tail_frames = eth._is_truthy(os.getenv("BACKTEST_FAST_TAIL_FRAMES", "0"))
+    decision_every_bars = max(1, eth._safe_int(os.getenv("BACKTEST_DECISION_EVERY_BARS", 3), 3))
     sr_cfg = [
         ("日線", "1d", 180, 1.1),
         ("12h", "12h", 160, 1.0),
@@ -1390,10 +1457,21 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 open_trade = _apply_trade_management(open_trade, current_price, atr_5m, ts)
                 continue
 
-            if idx % 3 != 0:
+            if idx % decision_every_bars != 0:
                 continue
 
-            frame_now = {name: frame.loc[:ts] for name, frame in frame_map.items()}
+            if fast_tail_frames:
+                frame_now = {
+                    name: _slice_frame_until(
+                        frame,
+                        frame_indexes[name],
+                        ts,
+                        frame_tail_limits.get(name, 260),
+                    )
+                    for name, frame in frame_map.items()
+                }
+            else:
+                frame_now = {name: frame.loc[:ts] for name, frame in frame_map.items()}
             if any(len(frame_now[key]) < 30 for key in ("15m", "30m", "1h", "4h")):
                 continue
             if first_decision_ts is None:

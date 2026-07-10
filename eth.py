@@ -9543,13 +9543,49 @@ def _predict_estimator_probability(estimator, frame):
         return None
 
 
+def _predict_estimator_probability_from_features(estimator, features):
+    if estimator is None or not hasattr(estimator, "predict_proba"):
+        return None
+    expected_cols = list(getattr(estimator, "feature_names_in_", []))
+    if not expected_cols:
+        return None
+    try:
+        x = np.asarray(
+            [[_safe_float(features.get(col), 0.0) for col in expected_cols]],
+            dtype=np.float32,
+        )
+        if isinstance(estimator, RandomForestClassifier) and hasattr(estimator, "estimators_"):
+            classes = list(getattr(estimator, "classes_", []))
+            if 1 not in classes:
+                return None
+            class_idx = classes.index(1)
+            total = 0.0
+            count = 0
+            for tree in estimator.estimators_:
+                total += float(tree.predict_proba(x, check_input=False)[0][class_idx])
+                count += 1
+            if count > 0:
+                return total / count
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            classes = list(getattr(estimator, "classes_", []))
+            proba = estimator.predict_proba(x)[0]
+            class_idx = classes.index(1) if 1 in classes else min(1, len(proba) - 1)
+            return float(proba[class_idx])
+    except Exception:
+        return None
+
+
 def _predict_legacy_trade_probability(features):
     normalized = _normalize_feature_payload(features)
     X_raw = pd.DataFrame([normalized])
 
     batch_prob = None
     if model is not None and _has_expected_feature_schema(model):
-        batch_prob = _predict_estimator_probability(model, X_raw)
+        if _is_truthy(os.getenv("BACKTEST_FAST_MODEL_PREDICT", "0")):
+            batch_prob = _predict_estimator_probability_from_features(model, normalized)
+        if batch_prob is None:
+            batch_prob = _predict_estimator_probability(model, X_raw)
 
     online_prob = None
     online_ready = (
@@ -9831,6 +9867,22 @@ def _score_macro_indicator_alignment(
         hard_block = True
         reasons.append("多週期低位追空未確認")
     if (
+        direction == "short"
+        and host_mode == "breakdown_after_support_tests"
+        and mid_trend != -1
+        and not (_safe_float(derivatives_pressure, 0.0) < -0.25 and _safe_float(taker_buy_ratio, 0.5) < 0.46)
+    ):
+        hard_block = True
+        reasons.append("跌破支撐但30m動能未同向")
+    if (
+        direction == "short"
+        and host_mode == "breakdown_after_support_tests"
+        and lower_zone_count >= 2
+        and not (_safe_float(derivatives_pressure, 0.0) < -0.20 and strong_trigger)
+    ):
+        hard_block = True
+        reasons.append("多週期低位跌破不追空")
+    if (
         direction == "long"
         and pos >= 0.70
         and _safe_float(macro_bias, 0.0) < 0.45
@@ -9847,6 +9899,14 @@ def _score_macro_indicator_alignment(
     ):
         hard_block = True
         reasons.append("多週期高位追多未確認")
+    if (
+        direction == "long"
+        and host_mode == "trend_pullback_long"
+        and upper_zone_count >= 3
+        and not (strong_trigger and _safe_float(derivatives_pressure, 0.0) > 0.20)
+    ):
+        hard_block = True
+        reasons.append("多週期高位趨勢多未確認突破")
     if against >= 4 and aligned <= 2 and not strong_trigger:
         hard_block = True
         reasons.append("多項指標逆向")
