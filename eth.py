@@ -3805,10 +3805,11 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         return _normalize_derivatives_flow_snapshot(snapshot)
 
     try:
-        oi_resp = HTTP_SESSION.get(
+        oi_resp = _binance_request_get(
             "https://fapi.binance.com/fapi/v1/openInterest",
             params={"symbol": symbol},
             timeout=5,
+            prefix="Binance derivatives openInterest",
         )
         oi_resp.raise_for_status()
         oi_data = oi_resp.json()
@@ -3818,10 +3819,11 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         if previous_oi > 0 and current_oi > 0:
             snapshot["open_interest_change"] = max(-1.0, min(1.0, (current_oi - previous_oi) / previous_oi))
 
-        premium_resp = HTTP_SESSION.get(
+        premium_resp = _binance_request_get(
             "https://fapi.binance.com/fapi/v1/premiumIndex",
             params={"symbol": symbol},
             timeout=5,
+            prefix="Binance derivatives premiumIndex",
         )
         premium_resp.raise_for_status()
         premium_data = premium_resp.json()
@@ -3834,10 +3836,11 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         snapshot["funding_rate_live"] = max(-0.05, min(0.05, _safe_float((premium_data or {}).get("lastFundingRate"), 0.0)))
         snapshot["funding_next_ts"] = _safe_int((premium_data or {}).get("nextFundingTime"), 0)
 
-        taker_resp = HTTP_SESSION.get(
+        taker_resp = _binance_request_get(
             "https://fapi.binance.com/futures/data/takerlongshortRatio",
             params={"symbol": symbol, "period": "5m", "limit": 2},
             timeout=5,
+            prefix="Binance derivatives takerRatio",
         )
         taker_resp.raise_for_status()
         taker_rows = taker_resp.json()
@@ -4221,9 +4224,17 @@ def _get_binance_spot_market_graph(log_on_error=False):
 
     graph = {}
     try:
-        exchange_info_res = HTTP_SESSION.get("https://api.binance.com/api/v3/exchangeInfo", timeout=10)
+        exchange_info_res = _binance_request_get(
+            "https://api.binance.com/api/v3/exchangeInfo",
+            timeout=10,
+            prefix="Binance spot exchangeInfo",
+        )
         exchange_info = exchange_info_res.json() if exchange_info_res.ok else {}
-        price_res = HTTP_SESSION.get("https://api.binance.com/api/v3/ticker/price", timeout=10)
+        price_res = _binance_request_get(
+            "https://api.binance.com/api/v3/ticker/price",
+            timeout=10,
+            prefix="Binance spot ticker",
+        )
         prices = price_res.json() if price_res.ok else []
 
         price_map = {}
@@ -4571,11 +4582,11 @@ def _binance_futures_signed_request(method, path, params=None):
 
     method_upper = str(method).upper()
     if method_upper == "GET":
-        request_func = HTTP_SESSION.get
+        request_func = _binance_request_get
     elif method_upper == "POST":
-        request_func = HTTP_SESSION.post
+        request_func = _binance_request_post
     elif method_upper == "DELETE":
-        request_func = HTTP_SESSION.delete
+        request_func = _binance_request_delete
     else:
         raise ValueError(f"Unsupported method: {method}")
     res = request_func(
@@ -4583,6 +4594,7 @@ def _binance_futures_signed_request(method, path, params=None):
         params={**query, "signature": signature},
         headers={"X-MBX-APIKEY": api_key},
         timeout=10,
+        prefix="Binance futures signed",
     )
     data = res.json()
     if not res.ok:
@@ -4610,11 +4622,11 @@ def _binance_spot_signed_request(method, path, params=None):
 
     method_upper = str(method).upper()
     if method_upper == "GET":
-        request_func = HTTP_SESSION.get
+        request_func = _binance_request_get
     elif method_upper == "POST":
-        request_func = HTTP_SESSION.post
+        request_func = _binance_request_post
     elif method_upper == "DELETE":
-        request_func = HTTP_SESSION.delete
+        request_func = _binance_request_delete
     else:
         raise ValueError(f"Unsupported method: {method}")
 
@@ -4623,6 +4635,7 @@ def _binance_spot_signed_request(method, path, params=None):
         params={**query, "signature": signature},
         headers={"X-MBX-APIKEY": api_key},
         timeout=10,
+        prefix="Binance spot signed",
     )
     data = res.json()
     if not res.ok:
@@ -7860,6 +7873,70 @@ KLINE_TTL = {
     "1m": 10
 }
 TRADINGVIEW_FAILURE_COOLDOWN = {}
+BINANCE_RATE_LIMIT_STATE = {"until": 0.0, "status": 0, "reason": ""}
+BINANCE_RATE_LIMIT_LOCK = threading.Lock()
+
+
+def _parse_retry_after_seconds(value, default_sec):
+    text = str(value or "").strip()
+    if not text:
+        return float(default_sec)
+    try:
+        return max(1.0, float(text))
+    except Exception:
+        return float(default_sec)
+
+
+def _binance_rate_limit_remaining_sec():
+    with BINANCE_RATE_LIMIT_LOCK:
+        until = _safe_float(BINANCE_RATE_LIMIT_STATE.get("until"), 0.0)
+        return max(0.0, until - time.time())
+
+
+def _raise_if_binance_rate_limited(prefix="Binance"):
+    remain = _binance_rate_limit_remaining_sec()
+    if remain > 0:
+        raise RuntimeError(f"{prefix} rate-limit cooldown {remain:.0f}s")
+
+
+def _note_binance_rate_limit_response(response, prefix="Binance"):
+    status = _safe_int(getattr(response, "status_code", 0), 0)
+    if status not in {418, 429}:
+        return
+    default_sec = 900 if status == 418 else 60
+    retry_sec = _parse_retry_after_seconds(getattr(response, "headers", {}).get("Retry-After"), default_sec)
+    retry_sec = max(float(default_sec), retry_sec) if status == 418 else max(10.0, retry_sec)
+    until = time.time() + retry_sec
+    with BINANCE_RATE_LIMIT_LOCK:
+        BINANCE_RATE_LIMIT_STATE.update(
+            {
+                "until": until,
+                "status": status,
+                "reason": str(prefix),
+            }
+        )
+    print(f"⚠️ {prefix} 觸發 {status}，暫停 Binance 請求 {int(retry_sec)} 秒，避免升級封鎖")
+
+
+def _binance_request_get(url, *, params=None, headers=None, timeout=10, prefix="Binance"):
+    _raise_if_binance_rate_limited(prefix)
+    response = HTTP_SESSION.get(url, params=params, headers=headers, timeout=timeout)
+    _note_binance_rate_limit_response(response, prefix=prefix)
+    return response
+
+
+def _binance_request_post(url, *, params=None, headers=None, timeout=10, prefix="Binance"):
+    _raise_if_binance_rate_limited(prefix)
+    response = HTTP_SESSION.post(url, params=params, headers=headers, timeout=timeout)
+    _note_binance_rate_limit_response(response, prefix=prefix)
+    return response
+
+
+def _binance_request_delete(url, *, params=None, headers=None, timeout=10, prefix="Binance"):
+    _raise_if_binance_rate_limited(prefix)
+    response = HTTP_SESSION.delete(url, params=params, headers=headers, timeout=timeout)
+    _note_binance_rate_limit_response(response, prefix=prefix)
+    return response
 
 
 def _tradingview_cooldown_key(symbol, interval):
@@ -12361,7 +12438,12 @@ def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, e
     errors = []
     for source_name, url in BINANCE_KLINE_SOURCES:
         try:
-            response = HTTP_SESSION.get(url, params=params, timeout=timeout)
+            response = _binance_request_get(
+                url,
+                params=params,
+                timeout=timeout,
+                prefix=f"{prefix}:{source_name}",
+            )
             response.raise_for_status()
             rows = response.json()
             if isinstance(rows, list) and rows:
