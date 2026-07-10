@@ -324,7 +324,7 @@ def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500, data_so
                                 frame = frame[~frame.index.duplicated(keep="last")]
                                 frame.attrs["kline_source"] = f"{frame.attrs.get('kline_source', 'binance_history')}+{tail.attrs.get('kline_source', 'market_tail')}"
                         except Exception as tail_exc:
-                            print(f"⚠️ Binance歷史資料尾段未補齊，TradingView尾段失敗: {tail_exc}")
+                            print(f"⚠️ Binance歷史資料尾段未補齊，市場尾段補齊失敗: {tail_exc}")
                 print(f"📈 回測K線來源: {frame.attrs.get('kline_source', 'binance_history')}")
                 return frame
         except Exception as exc:
