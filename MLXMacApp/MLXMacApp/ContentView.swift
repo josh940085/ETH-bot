@@ -1,7 +1,22 @@
 import SwiftUI
 
 struct ContentView: View {
+    private enum AppSection: String, CaseIterable, Identifiable {
+        case dashboard = "交易面板"
+        case chat = "MLX 對話"
+
+        var id: Self { self }
+
+        var icon: String {
+            switch self {
+            case .dashboard: return "chart.xyaxis.line"
+            case .chat: return "bubble.left.and.bubble.right"
+            }
+        }
+    }
+
     @StateObject private var viewModel = ChatViewModel()
+    @State private var selectedSection: AppSection = .dashboard
     @FocusState private var inputFocused: Bool
 
     var body: some View {
@@ -9,14 +24,19 @@ struct ContentView: View {
             sidebar
                 .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 330)
         } detail: {
-            VStack(spacing: 0) {
-                header
-                Divider()
-                conversation
-                Divider()
-                composer
+            switch selectedSection {
+            case .dashboard:
+                TradingDashboardView()
+            case .chat:
+                VStack(spacing: 0) {
+                    header
+                    Divider()
+                    conversation
+                    Divider()
+                    composer
+                }
+                .background(Color(nsColor: .windowBackgroundColor))
             }
-            .background(Color(nsColor: .windowBackgroundColor))
         }
         .task {
             await viewModel.checkConnection()
@@ -25,6 +45,25 @@ struct ContentView: View {
 
     private var sidebar: some View {
         Form {
+            Section("功能") {
+                ForEach(AppSection.allCases) { section in
+                    Button {
+                        selectedSection = section
+                    } label: {
+                        HStack {
+                            Label(section.rawValue, systemImage: section.icon)
+                            Spacer()
+                            if selectedSection == section {
+                                Image(systemName: "checkmark")
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
             Section("MLX 連線") {
                 TextField("API 位址", text: $viewModel.baseURL)
                     .textFieldStyle(.roundedBorder)

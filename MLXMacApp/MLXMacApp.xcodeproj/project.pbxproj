@@ -11,6 +11,7 @@
 		A10000000000000000000003 /* ChatViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* ChatViewModel.swift */; };
 		A10000000000000000000004 /* MLXService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* MLXService.swift */; };
 		A10000000000000000000005 /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* ChatMessage.swift */; };
+		A10000000000000000000008 /* TradingDashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* TradingDashboardView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +22,7 @@
 		A20000000000000000000005 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
 		A20000000000000000000006 /* MLXMacApp.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = MLXMacApp.entitlements; sourceTree = "<group>"; };
 		A20000000000000000000007 /* MLXMacApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MLXMacApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000008 /* TradingDashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradingDashboardView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -35,7 +37,7 @@
 		};
 		A40000000000000000000002 /* MLXMacApp */ = {
 			isa = PBXGroup;
-			children = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004, A20000000000000000000005, A20000000000000000000006);
+			children = (A20000000000000000000001, A20000000000000000000002, A20000000000000000000003, A20000000000000000000004, A20000000000000000000005, A20000000000000000000008, A20000000000000000000006);
 			path = MLXMacApp;
 			sourceTree = "<group>";
 		};
@@ -78,7 +80,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		A70000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005); runOnlyForDeploymentPostprocessing = 0; };
+		A70000000000000000000001 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000001, A10000000000000000000002, A10000000000000000000003, A10000000000000000000004, A10000000000000000000005, A10000000000000000000008); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
