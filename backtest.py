@@ -688,6 +688,7 @@ def build_frame_map(base_5m):
         "12h": eth.calc_indicators(resample_ohlcv(base_5m, "12h")),
         "1d": eth.calc_indicators(resample_ohlcv(base_5m, "1D")),
         "1w": eth.calc_indicators(resample_ohlcv(base_5m, "7D")),
+        "1M": eth.calc_indicators(resample_ohlcv(base_5m, "30D")),
     }
     return frame_map
 
@@ -916,6 +917,7 @@ def _apply_daily_min_backtest_plan(decision, frame_now, current_price):
         volume_spike=bool(decision.get("volume_spike", False)),
         regime=decision.get("regime", "range"),
         candlestick_turning=decision.get("candlestick_turning"),
+        df_1d=frame_now.get("1d"),
     )
     final = str(plan.get("final") or "觀望")
     if final.startswith("觀望"):
@@ -931,9 +933,11 @@ def _apply_daily_min_backtest_plan(decision, frame_now, current_price):
             "sl": float(plan.get("sl")),
             "position_size": float(plan.get("position_size", 0.0)),
             "max_position_size": float(plan.get("max_position_size", plan.get("position_size", 0.0))),
+            "max_hold_sec": float(plan.get("max_hold_sec", eth._trade_max_hold_sec("short"))),
             "score": score,
             "host_logic_applied": True,
             "primary_indicator": "mlx_daily_minimum",
+            "daily_min_style_2024": dict(plan.get("style_2024_profile") or {}),
         }
     )
     host_logic = daily_decision.get("host_opening_logic")
@@ -1095,10 +1099,13 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "host_logic_applied": bool(decision.get("host_logic_applied", False)),
         "learned_entry_logic": decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {},
         "primary_indicator": str(decision.get("primary_indicator") or ""),
+        "market_profile_phase": str(decision.get("market_profile_phase") or ""),
+        "market_profile_indicator_family": str(decision.get("market_profile_indicator_family") or ""),
         "max_favorable_move_pct": 0.0,
         "max_adverse_move_pct": 0.0,
         "max_size": max_size,
         "min_size": min_size,
+        "max_hold_sec": float(decision.get("max_hold_sec") or 0.0),
         "add_count": 0,
         "reduce_count": 0,
         "last_adjust_ts": 0.0,
@@ -1333,6 +1340,8 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
             "host_logic_direction": host_opening_logic.get("direction"),
             "host_logic_mode": host_opening_logic.get("mode"),
             "host_logic_confidence": host_opening_logic.get("confidence"),
+            "market_profile_phase": open_trade.get("market_profile_phase"),
+            "market_profile_indicator_family": open_trade.get("market_profile_indicator_family"),
             "learned_entry_logic": open_trade.get("learned_entry_logic"),
             "primary_indicator": open_trade.get("primary_indicator"),
         }
@@ -1394,6 +1403,8 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "host_logic_mode": str((open_trade.get("host_opening_logic") or {}).get("mode") or ""),
         "host_logic_confidence": round(float((open_trade.get("host_opening_logic") or {}).get("confidence", 0.0)), 4),
         "host_logic_reasons": json.dumps((open_trade.get("host_opening_logic") or {}).get("reasons") or [], ensure_ascii=False),
+        "market_profile_phase": str(open_trade.get("market_profile_phase") or ""),
+        "market_profile_indicator_family": str(open_trade.get("market_profile_indicator_family") or ""),
         "derivatives_pressure": round(float(open_trade.get("derivatives_pressure", 0.0)), 4),
         "open_interest_change_pct": round(float(open_trade.get("open_interest_change", 0.0)) * 100, 3),
         "mark_premium_rate_pct": round(float(open_trade.get("mark_premium_rate", 0.0)) * 100, 4),
@@ -1443,6 +1454,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
         "12h": 220,
         "1d": 260,
         "1w": 260,
+        "1M": 120,
     }
     fast_tail_frames = eth._is_truthy(os.getenv("BACKTEST_FAST_TAIL_FRAMES", "0"))
     decision_every_bars = max(1, eth._safe_int(os.getenv("BACKTEST_DECISION_EVERY_BARS", 3), 3))
@@ -1534,6 +1546,16 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
 
             if open_trade is not None:
                 atr_5m = float(max(bar_high - bar_low, 0.0))
+                max_hold_sec = float(open_trade.get("max_hold_sec") or 0.0)
+                held_sec = float(ts.timestamp()) - float(open_trade["open_ts"])
+                if max_hold_sec > 0 and held_sec >= max_hold_sec:
+                    equity, trade_record, learning_sample = _close_trade(open_trade, current_price, "MAX_HOLD", ts, equity)
+                    trades.append(trade_record)
+                    if learning_sample is not None:
+                        learning_samples.append(learning_sample)
+                    losing_streak = 0 if trade_record["trade_return"] > 0 else (losing_streak + 1)
+                    open_trade = None
+                    continue
                 open_trade = _apply_trade_management(open_trade, current_price, atr_5m, ts)
                 continue
 
@@ -1580,6 +1602,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 losing_streak=losing_streak,
                 df_1d=frame_now["1d"],
                 df_1w=frame_now["1w"],
+                df_1mth=frame_now.get("1M"),
             )
             decision["sp_change"] = macro_snapshot["sp_change"]
             decision["nq_change"] = macro_snapshot["nq_change"]
@@ -1608,6 +1631,17 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             current_direction = eth.get_signal_direction(final)
             last_direction_simple = eth.get_signal_direction(last_trade_signal) if last_trade_signal else None
             daily_min_forced = False
+            market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
+            market_phase = str(market_profile.get("phase") or "range_base")
+            daily_anchor_guard = bool(
+                eth._is_truthy(os.getenv("BACKTEST_DAILY_MIN_ANCHOR_GUARD_ENABLED", "1"))
+                and _taipei_trade_date(ts) not in traded_dates
+                and not daily_min_due_now
+                and (
+                    market_phase != "bull"
+                    or (current_direction == "long" and market_phase in {"bear", "bull_high_vol"})
+                )
+            )
 
             if current_direction == last_direction_simple:
                 if last_entry_price is not None:
@@ -1626,6 +1660,22 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                         final = "觀望（價格未達門檻）"
 
             last_signal_value = score
+
+            if (
+                daily_min_due_now
+                and not daily_min_forced
+                and market_phase != "bull"
+            ):
+                forced = _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price)
+                if forced is not None:
+                    final, score, decision = forced
+                    daily_min_forced = True
+
+            if daily_anchor_guard and not final.startswith("觀望"):
+                final = "觀望（每日單錨定-等待保底）"
+
+            if (not daily_min_forced) and market_phase == "bear" and "做多" in final:
+                final = "觀望（熊市禁止非每日多單）"
 
             if final.startswith("觀望"):
                 forced = _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price)

@@ -5903,6 +5903,213 @@ def _is_daily_min_position():
     return (opened_dt.hour, opened_dt.minute) >= (due_hour, due_minute)
 
 
+def _daily_min_2024_style_profile(df_1d=None, df_15m=None):
+    if not _is_truthy(os.getenv("DAILY_MIN_2024_STYLE_RELEASE_ENABLED", "0")):
+        return {"active": False, "reason": "disabled"}
+
+    frame = df_1d if df_1d is not None and len(df_1d) >= 45 else df_15m
+    if frame is None or len(frame) < 80 or "close" not in frame:
+        return {"active": False, "reason": "insufficient_data"}
+
+    lookback = max(45, _safe_int(os.getenv("DAILY_MIN_2024_STYLE_LOOKBACK_BARS", 120), 120))
+    closes = pd.to_numeric(frame["close"].tail(lookback), errors="coerce").dropna()
+    if len(closes) < 45:
+        return {"active": False, "reason": "insufficient_closes"}
+
+    first = _safe_float(closes.iloc[0], 0.0)
+    last = _safe_float(closes.iloc[-1], 0.0)
+    if first <= 0 or last <= 0:
+        return {"active": False, "reason": "invalid_price"}
+
+    diffs = closes.diff().abs().dropna()
+    path = _safe_float(diffs.sum(), 0.0)
+    trend_efficiency = abs(last - first) / max(path, 1e-9)
+    peak = closes.cummax()
+    drawdown = _safe_float(((closes / peak) - 1.0).min(), 0.0)
+    returns = closes.pct_change().dropna()
+    realized_vol = _safe_float(returns.std(), 0.0)
+    net_change = (last / first) - 1.0
+    anchor_change = net_change
+    if df_1d is not None and len(df_1d) >= 160 and "close" in df_1d:
+        anchor_lookback = max(160, _safe_int(os.getenv("DAILY_MIN_2024_STYLE_ANCHOR_BARS", 240), 240))
+        anchor_closes = pd.to_numeric(df_1d["close"].tail(anchor_lookback), errors="coerce").dropna()
+        if len(anchor_closes) >= 120 and _safe_float(anchor_closes.iloc[0], 0.0) > 0:
+            anchor_change = (_safe_float(anchor_closes.iloc[-1], 0.0) / _safe_float(anchor_closes.iloc[0], 1.0)) - 1.0
+
+    max_efficiency = _safe_float(os.getenv("DAILY_MIN_2024_STYLE_MAX_EFFICIENCY", 0.075), 0.075)
+    min_drawdown = _safe_float(os.getenv("DAILY_MIN_2024_STYLE_MIN_DRAWDOWN", 0.16), 0.16)
+    min_realized_vol = _safe_float(os.getenv("DAILY_MIN_2024_STYLE_MIN_REALIZED_VOL", 0.018), 0.018)
+    max_abs_net_change = _safe_float(os.getenv("DAILY_MIN_2024_STYLE_MAX_ABS_NET_CHANGE", 0.55), 0.55)
+    min_anchor_change = _safe_float(os.getenv("DAILY_MIN_2024_STYLE_MIN_ANCHOR_CHANGE", 0.18), 0.18)
+
+    active = bool(
+        trend_efficiency <= max_efficiency
+        and abs(drawdown) >= min_drawdown
+        and realized_vol >= min_realized_vol
+        and abs(net_change) <= max_abs_net_change
+        and anchor_change >= min_anchor_change
+    )
+    return {
+        "active": active,
+        "reason": "low_efficiency_high_swing" if active else "not_matched",
+        "trend_efficiency": round(trend_efficiency, 4),
+        "drawdown": round(drawdown, 4),
+        "realized_vol": round(realized_vol, 4),
+        "net_change": round(net_change, 4),
+        "anchor_change": round(anchor_change, 4),
+    }
+
+
+def _frame_close_change(frame, lookback):
+    if frame is None or len(frame) < 2 or "close" not in frame:
+        return 0.0
+    closes = pd.to_numeric(frame["close"].tail(max(2, int(lookback))), errors="coerce").dropna()
+    if len(closes) < 2:
+        return 0.0
+    first = _safe_float(closes.iloc[0], 0.0)
+    last = _safe_float(closes.iloc[-1], 0.0)
+    return (last / first - 1.0) if first > 0 else 0.0
+
+
+def _latest_frame_value(frame, column, default=0.0):
+    if frame is None or len(frame) == 0 or column not in frame:
+        return default
+    return _safe_float(frame[column].iloc[-1], default)
+
+
+def classify_market_strategy_profile(df_1mth=None, df_1w=None, df_1d=None, df_4h=None):
+    """Classify macro trend first, then select the indicator family for entries."""
+    daily = df_1d if df_1d is not None and len(df_1d) > 0 else df_4h
+    anchor_change = _frame_close_change(df_1mth, 12)
+    weekly_change = _frame_close_change(df_1w, 52)
+    daily_change = _frame_close_change(daily, 120)
+    four_hour_change = _frame_close_change(df_4h, 120)
+
+    daily_close = _latest_frame_value(daily, "close", 0.0)
+    daily_ema50 = _latest_frame_value(daily, "ema50", daily_close)
+    daily_ema200 = _latest_frame_value(daily, "ema200", daily_ema50)
+    weekly_close = _latest_frame_value(df_1w, "close", daily_close)
+    weekly_ema50 = _latest_frame_value(df_1w, "ema50", weekly_close)
+    monthly_close = _latest_frame_value(df_1mth, "close", weekly_close)
+    monthly_ema50 = _latest_frame_value(df_1mth, "ema50", monthly_close)
+
+    adx = _latest_frame_value(daily, "adx14", 0.0)
+    atr_rate = _latest_frame_value(daily, "atr14", 0.0) / max(daily_close, 1e-9)
+    bb_pos = _latest_frame_value(daily, "bb_pos", 0.5)
+    rsi = _latest_frame_value(daily, "rsi14", 50.0)
+    supertrend_dir = _safe_int(_latest_frame_value(daily, "supertrend_dir", 0.0), 0)
+    ichimoku_bias = _safe_int(_latest_frame_value(daily, "ichimoku_bias", 0.0), 0)
+
+    macro_score = 0
+    macro_score += 1 if monthly_close >= monthly_ema50 else -1
+    macro_score += 1 if weekly_close >= weekly_ema50 else -1
+    macro_score += 1 if daily_close >= daily_ema50 else -1
+    macro_score += 1 if daily_ema50 >= daily_ema200 else -1
+    macro_score += 1 if weekly_change > 0 else -1
+
+    high_vol = atr_rate >= _safe_float(os.getenv("MARKET_PROFILE_HIGH_ATR_RATE", 0.045), 0.045) or adx >= _safe_float(os.getenv("MARKET_PROFILE_HIGH_ADX", 28), 28)
+    range_like = (
+        abs(daily_change) <= _safe_float(os.getenv("MARKET_PROFILE_RANGE_MAX_DAILY_CHANGE", 0.22), 0.22)
+        and adx <= _safe_float(os.getenv("MARKET_PROFILE_RANGE_MAX_ADX", 22), 22)
+    )
+    bear_like = macro_score <= -2 or (weekly_change <= -0.18 and daily_close < daily_ema50)
+    bull_like = macro_score >= 2 or (weekly_change >= 0.18 and daily_close > daily_ema50)
+
+    if bear_like:
+        phase = "bear"
+        indicator_family = "supertrend_ema_adx"
+    elif range_like:
+        phase = "range_base"
+        indicator_family = "rsi_vwap_bollinger"
+    elif bull_like and high_vol:
+        phase = "bull_high_vol"
+        indicator_family = "ema_adx_atr"
+    elif bull_like:
+        phase = "bull"
+        indicator_family = "ema_supertrend_ichimoku"
+    else:
+        phase = "range_base"
+        indicator_family = "rsi_vwap_bollinger"
+
+    return {
+        "phase": phase,
+        "indicator_family": indicator_family,
+        "macro_score": macro_score,
+        "monthly_change": round(anchor_change, 4),
+        "weekly_change": round(weekly_change, 4),
+        "daily_change": round(daily_change, 4),
+        "four_hour_change": round(four_hour_change, 4),
+        "adx": round(adx, 4),
+        "atr_rate": round(atr_rate, 5),
+        "rsi": round(rsi, 2),
+        "bb_pos": round(bb_pos, 4),
+        "supertrend_dir": supertrend_dir,
+        "ichimoku_bias": ichimoku_bias,
+        "daily_close_above_ema50": bool(daily_close >= daily_ema50),
+        "weekly_close_above_ema50": bool(weekly_close >= weekly_ema50),
+        "monthly_close_above_ema50": bool(monthly_close >= monthly_ema50),
+    }
+
+
+def _market_profile_score_adjustment(profile, direction, *, price, df_15m, df_4h):
+    phase = str((profile or {}).get("phase") or "range_base")
+    family = str((profile or {}).get("indicator_family") or "")
+    direction_sign = 1 if direction == "long" else -1
+    adjustment = 0.0
+    reasons = []
+
+    close_15m = _latest_frame_value(df_15m, "close", price)
+    ema50_15m = _latest_frame_value(df_15m, "ema50", close_15m)
+    vwap_15m = _latest_frame_value(df_15m, "vwap", close_15m)
+    rsi_15m = _latest_frame_value(df_15m, "rsi14", 50.0)
+    bb_pos_15m = _latest_frame_value(df_15m, "bb_pos", 0.5)
+    supertrend_4h = _safe_int(_latest_frame_value(df_4h, "supertrend_dir", 0.0), 0)
+    adx_4h = _latest_frame_value(df_4h, "adx14", 0.0)
+    atr_rate_4h = _latest_frame_value(df_4h, "atr14", 0.0) / max(_latest_frame_value(df_4h, "close", price), 1e-9)
+    ichimoku_4h = _safe_int(_latest_frame_value(df_4h, "ichimoku_bias", 0.0), 0)
+
+    if phase == "bear":
+        if direction == "short" and close_15m < ema50_15m and supertrend_4h <= 0 and adx_4h >= 18:
+            adjustment += 0.09
+            reasons.append("熊市EMA/Supertrend/ADX同向做空")
+        elif direction == "long":
+            adjustment -= 0.10
+            reasons.append("熊市降低逆勢多單")
+    elif phase == "range_base":
+        if direction == "long" and rsi_15m <= 38 and (bb_pos_15m <= 0.30 or close_15m < vwap_15m):
+            adjustment += 0.08
+            reasons.append("震盪築底RSI/VWAP/Bollinger低位做多")
+        elif direction == "short" and rsi_15m >= 62 and (bb_pos_15m >= 0.70 or close_15m > vwap_15m):
+            adjustment += 0.07
+            reasons.append("震盪築底RSI/VWAP/Bollinger高位做空")
+        elif adx_4h < 18:
+            adjustment -= 0.04
+            reasons.append("低ADX震盪降低追突破")
+    elif phase == "bull":
+        if direction == "long" and close_15m > ema50_15m and supertrend_4h >= 0 and ichimoku_4h >= 0:
+            adjustment += 0.10
+            reasons.append("牛市EMA/Supertrend/Ichimoku同向做多")
+        elif direction == "short":
+            adjustment -= 0.08
+            reasons.append("牛市降低逆勢空單")
+    elif phase == "bull_high_vol":
+        if direction == "long" and close_15m > ema50_15m and adx_4h >= 22:
+            adjustment += 0.08
+            reasons.append("高波動牛市EMA+ADX順勢做多")
+        elif direction == "short" and supertrend_4h < 0 and adx_4h >= 24:
+            adjustment += 0.03
+            reasons.append("高波動牛市只允許強ADX回落空")
+        if atr_rate_4h >= 0.045:
+            adjustment *= 0.85
+            reasons.append("ATR偏高降低追價權重")
+
+    return {
+        "adjustment": max(-0.14, min(0.14, adjustment)),
+        "reasons": reasons,
+        "indicator_family": family,
+    }
+
+
 def _build_daily_min_trade_plan(
     price,
     atr,
@@ -5916,6 +6123,7 @@ def _build_daily_min_trade_plan(
     volume_spike=False,
     regime="range",
     candlestick_turning=None,
+    df_1d=None,
 ):
     """Create the small end-of-day trade from current structure, never a blind side."""
     entry = max(0.0, _safe_float(price, 0.0))
@@ -6027,6 +6235,16 @@ def _build_daily_min_trade_plan(
             base_size,
             max(probe_size, _safe_float(os.getenv("DAILY_MIN_RANGE_SIZE_RATIO", base_size * 0.75), base_size * 0.75)),
         )
+    style_profile = _daily_min_2024_style_profile(df_1d=df_1d, df_15m=df_15m)
+    fast_release = bool(style_profile.get("active"))
+    max_hold_sec = 0.0
+    if fast_release:
+        max_hold_sec = max(
+            3600.0,
+            _safe_float(os.getenv("DAILY_MIN_2024_STYLE_MAX_HOLD_SEC", 6 * 3600), 6 * 3600),
+        )
+        if not (turn_matches_trade and local_confirmed and turn_count >= 2 and turn_confidence >= 0.55):
+            max_size = base_size
     return {
         "direction": direction,
         "final": final,
@@ -6034,10 +6252,12 @@ def _build_daily_min_trade_plan(
         "tp": tp,
         "position_size": base_size,
         "max_position_size": max_size,
+        "max_hold_sec": max_hold_sec,
         "against_macro": against_macro,
         "local_confirmed": local_confirmed,
         "macro_wait_recommended": bool(against_macro and not local_confirmed),
         "candlestick_turn_direction": turn_direction,
+        "style_2024_profile": style_profile,
     }
 
 
@@ -8103,6 +8323,7 @@ if LIVE_RUNTIME_ENABLED:
 def calc_indicators(df):
     df["ma25"] = df["close"].rolling(25).mean()
     df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
 
     ema12 = df["close"].ewm(span=12).mean()
     ema26 = df["close"].ewm(span=26).mean()
@@ -8118,6 +8339,79 @@ def calc_indicators(df):
     df["vol_ma20"] = df["volume"].rolling(20).mean()
     # VWAP（簡化版：以收盤加權）
     df["vwap"] = (df["close"] * df["volume"]).cumsum() / (df["volume"].cumsum() + 1e-9)
+
+    high = pd.to_numeric(df["high"], errors="coerce")
+    low = pd.to_numeric(df["low"], errors="coerce")
+    close = pd.to_numeric(df["close"], errors="coerce")
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            high - low,
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    df["atr14"] = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=df.index)
+    atr_ref = df["atr14"].replace(0, np.nan)
+    plus_di = 100 * plus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr_ref
+    minus_di = 100 * minus_dm.ewm(alpha=1 / 14, adjust=False).mean() / atr_ref
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
+    df["adx14"] = dx.ewm(alpha=1 / 14, adjust=False).mean().fillna(0.0)
+    df["plus_di14"] = plus_di.fillna(0.0)
+    df["minus_di14"] = minus_di.fillna(0.0)
+
+    bb_mid = close.rolling(20).mean()
+    bb_std = close.rolling(20).std()
+    df["bb_mid"] = bb_mid
+    df["bb_upper"] = bb_mid + bb_std * 2
+    df["bb_lower"] = bb_mid - bb_std * 2
+    df["bb_pos"] = ((close - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"]).replace(0, np.nan)).clip(0, 1).fillna(0.5)
+
+    hl2 = (high + low) / 2
+    st_mult = _safe_float(os.getenv("SUPERTREND_MULTIPLIER", 3.0), 3.0)
+    upper_basic = hl2 + st_mult * df["atr14"]
+    lower_basic = hl2 - st_mult * df["atr14"]
+    final_upper = upper_basic.copy()
+    final_lower = lower_basic.copy()
+    supertrend = pd.Series(index=df.index, dtype=float)
+    supertrend_dir = pd.Series(index=df.index, dtype=float)
+    for i in range(len(df)):
+        if i == 0:
+            supertrend.iloc[i] = upper_basic.iloc[i]
+            supertrend_dir.iloc[i] = 1.0
+            continue
+        if upper_basic.iloc[i] < final_upper.iloc[i - 1] or close.iloc[i - 1] > final_upper.iloc[i - 1]:
+            final_upper.iloc[i] = upper_basic.iloc[i]
+        else:
+            final_upper.iloc[i] = final_upper.iloc[i - 1]
+        if lower_basic.iloc[i] > final_lower.iloc[i - 1] or close.iloc[i - 1] < final_lower.iloc[i - 1]:
+            final_lower.iloc[i] = lower_basic.iloc[i]
+        else:
+            final_lower.iloc[i] = final_lower.iloc[i - 1]
+        if supertrend.iloc[i - 1] == final_upper.iloc[i - 1]:
+            supertrend.iloc[i] = final_lower.iloc[i] if close.iloc[i] > final_upper.iloc[i] else final_upper.iloc[i]
+        else:
+            supertrend.iloc[i] = final_upper.iloc[i] if close.iloc[i] < final_lower.iloc[i] else final_lower.iloc[i]
+        supertrend_dir.iloc[i] = 1.0 if close.iloc[i] >= supertrend.iloc[i] else -1.0
+    df["supertrend"] = supertrend.ffill()
+    df["supertrend_dir"] = supertrend_dir.fillna(0.0)
+
+    tenkan = (high.rolling(9).max() + low.rolling(9).min()) / 2
+    kijun = (high.rolling(26).max() + low.rolling(26).min()) / 2
+    span_a = ((tenkan + kijun) / 2).shift(26)
+    span_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
+    df["ichimoku_tenkan"] = tenkan
+    df["ichimoku_kijun"] = kijun
+    df["ichimoku_span_a"] = span_a
+    df["ichimoku_span_b"] = span_b
+    cloud_top = pd.concat([span_a, span_b], axis=1).max(axis=1)
+    cloud_bottom = pd.concat([span_a, span_b], axis=1).min(axis=1)
+    df["ichimoku_bias"] = np.where(close > cloud_top, 1, np.where(close < cloud_bottom, -1, 0))
 
     return df
 
@@ -10252,6 +10546,7 @@ def build_trade_signal_snapshot(
     derivatives_flow=None,
     df_1d=None,
     df_1w=None,
+    df_1mth=None,
 ):
     sr_analysis = sr_analysis if isinstance(sr_analysis, dict) else {"bias": 0.0, "support_hits": 0, "resistance_hits": 0, "lines": []}
 
@@ -10294,6 +10589,7 @@ def build_trade_signal_snapshot(
             "host_opening_logic": {"direction": "neutral", "confidence": 0.0, "reasons": []},
             "host_logic_applied": False,
             "macro_indicator_alignment": {"score": 0.0, "aligned": 0, "against": 0, "reasons": []},
+            "market_profile": {"phase": "unknown", "indicator_family": "none"},
         }
 
     price = _safe_float(price, _safe_float(df_5m["close"].iloc[-1], 0.0))
@@ -10304,7 +10600,9 @@ def build_trade_signal_snapshot(
         df_1w,
         df_1h=df_1h,
         df_15m=df_15m,
+        df_1mth=df_1mth,
     )
+    market_profile = classify_market_strategy_profile(df_1mth=df_1mth, df_1w=df_1w, df_1d=df_1d, df_4h=df_4h)
     timeframe_patterns = {
         "fifteen_min": _detect_candlestick_pattern(df_15m),
         "one_hour": _detect_candlestick_pattern(df_1h),
@@ -10551,6 +10849,17 @@ def build_trade_signal_snapshot(
     if abs(derivatives_pressure) >= 0.10:
         score += max(-0.06, min(0.06, derivatives_pressure * 0.045))
         score = max(0.05, min(score, 0.95))
+
+    profile_direction = "long" if score >= 0.5 else "short"
+    market_profile_adjustment = _market_profile_score_adjustment(
+        market_profile,
+        profile_direction,
+        price=price,
+        df_15m=df_15m,
+        df_4h=df_4h,
+    )
+    score += _safe_float(market_profile_adjustment.get("adjustment"), 0.0)
+    score = max(0.05, min(score, 0.95))
 
     auxiliary_score = score
     host_opening_logic = _score_host_opening_logic(
@@ -11155,6 +11464,10 @@ def build_trade_signal_snapshot(
         "host_logic_applied": bool(host_logic_applied),
         "macro_indicator_alignment": macro_indicator_alignment,
         "learned_entry_logic": learned_entry_logic,
+        "market_profile": market_profile,
+        "market_profile_phase": market_profile.get("phase"),
+        "market_profile_indicator_family": market_profile.get("indicator_family"),
+        "market_profile_adjustment": market_profile_adjustment,
         "timeframe_kline_view": timeframe_kline_view,
         "timeframe_kline_summary": timeframe_kline_view.get("summary", ""),
         "higher_timeframe": higher_timeframe,
@@ -13361,7 +13674,8 @@ def run_bot():
                 candle_low = float(df_1m["low"].iloc[-1]) if len(df_1m) > 0 else current
                 open_ts = _safe_float(active_trade.get("open_time"), 0.0)
                 trade_horizon = _normalize_trade_time_horizon(active_trade.get("time_horizon"))
-                max_hold_sec = _trade_max_hold_sec(trade_horizon)
+                custom_max_hold_sec = _safe_float(active_trade.get("max_hold_sec"), 0.0)
+                max_hold_sec = custom_max_hold_sec if custom_max_hold_sec > 0 else _trade_max_hold_sec(trade_horizon)
                 held_sec = time.time() - open_ts if open_ts > 0 else 0.0
                 if open_ts > 0 and held_sec >= max_hold_sec:
                     held_direction = str(active_trade.get("direction") or "long")
@@ -13648,6 +13962,7 @@ def run_bot():
                 derivatives_flow=derivatives_flow,
                 df_1d=df_1d,
                 df_1w=df_1w,
+                df_1mth=df_1mth,
             )
 
             features = decision["features"]
@@ -13700,6 +14015,7 @@ def run_bot():
                     volume_spike=bool(decision.get("volume_spike")),
                     regime=regime,
                     candlestick_turning=decision.get("candlestick_turning"),
+                    df_1d=df_1d,
                 )
                 final = daily_plan["final"]
                 sl = daily_plan["sl"]
@@ -13707,6 +14023,25 @@ def run_bot():
                 position_size = daily_plan["position_size"]
                 if final.startswith("觀望"):
                     daily_min_trade = False
+
+            if (
+                not daily_min_trade
+                and _is_truthy(os.getenv("DAILY_MIN_ANCHOR_GUARD_ENABLED", "1"))
+                and not bool(POSITION_PANEL_STATE.get("daily_trade_opened", False))
+                and not _daily_min_trade_due()
+                and not str(final).startswith("觀望")
+            ):
+                market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
+                market_phase = str(market_profile.get("phase") or "range_base")
+                final_direction = get_signal_direction(final)
+                if market_phase != "bull" or (
+                    final_direction == "long" and market_phase in {"bear", "bull_high_vol"}
+                ):
+                    final = "觀望（每日單錨定-等待保底）"
+                    position_size = 0.0
+                elif market_phase == "bear" and final_direction == "long":
+                    final = "觀望（熊市禁止非每日多單）"
+                    position_size = 0.0
 
             if not daily_min_trade:
                 sl_guard_reason = _recent_sl_guard_reason(
@@ -14085,6 +14420,10 @@ def run_bot():
                     htf=htf,
                     mid_trend=mid_trend,
                     daily_min_trade=daily_min_trade,
+                )
+                active_trade["max_hold_sec"] = _safe_float(
+                    daily_plan.get("max_hold_sec") if daily_min_trade else 0.0,
+                    0.0,
                 )
                 _set_break_even_state(False)
                 # 注意：active_trade["open"] 尚未設為 True，等待跟單確認後再設定
