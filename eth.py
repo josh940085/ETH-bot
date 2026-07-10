@@ -7848,6 +7848,22 @@ KLINE_TTL = {
     "5m": 60*2,
     "1m": 10
 }
+TRADINGVIEW_FAILURE_COOLDOWN = {}
+
+
+def _tradingview_cooldown_key(symbol, interval):
+    return f"{str(symbol or '').upper()}:{str(interval)}"
+
+
+def _is_tradingview_in_cooldown(symbol, interval):
+    key = _tradingview_cooldown_key(symbol, interval)
+    until = _safe_float(TRADINGVIEW_FAILURE_COOLDOWN.get(key), 0.0)
+    return until > time.time()
+
+
+def _mark_tradingview_failure(symbol, interval):
+    cooldown = max(15.0, _safe_float(os.getenv("TRADINGVIEW_FAILURE_COOLDOWN_SEC", 90), 90))
+    TRADINGVIEW_FAILURE_COOLDOWN[_tradingview_cooldown_key(symbol, interval)] = time.time() + cooldown
 
 # =============================
 # WebSocket（tick級）
@@ -12067,12 +12083,38 @@ def _tradingview_bar_count(interval, limit, start_time_ms=None, end_time_ms=None
 
 def _tradingview_requested_bars(interval, limit, start_time_ms=None, end_time_ms=None):
     requested = max(1, _safe_int(limit, 100))
+    if str(interval) == "1M" and start_time_ms is None:
+        requested = min(requested, max(60, _safe_int(os.getenv("TRADINGVIEW_MONTHLY_MAX_BARS", 120), 120)))
     interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
     if start_time_ms is not None:
         end_ms = int(_safe_float(end_time_ms, time.time() * 1000))
         span = max(0, end_ms - int(_safe_float(start_time_ms, 0.0)))
         requested = max(requested, int(span // max(1, interval_ms)) + 8)
     return max(1, requested)
+
+
+def _tradingview_min_acceptable_bars(interval, requested_bars, start_time_ms=None):
+    if start_time_ms is not None:
+        return max(1, min(24, _safe_int(requested_bars, 100)))
+    if str(interval) == "1M":
+        return max(24, min(60, _safe_int(requested_bars, 100)))
+    if str(interval) == "1w":
+        return max(52, min(120, _safe_int(requested_bars, 100)))
+    return max(30, min(_safe_int(requested_bars, 100), _safe_int(os.getenv("TRADINGVIEW_MIN_ACCEPTABLE_BARS", 120), 120)))
+
+
+def _filter_tradingview_rows(parsed_all, start_time_ms=None, end_time_ms=None):
+    parsed = []
+    start_ms = int(_safe_float(start_time_ms, 0.0)) if start_time_ms is not None else None
+    end_ms = int(_safe_float(end_time_ms, 0.0)) if end_time_ms is not None else None
+    for row in parsed_all:
+        open_ms = int(row[0])
+        if start_ms is not None and open_ms < start_ms:
+            continue
+        if end_ms is not None and open_ms > end_ms:
+            continue
+        parsed.append(row)
+    return parsed
 
 
 def _parse_tradingview_series_rows(series, interval):
@@ -12114,6 +12156,7 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
     chart_session = _tradingview_session_id("cs")
     tv_symbol = _tradingview_symbol(symbol)
     requested_bars = _tradingview_requested_bars(interval, limit, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
+    min_acceptable_bars = _tradingview_min_acceptable_bars(interval, requested_bars, start_time_ms=start_time_ms)
     max_paged_bars = max(
         10000,
         min(750000, _safe_int(os.getenv("TRADINGVIEW_MAX_PAGED_BARS", 600000), 600000)),
@@ -12159,9 +12202,13 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
                 raw = ws.recv()
             except Exception as exc:
                 if accumulated_rows:
+                    parsed_all = [accumulated_rows[key] for key in sorted(accumulated_rows)]
+                    parsed = _filter_tradingview_rows(parsed_all, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
+                    if len(parsed) >= min_acceptable_bars:
+                        return parsed[-max(1, min(max_paged_bars, _safe_int(limit, len(parsed)))) :]
                     oldest_open = min(accumulated_rows)
                     raise RuntimeError(
-                        f"TradingView returned only {len(accumulated_rows)} {interval} bars; "
+                        f"TradingView returned only {len(parsed)} usable {interval} bars; "
                         f"oldest_open={oldest_open}, requested_start={start_time_ms}, requested_bars={requested_bars}"
                     ) from exc
                 raise
@@ -12212,18 +12259,14 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
                         f"increase TRADINGVIEW_MAX_PAGED_BARS above {max_paged_bars} or use a shorter window"
                     )
 
-                parsed = []
-                start_ms = int(_safe_float(start_time_ms, 0.0)) if start_time_ms is not None else None
-                end_ms = int(_safe_float(end_time_ms, 0.0)) if end_time_ms is not None else None
-                for row in parsed_all:
-                    open_ms = int(row[0])
-                    if start_ms is not None and open_ms < start_ms:
-                        continue
-                    if end_ms is not None and open_ms > end_ms:
-                        continue
-                    parsed.append(row)
+                parsed = _filter_tradingview_rows(parsed_all, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
                 if parsed:
                     return parsed[-max(1, min(max_paged_bars, _safe_int(limit, 100))) :]
+        if accumulated_rows:
+            parsed_all = [accumulated_rows[key] for key in sorted(accumulated_rows)]
+            parsed = _filter_tradingview_rows(parsed_all, start_time_ms=start_time_ms, end_time_ms=end_time_ms)
+            if len(parsed) >= min_acceptable_bars:
+                return parsed[-max(1, min(max_paged_bars, _safe_int(limit, len(parsed)))) :]
         raise RuntimeError("TradingView K線逾時或無資料")
     finally:
         try:
@@ -12338,21 +12381,27 @@ def _fetch_market_kline_rows(symbol, interval, limit=100, start_time_ms=None, en
         if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
             raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 12h 合成失敗")
 
-    try:
-        rows = _fetch_tradingview_kline_rows(
-            symbol,
-            interval,
-            limit=limit,
-            start_time_ms=start_time_ms,
-            end_time_ms=end_time_ms,
-            timeout=timeout,
-        )
-        if rows:
-            return rows, "tradingview"
-        errors.append("tradingview: empty")
-    except Exception as exc:
-        errors.append(f"tradingview: {exc}")
-        _log_kline_source_failure("tradingview", exc, prefix=prefix)
+    if _is_tradingview_in_cooldown(symbol, interval):
+        errors.append("tradingview: cooldown")
+    else:
+        try:
+            rows = _fetch_tradingview_kline_rows(
+                symbol,
+                interval,
+                limit=limit,
+                start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms,
+                timeout=timeout,
+            )
+            if rows:
+                TRADINGVIEW_FAILURE_COOLDOWN.pop(_tradingview_cooldown_key(symbol, interval), None)
+                return rows, "tradingview"
+            errors.append("tradingview: empty")
+            _mark_tradingview_failure(symbol, interval)
+        except Exception as exc:
+            errors.append(f"tradingview: {exc}")
+            _mark_tradingview_failure(symbol, interval)
+            _log_kline_source_failure("tradingview", exc, prefix=prefix)
 
     if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
         raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 來源失敗")
@@ -12508,7 +12557,7 @@ def run_bot():
                 except:
                     pass
             # ===== HTF（方向）=====
-            df_1mth = get_kline("1M", 1500)
+            df_1mth = get_kline("1M", max(60, _safe_int(os.getenv("MONTHLY_KLINE_LIMIT", 120), 120)))
             df_1w = get_kline("1w", 110)
             df_1d = get_kline("1d", 370)
             df_4h = get_kline("4h", 200)
@@ -13678,7 +13727,15 @@ def run_bot():
             time.sleep(0.8)
 
         except Exception as e:
-            print("error:", repr(e))
+            err_text = repr(e)
+            if "TradingView" in err_text or "tradingview" in err_text:
+                now_ts = time.time()
+                last_ts = _safe_float(getattr(run_bot, "last_tradingview_error_log_ts", 0.0), 0.0)
+                if now_ts - last_ts >= 300:
+                    print("⚠️ TradingView 暫時不可用，已改用快取/等待下一輪:", err_text)
+                    run_bot.last_tradingview_error_log_ts = now_ts
+            else:
+                print("error:", err_text)
             time.sleep(3)
 
 # =============================
