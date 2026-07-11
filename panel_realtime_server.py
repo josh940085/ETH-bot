@@ -372,6 +372,67 @@ def _dominant_counter_value(counter: Counter, fallback: str = "") -> str:
     return str(value or fallback)
 
 
+def _is_daily_min_trade_row(row: dict) -> bool:
+    signal = str(row.get("signal") or "")
+    host_mode = str(row.get("host_logic_mode") or "")
+    exit_reason = str(row.get("exit_reason") or "")
+    return (
+        "每日保底" in signal
+        or host_mode == "daily_minimum"
+        or exit_reason == "DAILY_MIN_ROLLOVER"
+    )
+
+
+def _empty_return_bucket() -> dict:
+    return {
+        "trades": 0,
+        "wins": 0,
+        "return_pct": 0.0,
+    }
+
+
+def _add_return_bucket(bucket: dict, trade_return: float) -> None:
+    bucket["trades"] += 1
+    bucket["return_pct"] += trade_return * 100.0
+    if trade_return > 0:
+        bucket["wins"] += 1
+
+
+def _finish_return_bucket(bucket: dict) -> dict:
+    trades = int(bucket.get("trades") or 0)
+    wins = int(bucket.get("wins") or 0)
+    return {
+        "trades": trades,
+        "wins": wins,
+        "win_rate": round((wins / trades) * 100.0, 2) if trades else 0.0,
+        "return_pct": round(float(bucket.get("return_pct") or 0.0), 3),
+    }
+
+
+def _aggregate_trade_source_returns(trades_path: Path) -> dict:
+    daily = _empty_return_bucket()
+    other = _empty_return_bucket()
+    if not trades_path.exists():
+        return {
+            "daily_min": _finish_return_bucket(daily),
+            "other": _finish_return_bucket(other),
+        }
+
+    try:
+        with trades_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                trade_return = _safe_float_value(row.get("trade_return"), 0.0)
+                _add_return_bucket(daily if _is_daily_min_trade_row(row) else other, trade_return)
+    except Exception:
+        pass
+
+    return {
+        "daily_min": _finish_return_bucket(daily),
+        "other": _finish_return_bucket(other),
+    }
+
+
 def _aggregate_monthly_backtests(trades_path: Path, period: str) -> list[dict]:
     if not trades_path.exists():
         return []
@@ -383,6 +444,8 @@ def _aggregate_monthly_backtests(trades_path: Path, period: str) -> list[dict]:
             "trades": 0,
             "wins": 0,
             "return_pct": 0.0,
+            "daily_min": _empty_return_bucket(),
+            "other": _empty_return_bucket(),
             "long_trades": 0,
             "short_trades": 0,
             "phase_counts": Counter(),
@@ -405,6 +468,7 @@ def _aggregate_monthly_backtests(trades_path: Path, period: str) -> list[dict]:
                 bucket["return_pct"] += trade_return * 100.0
                 if trade_return > 0:
                     bucket["wins"] += 1
+                _add_return_bucket(bucket["daily_min"] if _is_daily_min_trade_row(row) else bucket["other"], trade_return)
                 direction = str(row.get("direction") or "").strip().lower()
                 if direction == "long":
                     bucket["long_trades"] += 1
@@ -436,6 +500,8 @@ def _aggregate_monthly_backtests(trades_path: Path, period: str) -> list[dict]:
                 "wins": int(bucket["wins"]),
                 "win_rate": round((bucket["wins"] / trades) * 100.0, 2) if trades else 0.0,
                 "return_pct": round(float(bucket["return_pct"]), 3),
+                "daily_min": _finish_return_bucket(bucket["daily_min"]),
+                "other": _finish_return_bucket(bucket["other"]),
                 "long_trades": int(bucket["long_trades"]),
                 "short_trades": int(bucket["short_trades"]),
             }
@@ -460,6 +526,7 @@ def _build_backtest_panel_summary() -> dict:
         total_return_pct = _safe_float_value(summary.get("total_return_pct"), 0.0)
         compound_equity *= 1.0 + (total_return_pct / 100.0)
         coverage = summary.get("trade_day_coverage") if isinstance(summary.get("trade_day_coverage"), dict) else {}
+        source_returns = _aggregate_trade_source_returns(trades_path)
         for path in (summary_path, trades_path):
             try:
                 newest_mtime = max(newest_mtime, path.stat().st_mtime)
@@ -486,6 +553,8 @@ def _build_backtest_panel_summary() -> dict:
                 "expected_days": _safe_int_value(coverage.get("expected_days", coverage.get("calendar_days")), 0),
                 "missing_days": _safe_int_value(coverage.get("missing_days", coverage.get("missing_trade_days")), 0),
                 "daily_min_trades": _safe_int_value(coverage.get("daily_min_trades"), 0),
+                "daily_min": source_returns["daily_min"],
+                "other": source_returns["other"],
             }
         )
         monthly_rows.extend(_aggregate_monthly_backtests(trades_path, artifact["period"]))

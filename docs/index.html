@@ -1823,11 +1823,15 @@
       const expected = Number(row.expected_days) || 0;
       const dailyMin = Number(row.daily_min_trades) || 0;
       const coverageText = expected > 0 ? `${covered}/${expected}` : "-";
+      const dailyStats = row.daily_min || {};
+      const otherStats = row.other || {};
       return `
         <tr>
           <td>${escapeHtml(row.label || row.period || "-")}</td>
           <td><span class="phase-badge">${escapeHtml(row.market_label || "-")}</span></td>
           <td>${renderReturnCell(row.total_return_pct)}</td>
+          <td>${renderReturnCell(dailyStats.return_pct)}</td>
+          <td>${renderReturnCell(otherStats.return_pct)}</td>
           <td>${Number(row.win_rate || 0).toFixed(2)}%</td>
           <td>${Number(row.profit_factor || 0).toFixed(3)}</td>
           <td>${Number(row.max_drawdown_pct || 0).toFixed(2)}%</td>
@@ -1838,16 +1842,22 @@
     }).join("");
 
     const monthly = summary && Array.isArray(summary.monthly) ? summary.monthly : [];
-    const monthlyRows = monthly.map((row) => `
+    const monthlyRows = monthly.map((row) => {
+      const dailyStats = row.daily_min || {};
+      const otherStats = row.other || {};
+      return `
         <tr>
           <td>${escapeHtml(row.month || "-")}</td>
           <td><span class="phase-badge">${escapeHtml(row.market_label || row.market_phase || "-")}</span></td>
           <td>${escapeHtml(row.indicator_family || "-")}</td>
           <td>${renderReturnCell(row.return_pct)}</td>
+          <td>${renderReturnCell(dailyStats.return_pct)}</td>
+          <td>${renderReturnCell(otherStats.return_pct)}</td>
           <td>${Number(row.win_rate || 0).toFixed(2)}%</td>
           <td>${Number(row.trades || 0)}</td>
           <td>${Number(row.long_trades || 0)} / ${Number(row.short_trades || 0)}</td>
-        </tr>`).join("");
+        </tr>`;
+    }).join("");
 
     return `
   <div class="card table-card">
@@ -1864,12 +1874,14 @@
             <th>年份</th>
             <th>趨勢</th>
             <th>報酬</th>
+            <th>每日單</th>
+            <th>一般單</th>
             <th>勝率</th>
             <th>PF</th>
             <th>回撤</th>
             <th>單數</th>
             <th>天數</th>
-            <th>每日單</th>
+            <th>每日數</th>
           </tr>
         </thead>
         <tbody>${yearlyRows}</tbody>
@@ -1890,6 +1902,8 @@
             <th>趨勢</th>
             <th>指標</th>
             <th>報酬</th>
+            <th>每日單</th>
+            <th>一般單</th>
             <th>勝率</th>
             <th>單數</th>
             <th>多 / 空</th>
