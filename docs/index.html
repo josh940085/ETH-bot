@@ -1837,7 +1837,7 @@
         </tr>`;
     }).join("");
 
-    const monthly = summary && Array.isArray(summary.monthly) ? summary.monthly.slice(-14) : [];
+    const monthly = summary && Array.isArray(summary.monthly) ? summary.monthly : [];
     const monthlyRows = monthly.map((row) => `
         <tr>
           <td>${escapeHtml(row.month || "-")}</td>
@@ -1878,6 +1878,10 @@
   </div>
   <div class="card table-card">
     <div class="card-title">月份市場趨勢</div>
+    <div class="table-summary-row">
+      <span class="table-pill">月份 ${monthly.length}</span>
+      <span class="table-pill">2022 到目前回測區間</span>
+    </div>
     <div class="table-scroll">
       <table class="data-table">
         <thead>
