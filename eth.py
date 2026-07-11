@@ -7885,15 +7885,29 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     decision = decision if isinstance(decision, dict) else {}
     market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
     market_phase = str(market_profile.get("phase") or "range_base")
+    risk_rate = _safe_float(decision.get("risk_rate"), 0.0)
+    host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
+    host_mode = str(host_logic.get("mode") or "")
 
     if market_phase == "bull":
         return False
     if market_phase == "bear":
+        max_bear_short_risk = max(
+            0.003,
+            _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_SHORT_MAX_RISK_RATE", 0.015), 0.015),
+        )
+        news_bias = _safe_float(decision.get("news_bias"), 0.0)
+        event_risk = _safe_int(decision.get("event_risk"), 0)
+        if (
+            direction == "short"
+            and host_mode == "breakdown_after_support_tests"
+            and 0 < risk_rate <= max_bear_short_risk
+            and news_bias <= 0
+            and event_risk <= 0
+        ):
+            return False
         return True
 
-    risk_rate = _safe_float(decision.get("risk_rate"), 0.0)
-    host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
-    host_mode = str(host_logic.get("mode") or "")
     if market_phase == "range_base" and risk_rate > 0:
         if direction == "long" and host_mode == "support_reclaim":
             return True
@@ -7913,7 +7927,7 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
 
     score_value = _safe_float(score, 0.5)
     directional_gap = (score_value - 0.5) if direction == "long" else (0.5 - score_value)
-    min_score_gap = max(0.08, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_SCORE_GAP", 0.16), 0.16))
+    min_score_gap = max(0.08, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_SCORE_GAP", 0.12), 0.12))
     min_edge = max(0.0002, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_NET_EDGE_RATE", 0.0015), 0.0015))
     min_host_conf = max(0.30, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_HOST_CONF", 0.52), 0.52))
 
@@ -14074,6 +14088,12 @@ def run_bot():
             entry = price
             daily_min_trade = _daily_min_trade_due()
             daily_plan = {}
+            if (
+                daily_min_trade
+                and _is_truthy(os.getenv("DAILY_MIN_DUE_ALLOW_QUALITY_SIGNAL", "1"))
+                and not _daily_anchor_guard_should_wait(final, score, decision)
+            ):
+                daily_min_trade = False
             if daily_min_trade:
                 daily_plan = _build_daily_min_trade_plan(
                     price,

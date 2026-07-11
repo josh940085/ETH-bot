@@ -1662,6 +1662,10 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 daily_min_due_now
                 and not daily_min_forced
                 and market_phase != "bull"
+                and not (
+                    eth._is_truthy(os.getenv("BACKTEST_DAILY_MIN_DUE_ALLOW_QUALITY_SIGNAL", "1"))
+                    and not eth._daily_anchor_guard_should_wait(final, score, decision)
+                )
             ):
                 forced = _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price)
                 if forced is not None:
