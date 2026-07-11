@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import asyncio
 import base64
+import csv
 import hashlib
 import hmac
 import json
 import os
 import re
 import time
+from collections import Counter, defaultdict
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -287,6 +289,218 @@ def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
     return parsed, str(source or "tradingview")
 
 
+BACKTEST_PANEL_ARTIFACTS = [
+    {
+        "period": "2022",
+        "label": "2022",
+        "market_label": "熊市",
+        "summary": "backtest_2022_market_profile_try3_summary.json",
+        "trades": "backtest_2022_market_profile_try3_trades.csv",
+    },
+    {
+        "period": "2023",
+        "label": "2023",
+        "market_label": "震盪/築底",
+        "summary": "backtest_2023_market_profile_try3_summary.json",
+        "trades": "backtest_2023_market_profile_try3_trades.csv",
+    },
+    {
+        "period": "2024",
+        "label": "2024",
+        "market_label": "牛市",
+        "summary": "backtest_2024_market_profile_try3_summary.json",
+        "trades": "backtest_2024_market_profile_try3_trades.csv",
+    },
+    {
+        "period": "2025",
+        "label": "2025",
+        "market_label": "牛市高波動",
+        "summary": "backtest_2025_market_profile_try5_summary.json",
+        "trades": "backtest_2025_market_profile_try5_trades.csv",
+    },
+    {
+        "period": "2026H1",
+        "label": "2026H1",
+        "market_label": "2026 上半年",
+        "summary": "backtest_2026h1_market_profile_try5_summary.json",
+        "trades": "backtest_2026h1_market_profile_try5_trades.csv",
+    },
+]
+
+
+MARKET_PROFILE_LABELS = {
+    "bear": "熊市",
+    "range_base": "震盪/築底",
+    "bull": "牛市",
+    "bull_high_vol": "牛市高波動",
+}
+
+
+def _panel_backtest_data_dir() -> Path:
+    repo_dir = Path(__file__).resolve().parent
+    data_dir = Path(os.getenv("BOT_DATA_DIR", repo_dir / ".runtime" / "data")).expanduser()
+    return data_dir / "backtests"
+
+
+def _safe_json_file(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _safe_float_value(value, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+        return number if number == number else float(default)
+    except Exception:
+        return float(default)
+
+
+def _safe_int_value(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except Exception:
+        return int(default)
+
+
+def _dominant_counter_value(counter: Counter, fallback: str = "") -> str:
+    if not counter:
+        return fallback
+    value, _count = counter.most_common(1)[0]
+    return str(value or fallback)
+
+
+def _aggregate_monthly_backtests(trades_path: Path, period: str) -> list[dict]:
+    if not trades_path.exists():
+        return []
+
+    buckets = defaultdict(
+        lambda: {
+            "period": period,
+            "month": "",
+            "trades": 0,
+            "wins": 0,
+            "return_pct": 0.0,
+            "long_trades": 0,
+            "short_trades": 0,
+            "phase_counts": Counter(),
+            "indicator_counts": Counter(),
+        }
+    )
+
+    try:
+        with trades_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                opened_at = str(row.get("opened_at") or "").strip()
+                month = opened_at[:7]
+                if not re.match(r"^\d{4}-\d{2}$", month):
+                    continue
+                bucket = buckets[month]
+                bucket["month"] = month
+                bucket["trades"] += 1
+                trade_return = _safe_float_value(row.get("trade_return"), 0.0)
+                bucket["return_pct"] += trade_return * 100.0
+                if trade_return > 0:
+                    bucket["wins"] += 1
+                direction = str(row.get("direction") or "").strip().lower()
+                if direction == "long":
+                    bucket["long_trades"] += 1
+                elif direction == "short":
+                    bucket["short_trades"] += 1
+                phase = str(row.get("market_profile_phase") or "").strip()
+                indicator = str(row.get("market_profile_indicator_family") or "").strip()
+                if phase:
+                    bucket["phase_counts"][phase] += 1
+                if indicator:
+                    bucket["indicator_counts"][indicator] += 1
+    except Exception:
+        return []
+
+    rows = []
+    for month in sorted(buckets):
+        bucket = buckets[month]
+        phase = _dominant_counter_value(bucket["phase_counts"], "unknown")
+        indicator = _dominant_counter_value(bucket["indicator_counts"], "")
+        trades = int(bucket["trades"])
+        rows.append(
+            {
+                "period": period,
+                "month": month,
+                "market_phase": phase,
+                "market_label": MARKET_PROFILE_LABELS.get(phase, phase),
+                "indicator_family": indicator,
+                "trades": trades,
+                "wins": int(bucket["wins"]),
+                "win_rate": round((bucket["wins"] / trades) * 100.0, 2) if trades else 0.0,
+                "return_pct": round(float(bucket["return_pct"]), 3),
+                "long_trades": int(bucket["long_trades"]),
+                "short_trades": int(bucket["short_trades"]),
+            }
+        )
+    return rows
+
+
+def _build_backtest_panel_summary() -> dict:
+    backtest_dir = _panel_backtest_data_dir()
+    yearly_rows = []
+    monthly_rows = []
+    compound_equity = 1.0
+    newest_mtime = 0.0
+
+    for artifact in BACKTEST_PANEL_ARTIFACTS:
+        summary_path = backtest_dir / artifact["summary"]
+        trades_path = backtest_dir / artifact["trades"]
+        summary = _safe_json_file(summary_path)
+        if not summary:
+            continue
+
+        total_return_pct = _safe_float_value(summary.get("total_return_pct"), 0.0)
+        compound_equity *= 1.0 + (total_return_pct / 100.0)
+        coverage = summary.get("trade_day_coverage") if isinstance(summary.get("trade_day_coverage"), dict) else {}
+        for path in (summary_path, trades_path):
+            try:
+                newest_mtime = max(newest_mtime, path.stat().st_mtime)
+            except Exception:
+                pass
+
+        yearly_rows.append(
+            {
+                "period": artifact["period"],
+                "label": artifact["label"],
+                "market_label": artifact["market_label"],
+                "summary_file": artifact["summary"],
+                "trades_file": artifact["trades"],
+                "trades": _safe_int_value(summary.get("trades"), 0),
+                "wins": _safe_int_value(summary.get("wins"), 0),
+                "losses": _safe_int_value(summary.get("losses"), 0),
+                "win_rate": _safe_float_value(summary.get("win_rate"), 0.0),
+                "total_return_pct": total_return_pct,
+                "profit_factor": _safe_float_value(summary.get("profit_factor"), 0.0),
+                "max_drawdown_pct": _safe_float_value(summary.get("max_drawdown_pct"), 0.0),
+                "long_trades": _safe_int_value(summary.get("long_trades"), 0),
+                "short_trades": _safe_int_value(summary.get("short_trades"), 0),
+                "covered_days": _safe_int_value(coverage.get("covered_days", coverage.get("trade_days")), 0),
+                "expected_days": _safe_int_value(coverage.get("expected_days", coverage.get("calendar_days")), 0),
+                "missing_days": _safe_int_value(coverage.get("missing_days", coverage.get("missing_trade_days")), 0),
+                "daily_min_trades": _safe_int_value(coverage.get("daily_min_trades"), 0),
+            }
+        )
+        monthly_rows.extend(_aggregate_monthly_backtests(trades_path, artifact["period"]))
+
+    return {
+        "ok": True,
+        "ts": int(time.time()),
+        "updated_at": int(newest_mtime) if newest_mtime > 0 else 0,
+        "strategy": "market_profile_monthly",
+        "compound_return_pct": round((compound_equity - 1.0) * 100.0, 4),
+        "yearly": yearly_rows,
+        "monthly": monthly_rows,
+    }
+
+
 def _parse_telegram_init_data(init_data: str) -> dict:
     values = {}
     for key, value in parse_qsl(str(init_data or ""), keep_blank_values=True):
@@ -509,6 +723,13 @@ async def local_backtest_summary():
     if not summary_path.exists():
         raise HTTPException(status_code=404, detail="backtest summary not found")
     return FileResponse(summary_path, media_type="application/json")
+
+
+@app.get("/api/backtests/summary")
+async def get_backtests_summary(request: Request):
+    if not _viewer_authorized_http(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return JSONResponse(_build_backtest_panel_summary())
 
 
 @app.get("/healthz")

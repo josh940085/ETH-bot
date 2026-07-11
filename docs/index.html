@@ -154,6 +154,85 @@
       text-transform: uppercase;
     }
 
+    .table-card {
+      overflow: hidden;
+    }
+
+    .table-scroll {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .data-table {
+      width: 100%;
+      min-width: 620px;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+
+    .data-table th,
+    .data-table td {
+      padding: 8px 7px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .data-table th:first-child,
+    .data-table td:first-child,
+    .data-table th:nth-child(2),
+    .data-table td:nth-child(2) {
+      text-align: left;
+    }
+
+    .data-table th {
+      color: #7f8b99;
+      font-weight: 650;
+      letter-spacing: 0.2px;
+    }
+
+    .data-table td {
+      color: #d9e2ec;
+    }
+
+    .data-table tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .table-summary-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .table-pill {
+      font-size: 11px;
+      color: #c8d5e2;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 999px;
+      padding: 4px 8px;
+    }
+
+    .return-pos { color: #e74c3c; font-weight: 750; }
+    .return-neg { color: #2ecc71; font-weight: 750; }
+    .return-flat { color: #d9e2ec; font-weight: 650; }
+
+    .phase-badge {
+      display: inline-flex;
+      max-width: 130px;
+      align-items: center;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #d9e2ec;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 999px;
+      padding: 3px 7px;
+      vertical-align: middle;
+    }
+
     .row {
       display: flex;
       justify-content: space-between;
@@ -844,6 +923,7 @@
   let PERFORMANCE_TRADES = 0;
   let PERFORMANCE_WINS = 0;
   let PERFORMANCE_SUMMARY_LOCKED = false;
+  let BACKTEST_PANEL_SUMMARY = null;
   let KLINES_4H = [];
   let KLINES_4H_FETCH_TS = 0;
 
@@ -1270,6 +1350,21 @@
     return url.toString();
   }
 
+  function buildPanelApiUrl(pathname) {
+    const base = REMOTE_STATE_URL || (location.protocol.startsWith("http") ? location.href : "");
+    if (!base) return "";
+    let url;
+    try {
+      url = new URL(base, location.href);
+    } catch (_) {
+      return "";
+    }
+    url.pathname = pathname;
+    url.search = "";
+    url.searchParams.set("t", String(Date.now()));
+    return url.toString();
+  }
+
   async function fetchPanelMarketKlines(interval, limit, timeoutMs) {
     const url = buildMarketDataUrl(interval, limit);
     if (!url) return [];
@@ -1287,6 +1382,19 @@
         volume: Number((row && row.volume) || 0),
       }))
       .filter((row) => Number.isFinite(row.ts) && Number.isFinite(row.open) && Number.isFinite(row.high) && Number.isFinite(row.low) && Number.isFinite(row.close));
+  }
+
+  async function fetchBacktestPanelSummary() {
+    if (BACKTEST_PANEL_SUMMARY) return;
+    const url = buildPanelApiUrl("/api/backtests/summary");
+    if (!url || !HAS_VIEWER_AUTH) return;
+    const data = await fetchJsonWithTimeout(url, 2500, {
+      headers: buildViewerAuthHeaders(),
+    });
+    if (data && data.__auth_error) return;
+    if (data && data.ok && Array.isArray(data.yearly)) {
+      BACKTEST_PANEL_SUMMARY = data;
+    }
   }
 
   // ── 取得即時價格 ──
@@ -1695,6 +1803,100 @@
   </div>`;
   }
 
+  function renderReturnCell(value) {
+    const v = Number(value);
+    if (!Number.isFinite(v)) return `<span class="return-flat">-</span>`;
+    const cls = v > 0 ? "return-pos" : (v < 0 ? "return-neg" : "return-flat");
+    return `<span class="${cls}">${fmt_signed(v)}%</span>`;
+  }
+
+  function renderBacktestPanel() {
+    const summary = BACKTEST_PANEL_SUMMARY;
+    const yearly = summary && Array.isArray(summary.yearly) ? summary.yearly : [];
+    if (!yearly.length) return "";
+
+    const compound = Number(summary.compound_return_pct);
+    const totalTrades = yearly.reduce((acc, row) => acc + (Number(row.trades) || 0), 0);
+    const updatedText = Number(summary.updated_at) > 0 ? ts_str(Number(summary.updated_at)) : "-";
+    const yearlyRows = yearly.map((row) => {
+      const covered = Number(row.covered_days) || 0;
+      const expected = Number(row.expected_days) || 0;
+      const dailyMin = Number(row.daily_min_trades) || 0;
+      const coverageText = expected > 0 ? `${covered}/${expected}` : "-";
+      return `
+        <tr>
+          <td>${escapeHtml(row.label || row.period || "-")}</td>
+          <td><span class="phase-badge">${escapeHtml(row.market_label || "-")}</span></td>
+          <td>${renderReturnCell(row.total_return_pct)}</td>
+          <td>${Number(row.win_rate || 0).toFixed(2)}%</td>
+          <td>${Number(row.profit_factor || 0).toFixed(3)}</td>
+          <td>${Number(row.max_drawdown_pct || 0).toFixed(2)}%</td>
+          <td>${Number(row.trades || 0)}</td>
+          <td>${coverageText}</td>
+          <td>${dailyMin}</td>
+        </tr>`;
+    }).join("");
+
+    const monthly = summary && Array.isArray(summary.monthly) ? summary.monthly.slice(-14) : [];
+    const monthlyRows = monthly.map((row) => `
+        <tr>
+          <td>${escapeHtml(row.month || "-")}</td>
+          <td><span class="phase-badge">${escapeHtml(row.market_label || row.market_phase || "-")}</span></td>
+          <td>${escapeHtml(row.indicator_family || "-")}</td>
+          <td>${renderReturnCell(row.return_pct)}</td>
+          <td>${Number(row.win_rate || 0).toFixed(2)}%</td>
+          <td>${Number(row.trades || 0)}</td>
+          <td>${Number(row.long_trades || 0)} / ${Number(row.short_trades || 0)}</td>
+        </tr>`).join("");
+
+    return `
+  <div class="card table-card">
+    <div class="card-title">歷史回測</div>
+    <div class="table-summary-row">
+      <span class="table-pill">複合報酬 ${renderReturnCell(compound)}</span>
+      <span class="table-pill">交易 ${totalTrades}</span>
+      <span class="table-pill">更新 ${updatedText}</span>
+    </div>
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>年份</th>
+            <th>趨勢</th>
+            <th>報酬</th>
+            <th>勝率</th>
+            <th>PF</th>
+            <th>回撤</th>
+            <th>單數</th>
+            <th>天數</th>
+            <th>每日單</th>
+          </tr>
+        </thead>
+        <tbody>${yearlyRows}</tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card table-card">
+    <div class="card-title">月份市場趨勢</div>
+    <div class="table-scroll">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>月份</th>
+            <th>趨勢</th>
+            <th>指標</th>
+            <th>報酬</th>
+            <th>勝率</th>
+            <th>單數</th>
+            <th>多 / 空</th>
+          </tr>
+        </thead>
+        <tbody>${monthlyRows}</tbody>
+      </table>
+    </div>
+  </div>`;
+  }
+
   function renderTotalAssetsHero(totalAssetsUsdt) {
     const spotAssets = Number.isFinite(Number(BINANCE_SPOT_TOTAL_ASSETS_USDT)) ? Number(BINANCE_SPOT_TOTAL_ASSETS_USDT) : 0;
     const futuresAssets = Number.isFinite(Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT))
@@ -1871,6 +2073,7 @@
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
   </div>
   ${renderTotalAssetsHero(totalAssetsUsdt)}
+  ${renderBacktestPanel()}
   <div class="card close-summary-card">
     <div class="close-hit ${hitClass}">${hitText}</div>
     <div class="close-summary-icon">📋</div>
@@ -1951,6 +2154,7 @@
   </div>
 
   ${renderTotalAssetsHero(totalAssetsUsdt)}
+  ${renderBacktestPanel()}
 
   <!-- Direction + Size -->
   <div class="card">
@@ -2086,7 +2290,7 @@
 
   // ── 啟動 ──
   connectRealtimeSocket();
-  void fetchPerformanceSummary().then(render);
+  void Promise.all([fetchPerformanceSummary(), fetchBacktestPanelSummary()]).then(render);
   refresh();
   setInterval(refresh, PANEL_REFRESH_INTERVAL_MS);
   setInterval(checkAppVersion, APP_VERSION_CHECK_INTERVAL_MS);
