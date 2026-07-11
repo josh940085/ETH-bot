@@ -7906,6 +7906,20 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
             and event_risk <= 0
         ):
             return False
+        support_hits = _safe_int(decision.get("support_hits"), 0)
+        max_tested_bear_short_risk = max(
+            max_bear_short_risk,
+            _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_SHORT_MAX_RISK_RATE", 0.025), 0.025),
+        )
+        if (
+            direction == "short"
+            and host_mode == "breakdown_after_support_tests"
+            and support_hits >= 1
+            and 0 < risk_rate <= max_tested_bear_short_risk
+            and news_bias <= 0
+            and event_risk <= 0
+        ):
+            return False
         return True
 
     if market_phase == "range_base" and risk_rate > 0:
