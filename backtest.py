@@ -1637,10 +1637,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 eth._is_truthy(os.getenv("BACKTEST_DAILY_MIN_ANCHOR_GUARD_ENABLED", "1"))
                 and _taipei_trade_date(ts) not in traded_dates
                 and not daily_min_due_now
-                and (
-                    market_phase != "bull"
-                    or (current_direction == "long" and market_phase in {"bear", "bull_high_vol"})
-                )
+                and eth._daily_anchor_guard_should_wait(final, score, decision)
             )
 
             if current_direction == last_direction_simple:

@@ -7874,6 +7874,79 @@ def get_signal_direction(signal):
     return None
 
 
+def _daily_anchor_guard_should_wait(final, score, decision=None):
+    if str(final or "").startswith("觀望"):
+        return False
+
+    direction = get_signal_direction(final)
+    if direction not in {"long", "short"}:
+        return False
+
+    decision = decision if isinstance(decision, dict) else {}
+    market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
+    market_phase = str(market_profile.get("phase") or "range_base")
+
+    if market_phase == "bull":
+        return False
+    if market_phase == "bear":
+        return True
+
+    risk_rate = _safe_float(decision.get("risk_rate"), 0.0)
+    host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
+    host_mode = str(host_logic.get("mode") or "")
+    if market_phase == "range_base" and risk_rate > 0:
+        if direction == "long" and host_mode == "support_reclaim":
+            return True
+        max_range_risk = max(
+            0.002,
+            _safe_float(os.getenv("DAILY_MIN_ANCHOR_RANGE_MAX_RISK_RATE", 0.008), 0.008),
+        )
+        if risk_rate > max_range_risk:
+            return True
+    if market_phase == "bull_high_vol" and risk_rate > 0:
+        max_risk = max(
+            0.003,
+            _safe_float(os.getenv("DAILY_MIN_ANCHOR_BULL_HIGH_VOL_MAX_RISK_RATE", 0.012), 0.012),
+        )
+        if risk_rate > max_risk:
+            return True
+
+    score_value = _safe_float(score, 0.5)
+    directional_gap = (score_value - 0.5) if direction == "long" else (0.5 - score_value)
+    min_score_gap = max(0.08, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_SCORE_GAP", 0.16), 0.16))
+    min_edge = max(0.0002, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_NET_EDGE_RATE", 0.0015), 0.0015))
+    min_host_conf = max(0.30, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_HOST_CONF", 0.52), 0.52))
+
+    net_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
+    host_direction = str(host_logic.get("direction") or "neutral")
+    host_conf = _safe_float(host_logic.get("confidence"), 0.0)
+    host_applied = bool(decision.get("host_logic_applied", False))
+    repeated_support = _safe_int(decision.get("repeated_support_tests"), 0)
+    repeated_resistance = _safe_int(decision.get("repeated_resistance_tests"), 0)
+    volume_spike = bool(decision.get("volume_spike"))
+    buy_pressure = bool(decision.get("buy_pressure"))
+    sell_pressure = bool(decision.get("sell_pressure"))
+    profile_adjustment = decision.get("market_profile_adjustment") if isinstance(decision.get("market_profile_adjustment"), dict) else {}
+    profile_edge = _safe_float(profile_adjustment.get("adjustment"), 0.0)
+
+    high_score = directional_gap >= min_score_gap
+    positive_edge = net_edge >= min_edge
+    host_confirms = host_applied and host_direction == direction and host_conf >= min_host_conf
+    pressure_break = (
+        direction == "long"
+        and repeated_resistance >= 2
+        or direction == "short"
+        and repeated_support >= 2
+    )
+    flow_confirms = volume_spike and ((direction == "long" and buy_pressure) or (direction == "short" and sell_pressure))
+    profile_confirms = profile_edge >= 0.05
+
+    if high_score and (positive_edge or host_confirms or pressure_break or flow_confirms or profile_confirms):
+        return False
+
+    return market_phase != "bull" or (direction == "long" and market_phase in {"bear", "bull_high_vol"})
+
+
 def _same_entry_confirm_candle(prev_candle_id, candle_id):
     if prev_candle_id is None or candle_id is None:
         return False
@@ -14034,13 +14107,11 @@ def run_bot():
                 market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
                 market_phase = str(market_profile.get("phase") or "range_base")
                 final_direction = get_signal_direction(final)
-                if market_phase != "bull" or (
-                    final_direction == "long" and market_phase in {"bear", "bull_high_vol"}
-                ):
-                    final = "觀望（每日單錨定-等待保底）"
-                    position_size = 0.0
-                elif market_phase == "bear" and final_direction == "long":
+                if market_phase == "bear" and final_direction == "long":
                     final = "觀望（熊市禁止非每日多單）"
+                    position_size = 0.0
+                elif _daily_anchor_guard_should_wait(final, score, decision):
+                    final = "觀望（每日單錨定-等待保底）"
                     position_size = 0.0
 
             if not daily_min_trade:
