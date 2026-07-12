@@ -13209,6 +13209,31 @@ KRAKEN_INTERVAL_MAP = {
 KRAKEN_KLINE_CACHE = {}
 KRAKEN_REQUEST_LOCK = threading.Lock()
 KRAKEN_LAST_REQUEST_TS = 0.0
+COINBASE_GRANULARITY_MAP = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+
+
+def _fetch_coinbase_kline_rows(symbol, interval, limit=100, timeout=10):
+    granularity = COINBASE_GRANULARITY_MAP.get(str(interval))
+    if granularity is None:
+        raise RuntimeError(f"Coinbase不支援週期 {interval}")
+    product = "BTC-USD" if str(symbol or "").upper().startswith("BTC") else "ETH-USD"
+    response = requests.get(
+        f"https://api.exchange.coinbase.com/products/{product}/candles",
+        params={"granularity": granularity},
+        headers={"User-Agent": "ETH-bot/1.0"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    rows = []
+    for item in reversed(payload if isinstance(payload, list) else []):
+        if not isinstance(item, list) or len(item) < 6:
+            continue
+        open_ms = int(_safe_float(item[0], 0.0) * 1000)
+        rows.append([open_ms, item[3], item[2], item[1], item[4], item[5], open_ms + granularity * 1000 - 1, "0", 0, "0", "0", "0"])
+    if not rows:
+        raise RuntimeError("Coinbase candles empty")
+    return rows[-max(1, min(300, _safe_int(limit, 100))) :]
 
 
 def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
@@ -13363,11 +13388,15 @@ def _fetch_market_kline_rows(
 
     if source_preference == "kraken_first":
         try:
-            rows = _fetch_kraken_kline_rows(
-                symbol, interval, limit=limit, start_time_ms=start_time_ms,
-                end_time_ms=end_time_ms, timeout=timeout,
-            )
-            return rows, "kraken"
+            if str(interval) in COINBASE_GRANULARITY_MAP and start_time_ms is None and end_time_ms is None:
+                rows = _fetch_coinbase_kline_rows(symbol, interval, limit=limit, timeout=timeout)
+                return rows, "coinbase"
+            else:
+                rows = _fetch_kraken_kline_rows(
+                    symbol, interval, limit=limit, start_time_ms=start_time_ms,
+                    end_time_ms=end_time_ms, timeout=timeout,
+                )
+                return rows, "kraken"
         except Exception as exc:
             errors.append(f"kraken_first: {exc}")
             _log_kline_source_failure("kraken", exc, prefix=prefix)
