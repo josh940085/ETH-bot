@@ -1,4 +1,5 @@
 import SwiftUI
+import Darwin
 
 @main
 struct MLXMacApp: App {
@@ -77,7 +78,11 @@ final class ETHBotRuntime: ObservableObject {
         await startIfNeeded()
     }
 
-    private func run(_ relativeExecutable: String, _ arguments: [String]) async -> (exitCode: Int32, output: String) {
+    private func run(
+        _ relativeExecutable: String,
+        _ arguments: [String],
+        timeout: TimeInterval = 8
+    ) async -> (exitCode: Int32, output: String) {
         await Task.detached(priority: .userInitiated) { [repositoryURL] in
             let process = Process()
             let pipe = Pipe()
@@ -89,9 +94,24 @@ final class ETHBotRuntime: ObservableObject {
 
             do {
                 try process.run()
+                let deadline = Date().addingTimeInterval(timeout)
+                while process.isRunning, Date() < deadline {
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+                if process.isRunning {
+                    process.terminate()
+                    Thread.sleep(forTimeInterval: 0.2)
+                }
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
                 process.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+                let output = String(decoding: data, as: UTF8.self)
+                if Date() >= deadline {
+                    return (-2, output.isEmpty ? "supervisor 指令逾時" : output)
+                }
+                return (process.terminationStatus, output)
             } catch {
                 return (-1, error.localizedDescription)
             }
