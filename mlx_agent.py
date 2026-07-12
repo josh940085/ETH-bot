@@ -1,10 +1,32 @@
+import json
 import os
-import runpy
 import sys
 from pathlib import Path
 
 
 REPO_DIR = Path(__file__).resolve().parent
+
+
+def _install_fast_models_endpoint(server_module, model):
+    """Avoid mlx-lm's per-request Hugging Face cache scan on /v1/models."""
+
+    def handle_models_request(handler):
+        handler._set_completion_headers(200)
+        handler.end_headers()
+        response = {
+            "object": "list",
+            "data": [
+                {
+                    "id": model,
+                    "object": "model",
+                    "created": handler.created,
+                }
+            ],
+        }
+        handler.wfile.write(json.dumps(response).encode("utf-8"))
+        handler.wfile.flush()
+
+    server_module.APIHandler.handle_models_request = handle_models_request
 
 
 def _load_local_env():
@@ -49,7 +71,10 @@ def main():
         "--prompt-cache-bytes",
         prompt_cache_bytes,
     ]
-    runpy.run_module("mlx_lm.server", run_name="__main__")
+    from mlx_lm import server
+
+    _install_fast_models_endpoint(server, model)
+    server.main()
     return 0
 
 
