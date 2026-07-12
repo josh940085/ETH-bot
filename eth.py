@@ -8421,23 +8421,27 @@ if LIVE_RUNTIME_ENABLED:
     threading.Thread(target=ws_price_stream, daemon=True).start()
 
 
-def _validated_market_price(kline_price, now_ts=None):
-    """用獨立 WebSocket 即時成交價核對 TradingView K 線價格。"""
+def _validated_market_price(kline_price, reference_price=None, now_ts=None):
+    """優先用即時成交價核對；不可用時至少核對 1m/5m 價格一致性。"""
     now_ts = _safe_float(now_ts, time.time())
     kline_price = max(0.0, _safe_float(kline_price, 0.0))
     ws_price = max(0.0, _safe_float(WS_PRICE, 0.0))
     ws_age = max(0.0, now_ts - _safe_float(WS_PRICE_TS, 0.0))
     max_age = max(5.0, _safe_float(os.getenv("MARKET_PRICE_VALIDATION_MAX_AGE_SEC", 30), 30))
     max_deviation = max(0.0005, _safe_float(os.getenv("MARKET_PRICE_VALIDATION_MAX_DEVIATION_RATE", 0.003), 0.003))
-    if ws_price <= 0 or ws_age > max_age:
-        raise RuntimeError(f"行情交叉驗證等待即時價格 age={ws_age:.1f}s")
-    deviation = abs(ws_price - kline_price) / max(ws_price, kline_price, 1e-9)
-    if kline_price <= 0 or deviation > max_deviation:
+    reference_price = max(0.0, _safe_float(reference_price, 0.0))
+    validation_price = ws_price if ws_price > 0 and ws_age <= max_age else reference_price
+    validation_source = "WebSocket" if validation_price == ws_price and ws_price > 0 else "TradingView-5m"
+    if kline_price <= 0 or validation_price <= 0:
+        raise RuntimeError("行情交叉驗證缺少可用參考價格")
+    deviation = abs(validation_price - kline_price) / max(validation_price, kline_price, 1e-9)
+    if deviation > max_deviation:
         raise RuntimeError(
-            f"行情交叉驗證價差過大 TradingView={kline_price:.2f} WebSocket={ws_price:.2f} "
+            f"行情交叉驗證價差過大 TradingView-1m={kline_price:.2f} "
+            f"{validation_source}={validation_price:.2f} "
             f"deviation={deviation*100:.3f}%"
         )
-    return ws_price
+    return ws_price if ws_price > 0 and ws_age <= max_age else kline_price
 
 # =============================
 # Indicators
@@ -13545,7 +13549,10 @@ def run_bot():
             breakout = 0
             recent_high = df_5m["high"].iloc[-5:-1].max()
             recent_low = df_5m["low"].iloc[-5:-1].min()
-            price = _validated_market_price(df_1m["close"].iloc[-1])
+            price = _validated_market_price(
+                df_1m["close"].iloc[-1],
+                reference_price=df_5m["close"].iloc[-1],
+            )
             sr_analysis = analyze_multi_tf_sr(price)
 
             # ===== Macro（時事）=====
