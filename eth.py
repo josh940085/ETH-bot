@@ -13206,17 +13206,32 @@ KRAKEN_INTERVAL_MAP = {
     "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
     "4h": 240, "1d": 1440, "1w": 10080, "1M": 21600,
 }
+KRAKEN_KLINE_CACHE = {}
+KRAKEN_REQUEST_LOCK = threading.Lock()
+KRAKEN_LAST_REQUEST_TS = 0.0
 
 
 def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
+    global KRAKEN_LAST_REQUEST_TS
     kraken_interval = KRAKEN_INTERVAL_MAP.get(str(interval))
     if kraken_interval is None:
         raise RuntimeError(f"Kraken不支援週期 {interval}")
     pair = "XBTUSD" if str(symbol or "").upper().startswith("BTC") else "ETHUSD"
+    cache_key = (pair, str(interval), int(_safe_float(start_time_ms, 0.0)), int(_safe_float(end_time_ms, 0.0)))
+    cached = KRAKEN_KLINE_CACHE.get(cache_key)
+    cache_ttl = KLINE_TTL.get(str(interval), 10)
+    if cached and time.time() - _safe_float(cached[0], 0.0) < cache_ttl and len(cached[1]) >= min(limit, 720):
+        return cached[1][-max(1, min(720, _safe_int(limit, 100))) :]
     params = {"pair": pair, "interval": kraken_interval}
     if start_time_ms is not None:
         params["since"] = max(0, int(_safe_float(start_time_ms, 0.0) / 1000))
-    response = requests.get("https://api.kraken.com/0/public/OHLC", params=params, timeout=timeout)
+    with KRAKEN_REQUEST_LOCK:
+        min_gap = max(0.8, _safe_float(os.getenv("KRAKEN_REQUEST_MIN_GAP_SEC", 1.10), 1.10))
+        wait_sec = min_gap - (time.time() - KRAKEN_LAST_REQUEST_TS)
+        if wait_sec > 0:
+            time.sleep(wait_sec)
+        response = requests.get("https://api.kraken.com/0/public/OHLC", params=params, timeout=timeout)
+        KRAKEN_LAST_REQUEST_TS = time.time()
     response.raise_for_status()
     payload = response.json()
     if payload.get("error"):
@@ -13249,6 +13264,7 @@ def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, en
         rows = list(monthly.values())
     if not rows:
         raise RuntimeError("Kraken OHLC empty")
+    KRAKEN_KLINE_CACHE[cache_key] = (time.time(), rows)
     return rows[-max(1, min(720, _safe_int(limit, 100))) :]
 
 
