@@ -29,6 +29,8 @@
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>連接本機 MLX 模型服務</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>從外接 SSD 的 ETH-bot 專案啟動交易與面板服務</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

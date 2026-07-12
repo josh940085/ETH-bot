@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct ContentView: View {
+    @ObservedObject var runtime: ETHBotRuntime
     private enum AppSection: String, CaseIterable, Identifiable {
         case dashboard = "交易面板"
         case chat = "MLX 對話"
@@ -24,23 +25,65 @@ struct ContentView: View {
             sidebar
                 .navigationSplitViewColumnWidth(min: 230, ideal: 270, max: 330)
         } detail: {
-            switch selectedSection {
-            case .dashboard:
-                TradingDashboardView()
-            case .chat:
-                VStack(spacing: 0) {
-                    header
-                    Divider()
-                    conversation
-                    Divider()
-                    composer
+            if runtime.isReady {
+                switch selectedSection {
+                case .dashboard:
+                    TradingDashboardView()
+                case .chat:
+                    VStack(spacing: 0) {
+                        header
+                        Divider()
+                        conversation
+                        Divider()
+                        composer
+                    }
+                    .background(Color(nsColor: .windowBackgroundColor))
                 }
-                .background(Color(nsColor: .windowBackgroundColor))
+            } else {
+                runtimeStartupView
             }
         }
         .task {
+            await runtime.startIfNeeded()
+            guard runtime.isReady else { return }
             await viewModel.checkConnection()
         }
+    }
+
+    private var runtimeStartupView: some View {
+        VStack(spacing: 18) {
+            switch runtime.state {
+            case let .starting(message):
+                ProgressView()
+                    .controlSize(.large)
+                Text(message)
+                    .font(.title3.bold())
+                Text("正在從 /Volumes/SSD/ETH-bot 啟動目前程式")
+                    .foregroundStyle(.secondary)
+            case .ready:
+                EmptyView()
+            case let .failed(message):
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 42))
+                    .foregroundStyle(.orange)
+                Text("程式啟動失敗")
+                    .font(.title2.bold())
+                Text(message)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 560)
+                Button("重新啟動") {
+                    Task {
+                        await runtime.retry()
+                        if runtime.isReady { await viewModel.checkConnection() }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(36)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var sidebar: some View {
@@ -234,6 +277,6 @@ private struct MessageBubble: View {
 }
 
 #Preview {
-    ContentView()
+    ContentView(runtime: ETHBotRuntime())
         .frame(width: 960, height: 700)
 }
