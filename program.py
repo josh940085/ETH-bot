@@ -159,12 +159,17 @@ def _get_backtest_settings():
     startup_delay_sec = max(15.0, float(os.getenv("BACKTEST_STARTUP_DELAY_SEC", 90)))
     lookback_days = max(1, int(os.getenv("BACKTEST_LOOKBACK_DAYS", 14)))
     warmup_bars = max(200, int(os.getenv("BACKTEST_WARMUP_BARS", 1500)))
+    market_source_preference = str(
+        os.getenv("BACKTEST_MARKET_KLINE_SOURCE_PREFERENCE", "tradingview_first")
+        or "tradingview_first"
+    ).strip().lower()
     return {
         "enabled": enabled,
         "interval_sec": interval_sec,
         "startup_delay_sec": startup_delay_sec,
         "lookback_days": lookback_days,
         "warmup_bars": warmup_bars,
+        "market_source_preference": market_source_preference,
     }
 
 
@@ -280,10 +285,12 @@ def _start_backtest_process(env, settings):
         str(BACKTEST_LEARN_PATH),
     ]
     print(f"🧪 啟動定時回測: {' '.join(cmd)}")
+    backtest_env = env.copy()
+    backtest_env["MARKET_KLINE_SOURCE_PREFERENCE"] = settings["market_source_preference"]
     return subprocess.Popen(
         cmd,
         cwd=str(REPO_DIR),
-        env=env,
+        env=backtest_env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
