@@ -13245,8 +13245,11 @@ def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, en
     cache_key = (pair, str(interval), int(_safe_float(start_time_ms, 0.0)), int(_safe_float(end_time_ms, 0.0)))
     cached = KRAKEN_KLINE_CACHE.get(cache_key)
     cache_ttl = KLINE_TTL.get(str(interval), 10)
+    selected_limit = max(1, min(720, _safe_int(limit, 100)))
     if cached and time.time() - _safe_float(cached[0], 0.0) < cache_ttl and len(cached[1]) >= min(limit, 720):
-        return cached[1][-max(1, min(720, _safe_int(limit, 100))) :]
+        if start_time_ms is not None:
+            return cached[1][:selected_limit]
+        return cached[1][-selected_limit:]
     params = {"pair": pair, "interval": kraken_interval}
     if start_time_ms is not None:
         params["since"] = max(0, int(_safe_float(start_time_ms, 0.0) / 1000))
@@ -13295,7 +13298,9 @@ def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, en
     if not rows:
         raise RuntimeError("Kraken OHLC empty")
     KRAKEN_KLINE_CACHE[cache_key] = (time.time(), rows)
-    return rows[-max(1, min(720, _safe_int(limit, 100))) :]
+    if start_time_ms is not None:
+        return rows[:selected_limit]
+    return rows[-selected_limit:]
 
 
 def _fetch_market_kline_rows(
