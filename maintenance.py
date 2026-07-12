@@ -1359,15 +1359,15 @@ def _check_trade_decision_initialization():
 def _check_market_kline_source():
     source = (REPO_DIR / "eth.py").read_text(encoding="utf-8")
     required = (
-        'os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "tradingview_first")',
-        'source_preference="tradingview_first"',
+        'os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "kraken_first")',
+        'source_preference="kraken_first"',
     )
     missing = [item for item in required if item not in source]
     if missing:
-        raise RuntimeError("TradingView-first kline routing was removed")
+        raise RuntimeError("Kraken-first kline routing was removed")
     return {
         "status": "ok",
-        "detail": "TradingView primary; Binance reserved for fallback and execution",
+        "detail": "Kraken primary; TradingView fallback; Binance reserved for execution",
     }
 
 

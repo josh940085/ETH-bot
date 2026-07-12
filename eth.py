@@ -1861,7 +1861,7 @@ def _fetch_binance_host_validation_klines(symbol, start_ts, hours=24):
             start_time_ms=int(start_ts * 1000),
             timeout=max(3, _safe_int(os.getenv("BINANCE_HOST_VALIDATION_TIMEOUT_SEC", 8), 8)),
             prefix="主播直播走勢驗證K線",
-            source_preference="tradingview_first",
+            source_preference="kraken_first",
         )
     except Exception as exc:
         now_ts = time.time()
@@ -13202,6 +13202,56 @@ def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, e
     raise RuntimeError("; ".join(errors) or f"{prefix}來源全部失敗")
 
 
+KRAKEN_INTERVAL_MAP = {
+    "1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
+    "4h": 240, "1d": 1440, "1w": 10080, "1M": 21600,
+}
+
+
+def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
+    kraken_interval = KRAKEN_INTERVAL_MAP.get(str(interval))
+    if kraken_interval is None:
+        raise RuntimeError(f"Kraken不支援週期 {interval}")
+    pair = "XBTUSD" if str(symbol or "").upper().startswith("BTC") else "ETHUSD"
+    params = {"pair": pair, "interval": kraken_interval}
+    if start_time_ms is not None:
+        params["since"] = max(0, int(_safe_float(start_time_ms, 0.0) / 1000))
+    response = requests.get("https://api.kraken.com/0/public/OHLC", params=params, timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("error"):
+        raise RuntimeError(f"Kraken OHLC error: {payload['error']}")
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    raw_rows = next((value for key, value in result.items() if key != "last" and isinstance(value, list)), [])
+    rows = []
+    for item in raw_rows:
+        if not isinstance(item, list) or len(item) < 7:
+            continue
+        open_ms = int(_safe_float(item[0], 0.0) * 1000)
+        if end_time_ms is not None and open_ms > int(_safe_float(end_time_ms, 0.0)):
+            continue
+        close_ms = open_ms + kraken_interval * 60 * 1000 - 1
+        rows.append([open_ms, item[1], item[2], item[3], item[4], item[6], close_ms, "0", 0, "0", "0", "0"])
+    if str(interval) == "1M" and rows:
+        monthly = {}
+        for row in rows:
+            stamp = datetime.datetime.fromtimestamp(row[0] / 1000, tz=datetime.timezone.utc)
+            key = (stamp.year, stamp.month)
+            if key not in monthly:
+                monthly[key] = list(row)
+            else:
+                bucket = monthly[key]
+                bucket[2] = str(max(_safe_float(bucket[2], 0.0), _safe_float(row[2], 0.0)))
+                bucket[3] = str(min(_safe_float(bucket[3], 0.0), _safe_float(row[3], 0.0)))
+                bucket[4] = row[4]
+                bucket[5] = str(_safe_float(bucket[5], 0.0) + _safe_float(row[5], 0.0))
+                bucket[6] = row[6]
+        rows = list(monthly.values())
+    if not rows:
+        raise RuntimeError("Kraken OHLC empty")
+    return rows[-max(1, min(720, _safe_int(limit, 100))) :]
+
+
 def _fetch_market_kline_rows(
     symbol,
     interval,
@@ -13214,7 +13264,7 @@ def _fetch_market_kline_rows(
 ):
     errors = []
     source_preference = str(
-        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "tradingview_first")
+        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "kraken_first")
     ).lower()
     if str(interval) == "12h":
         try:
@@ -13289,6 +13339,17 @@ def _fetch_market_kline_rows(
             _log_kline_source_failure("tradingview_4h_resampled_12h", exc, prefix=prefix)
         if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
             raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 12h 合成失敗")
+
+    if source_preference == "kraken_first":
+        try:
+            rows = _fetch_kraken_kline_rows(
+                symbol, interval, limit=limit, start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms, timeout=timeout,
+            )
+            return rows, "kraken"
+        except Exception as exc:
+            errors.append(f"kraken_first: {exc}")
+            _log_kline_source_failure("kraken", exc, prefix=prefix)
 
     if source_preference == "binance_first" and ALLOW_BINANCE_MARKET_DATA_FALLBACK:
         try:
