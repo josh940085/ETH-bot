@@ -11210,7 +11210,29 @@ def build_trade_signal_snapshot(
     if regime == "range":
         entry_threshold += 0.05
 
-    if abs(score - 0.5) > entry_threshold:
+    range_pos = max(0.0, min(1.0, _safe_float(features.get("range_pos"), 0.5)))
+    support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
+    resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
+    if regime == "range" and breakout == 0:
+        range_low = _safe_float(df_15m["low"].tail(20).min(), entry)
+        range_high = _safe_float(df_15m["high"].tail(20).max(), entry)
+        range_buffer = max(atr * 0.35, entry * 0.001)
+        if range_pos <= 0.28 and (buy_pressure or sweep_low or support_hits > 0):
+            final = "↔️ 震盪下緣做多"
+            sl = range_low - range_buffer
+            tp = range_high - range_buffer * 0.5
+            position_size = _cap_initial_position_size(
+                max(0.01, _safe_float(os.getenv("TRADE_RANGE_POSITION_SIZE", 0.05), 0.05))
+            )
+        elif range_pos >= 0.72 and (sell_pressure or sweep_high or resistance_hits > 0):
+            final = "↔️ 震盪上緣做空"
+            sl = range_high + range_buffer
+            tp = range_low + range_buffer * 0.5
+            position_size = _cap_initial_position_size(
+                max(0.01, _safe_float(os.getenv("TRADE_RANGE_POSITION_SIZE", 0.05), 0.05))
+            )
+
+    if final.startswith("觀望") and abs(score - 0.5) > entry_threshold:
         if abs(score - 0.5) < 0.12:
             final = "觀望（低信心）"
 
@@ -11494,6 +11516,12 @@ def build_trade_signal_snapshot(
                 regime == "range"
                 and direction_name == "long"
                 and host_mode in {"support_reclaim", "breakout_after_pressure_tests"}
+            ):
+                profile_ok = True
+            elif (
+                regime == "range"
+                and direction_name == "short"
+                and host_mode in {"resistance_rejection", "breakdown_after_support_tests"}
             ):
                 profile_ok = True
             if not profile_ok:
