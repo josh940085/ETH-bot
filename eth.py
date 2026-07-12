@@ -13226,12 +13226,17 @@ def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, en
     if start_time_ms is not None:
         params["since"] = max(0, int(_safe_float(start_time_ms, 0.0) / 1000))
     with KRAKEN_REQUEST_LOCK:
-        min_gap = max(0.8, _safe_float(os.getenv("KRAKEN_REQUEST_MIN_GAP_SEC", 1.10), 1.10))
+        min_gap = max(1.0, _safe_float(os.getenv("KRAKEN_REQUEST_MIN_GAP_SEC", 3.0), 3.0))
         wait_sec = min_gap - (time.time() - KRAKEN_LAST_REQUEST_TS)
         if wait_sec > 0:
             time.sleep(wait_sec)
         response = requests.get("https://api.kraken.com/0/public/OHLC", params=params, timeout=timeout)
         KRAKEN_LAST_REQUEST_TS = time.time()
+        first_payload = response.json() if response.ok else {}
+        if any("Too many requests" in str(item) for item in first_payload.get("error", [])):
+            time.sleep(max(5.0, min_gap * 2.0))
+            response = requests.get("https://api.kraken.com/0/public/OHLC", params=params, timeout=timeout)
+            KRAKEN_LAST_REQUEST_TS = time.time()
     response.raise_for_status()
     payload = response.json()
     if payload.get("error"):
