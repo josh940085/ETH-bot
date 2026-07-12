@@ -1861,7 +1861,7 @@ def _fetch_binance_host_validation_klines(symbol, start_ts, hours=24):
             start_time_ms=int(start_ts * 1000),
             timeout=max(3, _safe_int(os.getenv("BINANCE_HOST_VALIDATION_TIMEOUT_SEC", 8), 8)),
             prefix="主播直播走勢驗證K線",
-            source_preference="binance_first",
+            source_preference="tradingview_first",
         )
     except Exception as exc:
         now_ts = time.time()
@@ -13189,7 +13189,7 @@ def _fetch_market_kline_rows(
 ):
     errors = []
     source_preference = str(
-        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "binance_first")
+        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "tradingview_first")
     ).lower()
     if str(interval) == "12h":
         try:

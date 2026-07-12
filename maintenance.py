@@ -35,6 +35,7 @@ CHECK_NAME_ZH = {
     "entry_confirm_runtime": "進場確認執行狀態",
     "entry_confirm_candle_id": "進場確認 K 線追蹤",
     "trade_decision_initialization": "交易決策初始化順序",
+    "market_kline_source": "行情K線主資料源",
     "py_compile": "Python 語法檢查",
     "import_smoke": "模組載入測試",
     "telegram_policy": "Telegram 設定",
@@ -1355,6 +1356,21 @@ def _check_trade_decision_initialization():
     }
 
 
+def _check_market_kline_source():
+    source = (REPO_DIR / "eth.py").read_text(encoding="utf-8")
+    required = (
+        'os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "tradingview_first")',
+        'source_preference="tradingview_first"',
+    )
+    missing = [item for item in required if item not in source]
+    if missing:
+        raise RuntimeError("TradingView-first kline routing was removed")
+    return {
+        "status": "ok",
+        "detail": "TradingView primary; Binance reserved for fallback and execution",
+    }
+
+
 def _check_models_and_repair():
     snippet = """
 import json
@@ -1582,6 +1598,7 @@ def main():
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
         ("trade_decision_initialization", _check_trade_decision_initialization),
+        ("market_kline_source", _check_market_kline_source),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
         ("telegram_policy", _check_telegram_policy_and_repair),
