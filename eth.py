@@ -13607,6 +13607,16 @@ def run_bot():
             _process_sl_followup_reviews(df_1m, price)
             _process_pending_news_evaluations(price)
 
+            scaling_vol_now = _safe_float(df_15m["volume"].iloc[-1], 0.0)
+            scaling_vol_ma = _safe_float(
+                df_15m["vol_ma20"].iloc[-1]
+                if "vol_ma20" in df_15m.columns
+                else df_15m["volume"].rolling(20).mean().iloc[-1],
+                0.0,
+            )
+            scaling_volume_ratio = scaling_vol_now / (scaling_vol_ma + 1e-9)
+            scaling_buy_pressure = bool(df_15m["close"].iloc[-1] > df_15m["open"].iloc[-1])
+            scaling_sell_pressure = bool(df_15m["close"].iloc[-1] < df_15m["open"].iloc[-1])
             _update_scaling_market_state(
                 price=price,
                 atr=atr,
@@ -13615,10 +13625,10 @@ def run_bot():
                 regime=regime,
                 breakout=breakout,
                 sr_analysis=sr_analysis,
-                volume_ratio=decision.get("volume_ratio", 0.0),
-                volume_spike=decision.get("volume_spike", False),
-                buy_pressure=decision.get("buy_pressure", False),
-                sell_pressure=decision.get("sell_pressure", False),
+                volume_ratio=scaling_volume_ratio,
+                volume_spike=scaling_vol_now > scaling_vol_ma * 1.5,
+                buy_pressure=scaling_buy_pressure,
+                sell_pressure=scaling_sell_pressure,
             )
 
             pending_training_sample = _maybe_backfill_pending_training_sample(
