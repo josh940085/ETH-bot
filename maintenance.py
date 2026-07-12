@@ -34,6 +34,7 @@ CHECK_NAME_ZH = {
     "runtime_json": "執行狀態 JSON",
     "entry_confirm_runtime": "進場確認執行狀態",
     "entry_confirm_candle_id": "進場確認 K 線追蹤",
+    "trade_decision_initialization": "交易決策初始化順序",
     "py_compile": "Python 語法檢查",
     "import_smoke": "模組載入測試",
     "telegram_policy": "Telegram 設定",
@@ -1328,6 +1329,32 @@ print("REPORT_JSON=" + json.dumps({
     }
 
 
+def _check_trade_decision_initialization():
+    source = (REPO_DIR / "eth.py").read_text(encoding="utf-8")
+    run_bot_start = source.find("def run_bot():")
+    if run_bot_start < 0:
+        raise RuntimeError("run_bot not found")
+    run_bot_source = source[run_bot_start:]
+    loop_start = run_bot_source.find("    while True:")
+    initialization = run_bot_source.find("        decision = {}", loop_start)
+    scaling_update = run_bot_source.find("            _update_scaling_market_state(", loop_start)
+    snapshot_build = run_bot_source.find("            decision = build_trade_signal_snapshot(", loop_start)
+    if not (
+        loop_start >= 0
+        and initialization > loop_start
+        and scaling_update > initialization
+        and snapshot_build > scaling_update
+    ):
+        raise RuntimeError(
+            "decision must be initialized at the start of every run_bot loop "
+            "before scaling state and signal snapshot processing"
+        )
+    return {
+        "status": "ok",
+        "detail": "decision initialized before pre-signal processing on every loop",
+    }
+
+
 def _check_models_and_repair():
     snippet = """
 import json
@@ -1554,6 +1581,7 @@ def main():
         ("runtime_json", _check_runtime_json_and_repair),
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
+        ("trade_decision_initialization", _check_trade_decision_initialization),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
         ("telegram_policy", _check_telegram_policy_and_repair),

@@ -13386,6 +13386,9 @@ def run_bot():
         sync_position_panel(_safe_float(WS_PRICE, active_trade.get("avg_entry", active_trade.get("entry", 0.0))))
 
     while True:
+        # 每輪先建立空決策，避免新增的前置流程誤用尚未產生的交易快照，
+        # 導致主迴圈持續失敗而無法評估或開倉。
+        decision = {}
         try:
             # ===== Telegram 指令接收 =====
             commands, last_update_id = fetch_telegram_commands(last_update_id)
