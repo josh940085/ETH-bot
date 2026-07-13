@@ -13669,6 +13669,10 @@ def run_bot():
                 df_1m["close"].iloc[-1],
                 reference_price=df_5m["close"].iloc[-1],
             )
+            # Shadow analysis must stay independent from Binance.  The live
+            # strategy may validate against Binance WebSocket prices, but
+            # shadow entries and grading use the externally routed 1m candle.
+            shadow_price = max(0.0, _safe_float(df_1m["close"].iloc[-1], 0.0))
             sr_analysis = analyze_multi_tf_sr(price)
 
             # ===== Macro（時事）=====
@@ -13703,7 +13707,8 @@ def run_bot():
             )
             auto_market_context = {
                 "strategy_version": STRATEGY_VERSION,
-                "price": price,
+                "price": shadow_price,
+                "market_data_source": "external_kline_only",
                 "analysis_timeframe": "1h",
                 "sampling_timeframe": "15m",
                 "htf": htf,
@@ -13737,9 +13742,6 @@ def run_bot():
                 "macro": _compute_macro_bias(
                     sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
                 ),
-                "derivatives_pressure": _safe_float(
-                    derivatives_flow.get("derivatives_pressure"), 0.0
-                ),
                 "volume_spike": bool(
                     df_15m["volume"].iloc[-1]
                     > df_15m["vol_ma20"].iloc[-1] * 1.5
@@ -13747,8 +13749,8 @@ def run_bot():
                 "rsi_15m": round(_safe_float(df_15m["rsi14"].iloc[-1], 50.0), 2),
                 "ema50_deviation_15m": round(
                     (
-                        price
-                        / max(_safe_float(df_15m["ema50"].iloc[-1], price), 1e-9)
+                        shadow_price
+                        / max(_safe_float(df_15m["ema50"].iloc[-1], shadow_price), 1e-9)
                         - 1
                     )
                     * 100,
@@ -13892,7 +13894,7 @@ def run_bot():
                     news_text += f"- {preview}\n"
 
             # ===== 真實交易管理（TP/SL） =====
-            evaluate_mlx_learning(price)
+            evaluate_mlx_learning(shadow_price)
             _process_binance_host_learning(
                 price,
                 {
