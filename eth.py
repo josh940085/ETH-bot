@@ -13315,7 +13315,7 @@ def _fetch_market_kline_rows(
 ):
     errors = []
     source_preference = str(
-        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "kraken_first")
+        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "binance_first")
     ).lower()
     if str(interval) == "12h":
         try:
