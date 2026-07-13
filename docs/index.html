@@ -219,6 +219,66 @@
     .return-neg { color: #2ecc71; font-weight: 750; }
     .return-flat { color: #d9e2ec; font-weight: 650; }
 
+    .token-usage-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .token-usage-item {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 10px;
+      background: rgba(9, 12, 17, 0.62);
+      border: 1px solid rgba(121, 139, 161, 0.10);
+    }
+
+    .token-ring {
+      --ring-color: #4fa3ff;
+      --ring-progress: 0deg;
+      width: 76px;
+      height: 76px;
+      flex: 0 0 76px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: conic-gradient(var(--ring-color) var(--ring-progress), rgba(255,255,255,0.08) 0);
+      position: relative;
+      box-shadow: 0 8px 20px rgba(0,0,0,0.20);
+    }
+
+    .token-ring::before {
+      content: "";
+      position: absolute;
+      inset: 7px;
+      border-radius: 50%;
+      background: #11151b;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+
+    .token-ring-center {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      line-height: 1.12;
+    }
+
+    .token-ring-value { font-size: 16px; font-weight: 800; color: #fff; }
+    .token-ring-unit { margin-top: 2px; font-size: 9px; color: #84909d; }
+    .token-usage-copy { min-width: 0; }
+    .token-usage-name { font-size: 12px; font-weight: 750; color: #e7edf4; }
+    .token-usage-status { margin-top: 3px; font-size: 11px; color: #9aa6b3; }
+    .token-usage-detail { margin-top: 5px; font-size: 10px; line-height: 1.4; color: #74808d; overflow-wrap: anywhere; }
+
+    .token-ring.good { --ring-color: #2ecc71; }
+    .token-ring.warn { --ring-color: #f5b942; }
+    .token-ring.bad { --ring-color: #e74c3c; }
+    .token-ring.info { --ring-color: #4fa3ff; }
+    .token-ring.off { --ring-color: #59636f; }
+
     .phase-badge {
       display: inline-flex;
       max-width: 130px;
@@ -754,6 +814,10 @@
       .last-settings-grid {
         grid-template-columns: repeat(4, minmax(0, 1fr));
       }
+
+      .token-usage-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
     }
 
     @media (max-width: 520px) {
@@ -782,6 +846,10 @@
       .section-grid-compact {
         grid-template-columns: 1fr;
       }
+
+      .token-usage-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -790,7 +858,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260713-15";
+  const APP_VERSION = "20260713-16";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1948,24 +2016,37 @@
         const remaining = Math.max(0, Number(item.remaining) || 0);
         const pct = Math.min(100, used / limit * 100);
         const tone = pct >= 90 ? "bad" : (pct >= 70 ? "warn" : "good");
-        return renderMetricCard(
-          `${escapeHtml(item.name)} · ${status}`,
-          `${used} / ${limit}`,
-          `剩餘 ${remaining} ｜ ${pct.toFixed(1)}% ｜ ${escapeHtml(item.reset || "")}`,
-          tone,
-        );
+        return `
+          <div class="token-usage-item">
+            <div class="token-ring ${tone}" style="--ring-progress:${(pct * 3.6).toFixed(2)}deg">
+              <div class="token-ring-center"><div class="token-ring-value">${pct.toFixed(1)}%</div><div class="token-ring-unit">${used} / ${limit}</div></div>
+            </div>
+            <div class="token-usage-copy">
+              <div class="token-usage-name">${escapeHtml(item.name)}</div>
+              <div class="token-usage-status">${status} ｜ 剩餘 ${remaining}</div>
+              <div class="token-usage-detail">${escapeHtml(item.reset || "")}</div>
+            </div>
+          </div>`;
       }
-      return renderMetricCard(
-        `${escapeHtml(item.name)} · ${status}`,
-        item.enabled === false ? "停用" : (configured ? "正常" : "未啟用"),
-        escapeHtml(item.note || "供應商未提供用量資料"),
-        configured ? "info" : "warn",
-      );
+      const active = configured && item.enabled !== false;
+      const tone = active ? "info" : "off";
+      const ringText = item.enabled === false ? "停用" : (configured ? "正常" : "未啟用");
+      return `
+        <div class="token-usage-item">
+          <div class="token-ring ${tone}" style="--ring-progress:${active ? 360 : 0}deg">
+            <div class="token-ring-center"><div class="token-ring-value">${ringText}</div><div class="token-ring-unit">STATUS</div></div>
+          </div>
+          <div class="token-usage-copy">
+            <div class="token-usage-name">${escapeHtml(item.name)}</div>
+            <div class="token-usage-status">${status}</div>
+            <div class="token-usage-detail">${escapeHtml(item.note || "供應商未提供用量資料")}</div>
+          </div>
+        </div>`;
     }).join("");
     return `
       <div class="card">
         <div class="card-title">API Token 使用量</div>
-        <div class="section-grid section-grid-compact">${cards}</div>
+        <div class="token-usage-grid">${cards}</div>
         <div class="section-note">只顯示設定狀態與用量數字，不會傳送或顯示任何 Token 內容。每日統計以 UTC 重置。</div>
       </div>`;
   }
