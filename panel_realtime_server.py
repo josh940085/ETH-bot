@@ -82,6 +82,45 @@ def _runtime_env_value(name: str, default=""):
     return os.getenv(name, default)
 
 
+def _build_api_token_usage() -> dict:
+    repo_dir = Path(__file__).resolve().parent
+    data_dir = Path(os.getenv("BOT_DATA_DIR", repo_dir / ".runtime" / "data")).expanduser()
+    usage_path = data_dir / "api_token_usage.json"
+    persisted = {}
+    try:
+        persisted = json.loads(usage_path.read_text(encoding="utf-8"))
+    except Exception:
+        persisted = {}
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    twelve = persisted.get("twelve_data") if isinstance(persisted, dict) else {}
+    twelve = twelve if isinstance(twelve, dict) else {}
+    twelve_used = max(0, int(twelve.get("count", 0))) if str(twelve.get("day") or "") == today else 0
+    twelve_limit = max(1, _safe_int_env("TWELVE_DATA_DAILY_REQUEST_LIMIT", 700))
+
+    items = [
+        {
+            "id": "twelve_data", "name": "Twelve Data", "configured": bool(str(_runtime_env_value("TWELVE_DATA_API_KEY", "") or "").strip()),
+            "used": twelve_used, "limit": twelve_limit, "remaining": max(0, twelve_limit - twelve_used),
+            "unit": "requests/day", "reset": f"{today} 24:00 UTC", "measurable": True,
+            "last_request_ts": float(twelve.get("last_request_ts", 0) or 0),
+        },
+        {
+            "id": "openai", "name": "OpenAI", "configured": bool(str(_runtime_env_value("OPENAI_API_KEY", "") or "").strip()),
+            "enabled": _safe_bool_env("OPENAI_PAID_API_ENABLED", False), "measurable": False,
+            "note": "用量由 OpenAI 帳務後台統計",
+        },
+        {
+            "id": "binance", "name": "Binance", "configured": bool(str(_runtime_env_value("BINANCE_API_KEY", "") or "").strip()),
+            "measurable": False, "note": "交易所採動態 request weight，程式已啟用429保護",
+        },
+        {
+            "id": "telegram", "name": "Telegram", "configured": bool(str(_runtime_env_value("TELEGRAM_TOKEN", "") or "").strip()),
+            "measurable": False, "note": "Bot API 不提供每日用量配額",
+        },
+    ]
+    return {"ok": True, "day_utc": today, "items": items, "ts": int(time.time())}
+
+
 def _load_allowed_user_ids(raw: str):
     values = set()
     for item in str(raw or "").strip().split(","):
@@ -855,6 +894,13 @@ async def get_panel_state(request: Request):
     async with STATE_LOCK:
         payload = dict(LATEST_STATE)
     return JSONResponse(payload)
+
+
+@app.get("/api/panel/token-usage")
+async def get_api_token_usage(request: Request):
+    if not _viewer_authorized_http(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return JSONResponse(_build_api_token_usage())
 
 
 @app.post("/api/panel/publish")

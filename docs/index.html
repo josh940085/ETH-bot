@@ -790,7 +790,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260604-14";
+  const APP_VERSION = "20260713-15";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -926,6 +926,8 @@
   let BACKTEST_PANEL_SUMMARY = null;
   let KLINES_4H = [];
   let KLINES_4H_FETCH_TS = 0;
+  let API_TOKEN_USAGE = null;
+  let API_TOKEN_USAGE_FETCH_TS = 0;
 
   let livePrice = 0;
   let liveMarkPrice = 0;
@@ -964,6 +966,7 @@
   const PRICE_FETCH_TIMEOUT_MS = 1500;
   const KLINE_FETCH_TIMEOUT_MS = 1800;
   const KLINE_REFRESH_INTERVAL_MS = 60000;
+  const TOKEN_USAGE_REFRESH_INTERVAL_MS = 60000;
   const PANEL_REFRESH_INTERVAL_MS = 1500;
   const APP_VERSION_CHECK_INTERVAL_MS = 30000;
   const WS_RECONNECT_DELAY_MS = 2500;
@@ -1332,6 +1335,25 @@
     applyPositionPayload(data, picked.base);
   }
 
+  async function fetchApiTokenUsage() {
+    if (Date.now() - API_TOKEN_USAGE_FETCH_TS < TOKEN_USAGE_REFRESH_INTERVAL_MS) return;
+    const base = REMOTE_STATE_URL || (location.protocol.startsWith("http") ? location.href : "");
+    if (!base || (!HAS_VIEWER_AUTH && !IS_LOCAL_PREVIEW)) return;
+    let url;
+    try {
+      url = new URL("/api/panel/token-usage", base).toString();
+    } catch (_) {
+      return;
+    }
+    const data = await fetchJsonWithTimeout(`${url}?t=${Date.now()}`, 1800, {
+      headers: buildViewerAuthHeaders(),
+    });
+    if (data && data.ok && Array.isArray(data.items)) {
+      API_TOKEN_USAGE = data;
+      API_TOKEN_USAGE_FETCH_TS = Date.now();
+    }
+  }
+
   function buildMarketDataUrl(interval, limit) {
     const base = REMOTE_STATE_URL || (location.protocol.startsWith("http") ? location.href : "");
     if (!base) return "";
@@ -1425,7 +1447,7 @@
     }
     refreshInFlight = true;
     try {
-      await Promise.all([fetchPositionData(), fetchPrice(), fetchFourHourKlines()]);
+      await Promise.all([fetchPositionData(), fetchPrice(), fetchFourHourKlines(), fetchApiTokenUsage()]);
       render();
     } finally {
       refreshInFlight = false;
@@ -1915,6 +1937,39 @@
   </div>`;
   }
 
+  function renderApiTokenUsage() {
+    if (!API_TOKEN_USAGE || !Array.isArray(API_TOKEN_USAGE.items)) return "";
+    const cards = API_TOKEN_USAGE.items.map((item) => {
+      const configured = Boolean(item.configured);
+      const status = configured ? "已設定" : "未設定";
+      if (item.measurable) {
+        const used = Math.max(0, Number(item.used) || 0);
+        const limit = Math.max(1, Number(item.limit) || 1);
+        const remaining = Math.max(0, Number(item.remaining) || 0);
+        const pct = Math.min(100, used / limit * 100);
+        const tone = pct >= 90 ? "bad" : (pct >= 70 ? "warn" : "good");
+        return renderMetricCard(
+          `${escapeHtml(item.name)} · ${status}`,
+          `${used} / ${limit}`,
+          `剩餘 ${remaining} ｜ ${pct.toFixed(1)}% ｜ ${escapeHtml(item.reset || "")}`,
+          tone,
+        );
+      }
+      return renderMetricCard(
+        `${escapeHtml(item.name)} · ${status}`,
+        item.enabled === false ? "停用" : (configured ? "正常" : "未啟用"),
+        escapeHtml(item.note || "供應商未提供用量資料"),
+        configured ? "info" : "warn",
+      );
+    }).join("");
+    return `
+      <div class="card">
+        <div class="card-title">API Token 使用量</div>
+        <div class="section-grid section-grid-compact">${cards}</div>
+        <div class="section-note">只顯示設定狀態與用量數字，不會傳送或顯示任何 Token 內容。每日統計以 UTC 重置。</div>
+      </div>`;
+  }
+
   function renderTotalAssetsHero(totalAssetsUsdt) {
     const spotAssets = Number.isFinite(Number(BINANCE_SPOT_TOTAL_ASSETS_USDT)) ? Number(BINANCE_SPOT_TOTAL_ASSETS_USDT) : 0;
     const futuresAssets = Number.isFinite(Number(BINANCE_FUTURES_TOTAL_ASSETS_USDT))
@@ -2092,6 +2147,7 @@
   </div>
   ${renderTotalAssetsHero(totalAssetsUsdt)}
   ${renderBacktestPanel()}
+  ${renderApiTokenUsage()}
   <div class="card close-summary-card">
     <div class="close-hit ${hitClass}">${hitText}</div>
     <div class="close-summary-icon">📋</div>
@@ -2173,6 +2229,7 @@
 
   ${renderTotalAssetsHero(totalAssetsUsdt)}
   ${renderBacktestPanel()}
+  ${renderApiTokenUsage()}
 
   <!-- Direction + Size -->
   <div class="card">
@@ -2308,7 +2365,7 @@
 
   // ── 啟動 ──
   connectRealtimeSocket();
-  void Promise.all([fetchPerformanceSummary(), fetchBacktestPanelSummary()]).then(render);
+  void Promise.all([fetchPerformanceSummary(), fetchBacktestPanelSummary(), fetchApiTokenUsage()]).then(render);
   refresh();
   setInterval(refresh, PANEL_REFRESH_INTERVAL_MS);
   setInterval(checkAppVersion, APP_VERSION_CHECK_INTERVAL_MS);

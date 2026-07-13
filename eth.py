@@ -13218,6 +13218,52 @@ TWELVE_DATA_INTERVAL_MAP = {
 TWELVE_DATA_KLINE_CACHE = {}
 TWELVE_DATA_REQUEST_LOCK = threading.Lock()
 TWELVE_DATA_USAGE_STATE = {"day": "", "count": 0, "last_request_ts": 0.0}
+TWELVE_DATA_USAGE_PATH = data_path("api_token_usage.json")
+
+
+def _load_twelve_data_usage_state():
+    try:
+        payload = json.loads(TWELVE_DATA_USAGE_PATH.read_text(encoding="utf-8"))
+        item = payload.get("twelve_data") if isinstance(payload, dict) else {}
+        if isinstance(item, dict):
+            TWELVE_DATA_USAGE_STATE.update(
+                {
+                    "day": str(item.get("day") or ""),
+                    "count": max(0, _safe_int(item.get("count"), 0)),
+                    "last_request_ts": max(0.0, _safe_float(item.get("last_request_ts"), 0.0)),
+                }
+            )
+    except Exception:
+        pass
+
+
+def _save_twelve_data_usage_state():
+    try:
+        ensure_parent_dir(TWELVE_DATA_USAGE_PATH)
+        payload = {}
+        if TWELVE_DATA_USAGE_PATH.exists():
+            try:
+                payload = json.loads(TWELVE_DATA_USAGE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        payload["twelve_data"] = {
+            "day": TWELVE_DATA_USAGE_STATE["day"],
+            "count": TWELVE_DATA_USAGE_STATE["count"],
+            "last_request_ts": TWELVE_DATA_USAGE_STATE["last_request_ts"],
+            "daily_limit": max(1, _safe_int(os.getenv("TWELVE_DATA_DAILY_REQUEST_LIMIT", 700), 700)),
+        }
+        tmp_path = TWELVE_DATA_USAGE_PATH.with_name(
+            f".{TWELVE_DATA_USAGE_PATH.name}.{os.getpid()}.tmp"
+        )
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(TWELVE_DATA_USAGE_PATH)
+    except Exception as exc:
+        print(f"⚠️ Twelve Data 用量狀態寫入失敗: {exc}")
+
+
+_load_twelve_data_usage_state()
 
 
 def _fetch_coinbase_kline_rows(symbol, interval, limit=100, timeout=10):
@@ -13299,6 +13345,7 @@ def _fetch_twelve_data_kline_rows(
         )
         TWELVE_DATA_USAGE_STATE["last_request_ts"] = time.time()
         TWELVE_DATA_USAGE_STATE["count"] += 1
+        _save_twelve_data_usage_state()
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, dict) or payload.get("status") == "error":
