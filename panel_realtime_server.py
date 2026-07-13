@@ -840,7 +840,9 @@ async def local_backtest_summary():
 
 @app.get("/api/backtests/summary")
 async def get_backtests_summary(request: Request):
-    if not _viewer_authorized_http(request):
+    # Native Mac app reads the historical report directly from localhost.
+    # Remote/tunnel clients still require the regular Telegram/panel auth.
+    if not _is_loopback_request(request) and not _viewer_authorized_http(request):
         raise HTTPException(status_code=401, detail="unauthorized")
     return JSONResponse(_build_backtest_panel_summary())
 

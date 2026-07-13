@@ -26,7 +26,7 @@ struct TradingDashboardView: View {
 
             Divider()
 
-            MiniAppWebView(url: URL(string: "http://127.0.0.1:8787/?client=mac&v=20260713-16")!)
+            MiniAppWebView(url: URL(string: "http://127.0.0.1:8787/?client=mac&v=20260713-17")!)
                 .id(reloadID)
         }
         .background(Color(nsColor: .windowBackgroundColor))

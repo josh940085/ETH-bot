@@ -858,7 +858,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260713-16";
+  const APP_VERSION = "20260713-17";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1477,7 +1477,7 @@
   async function fetchBacktestPanelSummary() {
     if (BACKTEST_PANEL_SUMMARY) return;
     const url = buildPanelApiUrl("/api/backtests/summary");
-    if (!url || !HAS_VIEWER_AUTH) return;
+    if (!url || (!HAS_VIEWER_AUTH && !IS_LOCAL_PREVIEW)) return;
     const data = await fetchJsonWithTimeout(url, 2500, {
       headers: buildViewerAuthHeaders(),
     });
