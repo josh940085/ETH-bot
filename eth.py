@@ -209,7 +209,7 @@ def _get_required_env(name, default=None, mask=False, warn_if_missing=True):
 
 _load_local_env()
 
-ALLOW_BINANCE_MARKET_DATA_FALLBACK = str(os.getenv("ALLOW_BINANCE_MARKET_DATA_FALLBACK", "1") or "1").strip().lower() in {
+ALLOW_BINANCE_MARKET_DATA_FALLBACK = str(os.getenv("ALLOW_BINANCE_MARKET_DATA_FALLBACK", "0") or "0").strip().lower() in {
     "1",
     "true",
     "yes",
@@ -13315,7 +13315,7 @@ def _fetch_market_kline_rows(
 ):
     errors = []
     source_preference = str(
-        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "binance_first")
+        source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "kraken_first")
     ).lower()
     if str(interval) == "12h":
         try:

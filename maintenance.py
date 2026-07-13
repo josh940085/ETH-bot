@@ -1361,6 +1361,7 @@ def _check_market_kline_source():
     required = (
         'os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "kraken_first")',
         'source_preference="kraken_first"',
+        'os.getenv("ALLOW_BINANCE_MARKET_DATA_FALLBACK", "0")',
     )
     missing = [item for item in required if item not in source]
     if missing:
