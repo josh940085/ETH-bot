@@ -13210,6 +13210,14 @@ KRAKEN_KLINE_CACHE = {}
 KRAKEN_REQUEST_LOCK = threading.Lock()
 KRAKEN_LAST_REQUEST_TS = 0.0
 COINBASE_GRANULARITY_MAP = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+TWELVE_DATA_INTERVAL_MAP = {
+    "1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
+    "1h": "1h", "4h": "4h", "12h": "12h", "1d": "1day",
+    "1w": "1week", "1M": "1month",
+}
+TWELVE_DATA_KLINE_CACHE = {}
+TWELVE_DATA_REQUEST_LOCK = threading.Lock()
+TWELVE_DATA_USAGE_STATE = {"day": "", "count": 0, "last_request_ts": 0.0}
 
 
 def _fetch_coinbase_kline_rows(symbol, interval, limit=100, timeout=10):
@@ -13234,6 +13242,91 @@ def _fetch_coinbase_kline_rows(symbol, interval, limit=100, timeout=10):
     if not rows:
         raise RuntimeError("Coinbase candles empty")
     return rows[-max(1, min(300, _safe_int(limit, 100))) :]
+
+
+def _fetch_twelve_data_kline_rows(
+    symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10
+):
+    api_key = str(os.getenv("TWELVE_DATA_API_KEY", "") or "").strip()
+    if not api_key:
+        raise RuntimeError("Twelve Data API key 未設定")
+    td_interval = TWELVE_DATA_INTERVAL_MAP.get(str(interval))
+    if td_interval is None:
+        raise RuntimeError(f"Twelve Data不支援週期 {interval}")
+
+    pair = "BTC/USD" if str(symbol or "").upper().startswith("BTC") else "ETH/USD"
+    selected_limit = max(1, min(5000, _safe_int(limit, 100)))
+    cache_key = (
+        pair, str(interval), selected_limit,
+        int(_safe_float(start_time_ms, 0.0)), int(_safe_float(end_time_ms, 0.0)),
+    )
+    cached = TWELVE_DATA_KLINE_CACHE.get(cache_key)
+    cache_ttl = max(10, KLINE_TTL.get(str(interval), 10))
+    if cached and time.time() - _safe_float(cached[0], 0.0) < cache_ttl:
+        return cached[1]
+
+    params = {
+        "symbol": pair,
+        "interval": td_interval,
+        "outputsize": selected_limit,
+        "timezone": "UTC",
+        "order": "ASC",
+        "apikey": api_key,
+    }
+    if start_time_ms is not None:
+        params["start_date"] = datetime.datetime.fromtimestamp(
+            _safe_float(start_time_ms, 0.0) / 1000, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
+    if end_time_ms is not None:
+        params["end_date"] = datetime.datetime.fromtimestamp(
+            _safe_float(end_time_ms, 0.0) / 1000, tz=datetime.timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S")
+
+    with TWELVE_DATA_REQUEST_LOCK:
+        today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        if TWELVE_DATA_USAGE_STATE["day"] != today:
+            TWELVE_DATA_USAGE_STATE.update({"day": today, "count": 0})
+        daily_limit = max(1, _safe_int(os.getenv("TWELVE_DATA_DAILY_REQUEST_LIMIT", 700), 700))
+        if TWELVE_DATA_USAGE_STATE["count"] >= daily_limit:
+            raise RuntimeError(f"Twelve Data每日請求上限已達 {daily_limit}")
+        min_gap = max(0.25, _safe_float(os.getenv("TWELVE_DATA_REQUEST_MIN_GAP_SEC", 8.0), 8.0))
+        wait_sec = min_gap - (time.time() - TWELVE_DATA_USAGE_STATE["last_request_ts"])
+        if wait_sec > 0:
+            time.sleep(wait_sec)
+        response = requests.get(
+            "https://api.twelvedata.com/time_series", params=params,
+            headers={"User-Agent": "ETH-bot/1.0"}, timeout=timeout,
+        )
+        TWELVE_DATA_USAGE_STATE["last_request_ts"] = time.time()
+        TWELVE_DATA_USAGE_STATE["count"] += 1
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or payload.get("status") == "error":
+        raise RuntimeError(f"Twelve Data error: {(payload or {}).get('message', 'invalid response')}")
+    values = payload.get("values") if isinstance(payload.get("values"), list) else []
+    interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60_000)
+    rows = []
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        try:
+            stamp = datetime.datetime.strptime(str(item.get("datetime")), "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc
+            )
+            open_ms = int(stamp.timestamp() * 1000)
+            rows.append([
+                open_ms, item["open"], item["high"], item["low"], item["close"],
+                item.get("volume") or "0", open_ms + interval_ms - 1,
+                "0", 0, "0", "0", "0",
+            ])
+        except (KeyError, TypeError, ValueError):
+            continue
+    rows.sort(key=lambda row: row[0])
+    if not rows:
+        raise RuntimeError("Twelve Data candles empty")
+    rows = rows[-selected_limit:]
+    TWELVE_DATA_KLINE_CACHE[cache_key] = (time.time(), rows)
+    return rows
 
 
 def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
@@ -13405,6 +13498,19 @@ def _fetch_market_kline_rows(
         except Exception as exc:
             errors.append(f"kraken_first: {exc}")
             _log_kline_source_failure("kraken", exc, prefix=prefix)
+
+    # Formal API-key fallback. Keep it ahead of TradingView so the bot does
+    # not depend on an unauthenticated web session when primary feeds fail.
+    if str(os.getenv("TWELVE_DATA_API_KEY", "") or "").strip():
+        try:
+            rows = _fetch_twelve_data_kline_rows(
+                symbol, interval, limit=limit, start_time_ms=start_time_ms,
+                end_time_ms=end_time_ms, timeout=timeout,
+            )
+            return rows, "twelve_data"
+        except Exception as exc:
+            errors.append(f"twelve_data: {exc}")
+            _log_kline_source_failure("twelve_data", exc, prefix=prefix)
 
     if source_preference == "binance_first" and ALLOW_BINANCE_MARKET_DATA_FALLBACK:
         try:
