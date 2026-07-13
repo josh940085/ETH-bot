@@ -95,7 +95,7 @@ def _build_api_token_usage() -> dict:
     twelve = persisted.get("twelve_data") if isinstance(persisted, dict) else {}
     twelve = twelve if isinstance(twelve, dict) else {}
     twelve_used = max(0, int(twelve.get("count", 0))) if str(twelve.get("day") or "") == today else 0
-    twelve_limit = max(1, _safe_int_env("TWELVE_DATA_DAILY_REQUEST_LIMIT", 700))
+    twelve_limit = max(1, _safe_int_env("TWELVE_DATA_DAILY_REQUEST_LIMIT", 800))
 
     items = [
         {

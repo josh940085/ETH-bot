@@ -13252,7 +13252,7 @@ def _save_twelve_data_usage_state():
             "day": TWELVE_DATA_USAGE_STATE["day"],
             "count": TWELVE_DATA_USAGE_STATE["count"],
             "last_request_ts": TWELVE_DATA_USAGE_STATE["last_request_ts"],
-            "daily_limit": max(1, _safe_int(os.getenv("TWELVE_DATA_DAILY_REQUEST_LIMIT", 700), 700)),
+            "daily_limit": max(1, _safe_int(os.getenv("TWELVE_DATA_DAILY_REQUEST_LIMIT", 800), 800)),
         }
         tmp_path = TWELVE_DATA_USAGE_PATH.with_name(
             f".{TWELVE_DATA_USAGE_PATH.name}.{os.getpid()}.tmp"
@@ -13332,7 +13332,7 @@ def _fetch_twelve_data_kline_rows(
         today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
         if TWELVE_DATA_USAGE_STATE["day"] != today:
             TWELVE_DATA_USAGE_STATE.update({"day": today, "count": 0})
-        daily_limit = max(1, _safe_int(os.getenv("TWELVE_DATA_DAILY_REQUEST_LIMIT", 700), 700))
+        daily_limit = max(1, _safe_int(os.getenv("TWELVE_DATA_DAILY_REQUEST_LIMIT", 800), 800))
         if TWELVE_DATA_USAGE_STATE["count"] >= daily_limit:
             raise RuntimeError(f"Twelve Data每日請求上限已達 {daily_limit}")
         min_gap = max(0.25, _safe_float(os.getenv("TWELVE_DATA_REQUEST_MIN_GAP_SEC", 8.0), 8.0))
