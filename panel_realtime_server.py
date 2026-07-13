@@ -746,6 +746,11 @@ def _viewer_authorized_http(request: Request) -> bool:
     return _validate_telegram_init_data(_extract_init_data_http(request)) is not None
 
 
+def _is_loopback_request(request: Request) -> bool:
+    host = str(getattr(getattr(request, "client", None), "host", "") or "").strip().lower()
+    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
 def _viewer_authorized_ws(websocket: WebSocket) -> bool:
     settings = _viewer_auth_settings()
     panel_token = str(settings.get("panel_token", "") or "").strip()
@@ -898,7 +903,10 @@ async def get_panel_state(request: Request):
 
 @app.get("/api/panel/token-usage")
 async def get_api_token_usage(request: Request):
-    if not _viewer_authorized_http(request):
+    # The native Mac app embeds the localhost panel without a Telegram
+    # session. This endpoint contains counters/status only (never secrets), so
+    # permit loopback reads while keeping tunnel clients behind normal auth.
+    if not _is_loopback_request(request) and not _viewer_authorized_http(request):
         raise HTTPException(status_code=401, detail="unauthorized")
     return JSONResponse(_build_api_token_usage())
 
