@@ -14445,6 +14445,8 @@ def run_bot():
             if (
                 daily_min_trade
                 and _is_truthy(os.getenv("DAILY_MIN_DUE_ALLOW_QUALITY_SIGNAL", "1"))
+                and not str(final or "").startswith("觀望")
+                and get_signal_direction(final) in {"long", "short"}
                 and not _daily_anchor_guard_should_wait(final, score, decision)
             ):
                 daily_min_trade = False
