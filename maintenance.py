@@ -35,6 +35,7 @@ CHECK_NAME_ZH = {
     "entry_confirm_runtime": "進場確認執行狀態",
     "entry_confirm_candle_id": "進場確認 K 線追蹤",
     "trade_decision_initialization": "交易決策初始化順序",
+    "trade_open_status": "開單狀態",
     "market_kline_source": "行情K線主資料源",
     "py_compile": "Python 語法檢查",
     "import_smoke": "模組載入測試",
@@ -1356,6 +1357,89 @@ def _check_trade_decision_initialization():
     }
 
 
+def _check_trade_open_status():
+    load_local_env()
+    truthy = {"1", "true", "yes", "on"}
+    real_copy_enabled = str(os.getenv("BINANCE_REAL_COPY_ENABLED", "0") or "0").strip().lower() in truthy
+    api_ready = bool(
+        str(os.getenv("BINANCE_API_KEY", "") or "").strip()
+        and str(os.getenv("BINANCE_API_SECRET", "") or "").strip()
+    )
+
+    telegram_state = _read_json(data_path(".telegram_state.json")) or {}
+    follow_enabled = bool(telegram_state.get("follow_mode_enabled", False))
+    position = _read_json(data_path("docs", "position.json")) or {}
+    position_open = bool(position.get("open", False))
+    position_direction = str(position.get("direction") or "").lower()
+    if position_open and position_direction not in {"long", "short"}:
+        raise RuntimeError("持倉狀態異常：open=true 但方向不是 long/short")
+
+    today = dt.datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
+    daily_trade_opened = bool(
+        str(position.get("daily_trade_date") or "") == today
+        and position.get("daily_trade_opened", False)
+    )
+    daily_source = str(position.get("daily_trade_source") or "").strip()
+
+    log_path = REPO_DIR / ".runtime" / "logs" / "program.log"
+    if not log_path.exists():
+        raise RuntimeError("找不到 program.log，無法確認交易迴圈")
+    log_age_sec = max(0.0, dt.datetime.now().timestamp() - log_path.stat().st_mtime)
+    try:
+        log_text = log_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception as exc:
+        raise RuntimeError(f"無法讀取 program.log: {exc}") from exc
+    latest_launch = log_text.rsplit("🚀 啟動策略:", 1)[-1]
+    loop_healthy = log_age_sec <= 900 and "🧭 已收集MLX多週期資料" in latest_launch
+
+    recent_status = "尚無正式進場訊號"
+    status_patterns = (
+        "Binance 自動開單成功",
+        "Binance 自動開單失敗",
+        "跟單未開啟",
+        "已開啟跟單，但未啟用實單",
+        "進場延遲確認 |",
+        "🤖 AI信號：",
+    )
+    for raw_line in reversed(latest_launch.splitlines()[-2000:]):
+        line = str(raw_line or "").strip()
+        if line and any(pattern in line for pattern in status_patterns):
+            recent_status = line[:180]
+            break
+
+    blockers = []
+    if not real_copy_enabled:
+        blockers.append("實單開關關閉")
+    if not api_ready:
+        blockers.append("Binance API未完整設定")
+    if not follow_enabled:
+        blockers.append("跟單模式關閉")
+    if not loop_healthy:
+        blockers.append(f"交易迴圈未確認（log_age={int(log_age_sec)}秒）")
+    if blockers:
+        raise RuntimeError("；".join(blockers))
+
+    position_text = f"有({position_direction})" if position_open else "無"
+    today_text = "是" if daily_trade_opened else "否"
+    if daily_trade_opened and daily_source:
+        today_text += f"({daily_source})"
+    return {
+        "status": "ok",
+        "detail": (
+            f"實單=啟用；跟單=開啟；持倉={position_text}；今日開單={today_text}；"
+            f"交易迴圈=正常；最近狀態={recent_status}"
+        ),
+        "real_copy_enabled": real_copy_enabled,
+        "follow_enabled": follow_enabled,
+        "position_open": position_open,
+        "daily_trade_opened": daily_trade_opened,
+        "daily_trade_source": daily_source,
+        "loop_healthy": loop_healthy,
+        "log_age_sec": round(log_age_sec, 1),
+        "recent_status": recent_status,
+    }
+
+
 def _check_market_kline_source():
     source = (REPO_DIR / "eth.py").read_text(encoding="utf-8")
     required = (
@@ -1599,6 +1683,7 @@ def main():
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),
         ("trade_decision_initialization", _check_trade_decision_initialization),
+        ("trade_open_status", _check_trade_open_status),
         ("market_kline_source", _check_market_kline_source),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
