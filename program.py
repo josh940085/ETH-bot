@@ -23,6 +23,7 @@ from telegram import (
 
 ETH_FILE = REPO_DIR / "eth.py"
 BACKTEST_FILE = REPO_DIR / "backtest.py"
+HISTORICAL_BACKTEST_FILE = REPO_DIR / "historical_backtest.py"
 MAINTENANCE_FILE = REPO_DIR / "maintenance.py"
 RESTART_DELAY_SEC = 2
 SUPERVISOR_RESTART_EXIT_CODE = 75
@@ -32,6 +33,7 @@ BACKTEST_SUMMARY_PATH = data_path("backtest_latest_summary.json")
 BACKTEST_TRADES_PATH = data_path("backtest_latest_trades.csv")
 BACKTEST_LEARN_PATH = ai_data_path("backtest_ai_data.csv")
 MAINTENANCE_REPORT_PATH = data_path("maintenance_latest_report.json")
+HISTORICAL_BACKTEST_REPORT_PATH = data_path("historical_backtest_latest_report.json")
 SUPERVISOR_LOCK_PATH = data_path(".program_supervisor.lock")
 SUPERVISOR_LOCK_FH = None
 
@@ -246,6 +248,37 @@ def _get_maintenance_settings():
     }
 
 
+def _get_historical_backtest_settings():
+    enabled = str(os.getenv("HISTORICAL_BACKTEST_AUTO_ENABLED", "1") or "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    daily_hour, daily_minute = _parse_daily_schedule(os.getenv("HISTORICAL_BACKTEST_TIME", "03:00"), 3, 0)
+    startup_delay_sec = max(30.0, float(os.getenv("HISTORICAL_BACKTEST_STARTUP_DELAY_SEC", 180)))
+    return {
+        "enabled": enabled,
+        "daily_hour": daily_hour,
+        "daily_minute": daily_minute,
+        "startup_delay_sec": startup_delay_sec,
+    }
+
+
+def _compute_initial_historical_backtest_ts(settings):
+    now_ts = time.time()
+    now_dt = datetime.datetime.fromtimestamp(now_ts).astimezone()
+    scheduled_dt = now_dt.replace(hour=settings["daily_hour"], minute=settings["daily_minute"], second=0, microsecond=0)
+    try:
+        payload = json.loads(HISTORICAL_BACKTEST_REPORT_PATH.read_text(encoding="utf-8"))
+        finished_at = datetime.datetime.fromisoformat(str(payload.get("finished_at") or "")).astimezone()
+        completed_today = bool(payload.get("success")) and finished_at.date() == now_dt.date()
+    except Exception:
+        completed_today = False
+    if completed_today:
+        return _compute_next_daily_run_ts(settings["daily_hour"], settings["daily_minute"], now_ts)
+    if now_dt >= scheduled_dt:
+        return now_ts + settings["startup_delay_sec"]
+    return scheduled_dt.timestamp()
+
+
 def _compute_initial_maintenance_ts(settings):
     now_ts = time.time()
     now_dt = datetime.datetime.fromtimestamp(now_ts).astimezone()
@@ -325,6 +358,15 @@ def _start_maintenance_process(env, settings):
     )
 
 
+def _start_historical_backtest_process(env):
+    if not HISTORICAL_BACKTEST_FILE.exists():
+        return None
+    cmd = [sys.executable, str(HISTORICAL_BACKTEST_FILE)]
+    print(f"📚 啟動每日歷年回測: {' '.join(cmd)}")
+    # Keep output attached to program.log so a multi-year run cannot block on a full PIPE buffer.
+    return subprocess.Popen(cmd, cwd=str(REPO_DIR), env=env)
+
+
 def _terminate_process(proc, timeout=10):
     if proc is None or proc.poll() is not None:
         return
@@ -342,6 +384,7 @@ def run_once() -> int:
     configure_token(os.getenv("TELEGRAM_TOKEN", ""))
     backtest_settings = _get_backtest_settings()
     maintenance_settings = _get_maintenance_settings()
+    historical_backtest_settings = _get_historical_backtest_settings()
 
     env = os.environ.copy()
     env["BOT_SUPERVISOR"] = "1"
@@ -352,8 +395,10 @@ def run_once() -> int:
     proc = subprocess.Popen(cmd, cwd=str(REPO_DIR), env=env)
     backtest_proc = None
     maintenance_proc = None
+    historical_backtest_proc = None
     next_backtest_ts = time.time() + backtest_settings["startup_delay_sec"]
     next_maintenance_ts = _compute_initial_maintenance_ts(maintenance_settings)
+    next_historical_backtest_ts = _compute_initial_historical_backtest_ts(historical_backtest_settings)
     shutdown_requested = {"value": False, "signal": None}
 
     def _forward_signal(sig, _frame):
@@ -365,6 +410,8 @@ def run_once() -> int:
             backtest_proc.send_signal(sig)
         if maintenance_proc is not None and maintenance_proc.poll() is None:
             maintenance_proc.send_signal(sig)
+        if historical_backtest_proc is not None and historical_backtest_proc.poll() is None:
+            historical_backtest_proc.send_signal(sig)
 
     signal.signal(signal.SIGTERM, _forward_signal)
     signal.signal(signal.SIGINT, _forward_signal)
@@ -374,6 +421,7 @@ def run_once() -> int:
         if code is not None:
             _terminate_process(backtest_proc)
             _terminate_process(maintenance_proc)
+            _terminate_process(historical_backtest_proc)
             if shutdown_requested["value"]:
                 return SUPERVISOR_STOP_EXIT_CODE
             return code
@@ -392,7 +440,7 @@ def run_once() -> int:
                     print(output)
                 next_backtest_ts = time.time() + backtest_settings["interval_sec"]
                 backtest_proc = None
-        elif backtest_settings["enabled"] and time.time() >= next_backtest_ts:
+        elif backtest_settings["enabled"] and maintenance_proc is None and historical_backtest_proc is None and time.time() >= next_backtest_ts:
             backtest_proc = _start_backtest_process(env, backtest_settings)
             next_backtest_ts = time.time() + backtest_settings["interval_sec"]
 
@@ -416,9 +464,26 @@ def run_once() -> int:
         elif (
             maintenance_settings["enabled"]
             and backtest_proc is None
+            and historical_backtest_proc is None
             and time.time() >= next_maintenance_ts
         ):
             maintenance_proc = _start_maintenance_process(env, maintenance_settings)
+
+        if historical_backtest_proc is not None:
+            historical_code = historical_backtest_proc.poll()
+            if historical_code is not None:
+                print(f"📚 每日歷年回測結束，exit_code={historical_code}")
+                next_historical_backtest_ts = _compute_next_daily_run_ts(
+                    historical_backtest_settings["daily_hour"], historical_backtest_settings["daily_minute"]
+                )
+                historical_backtest_proc = None
+        elif (
+            historical_backtest_settings["enabled"]
+            and backtest_proc is None
+            and maintenance_proc is None
+            and time.time() >= next_historical_backtest_ts
+        ):
+            historical_backtest_proc = _start_historical_backtest_process(env)
 
         poll_telegram_commands()
 
@@ -427,6 +492,7 @@ def run_once() -> int:
             _terminate_process(proc)
             _terminate_process(backtest_proc)
             _terminate_process(maintenance_proc)
+            _terminate_process(historical_backtest_proc)
             return SUPERVISOR_RESTART_EXIT_CODE
 
         time.sleep(POLL_INTERVAL_SEC)
