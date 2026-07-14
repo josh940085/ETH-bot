@@ -7888,6 +7888,17 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     risk_rate = _safe_float(decision.get("risk_rate"), 0.0)
     host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
     host_mode = str(host_logic.get("mode") or "")
+    host_conf = _safe_float(host_logic.get("confidence"), 0.0)
+    range_pos = max(0.0, min(1.0, _safe_float(host_logic.get("range_pos"), 0.5)))
+    htf = _safe_int(decision.get("htf"), 0)
+    mid_trend = _safe_int(decision.get("mid_trend"), 0)
+    net_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
+    support_hits = _safe_int(decision.get("support_hits"), 0)
+    resistance_hits = _safe_int(decision.get("resistance_hits"), 0)
+    buy_pressure = bool(decision.get("buy_pressure"))
+    sell_pressure = bool(decision.get("sell_pressure"))
+    sweep_low = bool(decision.get("sweep_low"))
+    sweep_high = bool(decision.get("sweep_high"))
 
     if market_phase == "bull":
         return False
@@ -7923,13 +7934,31 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
         return True
 
     if market_phase == "range_base" and risk_rate > 0:
-        if direction == "long" and host_mode == "support_reclaim":
-            return True
+        confirmed_range_edge = (
+            (
+                direction == "long"
+                and host_mode == "support_reclaim"
+                and range_pos <= 0.28
+                and not (htf == -1 and mid_trend == -1)
+                and (buy_pressure or sweep_low or support_hits > 0)
+            )
+            or (
+                direction == "short"
+                and host_mode == "resistance_rejection"
+                and range_pos >= 0.72
+                and not (htf == 1 and mid_trend == 1)
+                and (sell_pressure or sweep_high or resistance_hits > 0)
+            )
+        )
         max_range_risk = max(
             0.002,
             _safe_float(os.getenv("DAILY_MIN_ANCHOR_RANGE_MAX_RISK_RATE", 0.008), 0.008),
         )
         if risk_rate > max_range_risk:
+            return True
+        if confirmed_range_edge and host_conf >= 0.52 and net_edge >= 0.0015:
+            return False
+        if host_mode in {"support_reclaim", "resistance_rejection"}:
             return True
     if market_phase == "bull_high_vol" and risk_rate > 0:
         max_risk = max(
@@ -7945,9 +7974,7 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     min_edge = max(0.0002, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_NET_EDGE_RATE", 0.0015), 0.0015))
     min_host_conf = max(0.30, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_HOST_CONF", 0.52), 0.52))
 
-    net_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
     host_direction = str(host_logic.get("direction") or "neutral")
-    host_conf = _safe_float(host_logic.get("confidence"), 0.0)
     host_applied = bool(decision.get("host_logic_applied", False))
     repeated_support = _safe_int(decision.get("repeated_support_tests"), 0)
     repeated_resistance = _safe_int(decision.get("repeated_resistance_tests"), 0)
@@ -11536,6 +11563,13 @@ def build_trade_signal_snapshot(
             ):
                 profile_ok = True
             elif host_mode == "trend_pullback_long" and direction_name == "long" and regime == "bull_trend_strong":
+                profile_ok = True
+            elif (
+                host_mode == "breakout_after_pressure_tests"
+                and direction_name == "long"
+                and regime in {"bull_trend", "bull_trend_strong"}
+                and htf == 1
+            ):
                 profile_ok = True
             elif (
                 regime == "range"
