@@ -7899,6 +7899,7 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     sell_pressure = bool(decision.get("sell_pressure"))
     sweep_low = bool(decision.get("sweep_low"))
     sweep_high = bool(decision.get("sweep_high"))
+    score_value = _safe_float(score, 0.5)
 
     if market_phase == "bull":
         return False
@@ -7965,10 +7966,44 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
             0.003,
             _safe_float(os.getenv("DAILY_MIN_ANCHOR_BULL_HIGH_VOL_MAX_RISK_RATE", 0.012), 0.012),
         )
+        max_quality_risk = max(
+            max_risk,
+            _safe_float(os.getenv("DAILY_MIN_ANCHOR_BULL_HIGH_VOL_QUALITY_MAX_RISK_RATE", 0.03), 0.03),
+        )
+        quality_trend_long = (
+            direction == "long"
+            and htf == 1
+            and mid_trend == 1
+            and str(host_logic.get("direction") or "neutral") == "long"
+            and host_conf >= 0.70
+            and score_value >= 0.72
+            and net_edge >= 0.003
+            and 0 < risk_rate <= max_quality_risk
+        )
+        if quality_trend_long:
+            quality_max_size = max(
+                0.01,
+                min(
+                    0.10,
+                    _safe_float(os.getenv("DAILY_MIN_ANCHOR_QUALITY_SIGNAL_MAX_SIZE", 0.03), 0.03),
+                ),
+            )
+            decision["position_size"] = min(
+                max(0.0, _safe_float(decision.get("position_size"), 0.0)),
+                quality_max_size,
+            )
+            decision["max_position_size"] = min(
+                max(
+                    decision["position_size"],
+                    _safe_float(decision.get("max_position_size"), decision["position_size"]),
+                ),
+                quality_max_size,
+            )
+            decision["daily_anchor_quality_signal"] = True
+            return False
         if risk_rate > max_risk:
             return True
 
-    score_value = _safe_float(score, 0.5)
     directional_gap = (score_value - 0.5) if direction == "long" else (0.5 - score_value)
     min_score_gap = max(0.08, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_SCORE_GAP", 0.12), 0.12))
     min_edge = max(0.0002, _safe_float(os.getenv("DAILY_MIN_ANCHOR_ALLOW_NET_EDGE_RATE", 0.0015), 0.0015))
@@ -14524,6 +14559,12 @@ def run_bot():
                     final = "觀望（每日單錨定-等待保底）"
                     position_size = 0.0
 
+            # The anchor helper may downgrade a wide-risk quality signal's size.
+            position_size = min(
+                max(0.0, _safe_float(position_size, 0.0)),
+                max(0.0, _safe_float(decision.get("position_size"), position_size)),
+            )
+
             if not daily_min_trade:
                 sl_guard_reason = _recent_sl_guard_reason(
                     final,
@@ -14872,9 +14913,11 @@ def run_bot():
                 base_size = _cap_initial_position_size(base_size)
                 planned_open_size = base_size
                 active_trade["size"] = float(min(1.0, max(base_size, 0.1)))
-                if daily_min_trade:
+                if daily_min_trade or bool(decision.get("daily_anchor_quality_signal")):
                     active_trade["size"] = float(max(base_size, 0.01))
                 max_size, min_size = _derive_scaling_bounds(active_trade["size"])
+                if bool(decision.get("daily_anchor_quality_signal")):
+                    max_size = active_trade["size"]
                 if daily_min_trade and daily_plan.get("max_position_size") is not None:
                     max_size = max(
                         active_trade["size"],
