@@ -42,6 +42,15 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
             _fetch_market_kline_rows=fetch,
         )
 
+    def _fake_coinbase_eth(self):
+        def fetch(symbol, interval, **kwargs):
+            return [[1_980_000, "1871", "1872", "1870", "1871.5", "10"]], "coinbase"
+
+        return types.SimpleNamespace(
+            KLINE_INTERVAL_MS={"1m": 60_000},
+            _fetch_market_kline_rows=fetch,
+        )
+
     def test_panel_explicitly_disables_binance_fallback(self):
         with patch.dict(sys.modules, {"eth": self._fake_eth()}):
             rows, source = panel_realtime_server._fetch_market_klines_sync("ETHUSDT", "4h", 5)
@@ -53,6 +62,21 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
         with patch.dict(sys.modules, {"eth": self._fake_eth("binance_futures")}):
             with self.assertRaisesRegex(RuntimeError, "must not use Binance"):
                 panel_realtime_server._fetch_market_klines_sync("ETHUSDT", "4h", 5)
+
+    @patch("panel_realtime_server.time.time", return_value=2000.0)
+    @patch("panel_realtime_server.requests.get")
+    def test_live_one_minute_candle_uses_coinbase_ticker(self, get, _time):
+        response = Mock()
+        response.json.return_value = {"price": "1871.8"}
+        get.return_value = response
+
+        with patch.dict(sys.modules, {"eth": self._fake_coinbase_eth()}):
+            rows, source = panel_realtime_server._fetch_market_klines_sync("ETHUSDT", "1m", 2)
+
+        self.assertEqual(source, "coinbase_live")
+        self.assertEqual(rows[-1]["close"], 1871.8)
+        self.assertEqual(rows[-1]["high"], 1872.0)
+        response.raise_for_status.assert_called_once_with()
 
     @patch("panel_realtime_server.requests.get")
     @patch("panel_realtime_server.time.time", return_value=2000.0)

@@ -421,6 +421,42 @@ def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
             )
         except Exception:
             continue
+    if interval == "1m" and str(source or "").lower().startswith("coinbase") and parsed:
+        try:
+            ticker_response = requests.get(
+                "https://api.exchange.coinbase.com/products/ETH-USD/ticker",
+                headers={"User-Agent": "ETH-bot/1.0"},
+                timeout=5,
+            )
+            ticker_response.raise_for_status()
+            ticker_payload = ticker_response.json()
+            ticker_price = float((ticker_payload or {}).get("price", 0) or 0)
+            previous_close = float(parsed[-1].get("close", 0) or 0)
+            deviation = abs(ticker_price - previous_close) / max(ticker_price, previous_close, 1e-9)
+            if ticker_price <= 0 or previous_close <= 0 or deviation > 0.01:
+                raise RuntimeError("Coinbase ticker cross-check failed")
+            bucket_ms = (int(time.time() * 1000) // int(interval_ms)) * int(interval_ms)
+            last = parsed[-1]
+            if int(last.get("ts", 0)) == bucket_ms:
+                last["high"] = max(float(last.get("high", ticker_price)), ticker_price)
+                last["low"] = min(float(last.get("low", ticker_price)), ticker_price)
+                last["close"] = ticker_price
+            elif bucket_ms > int(last.get("ts", 0)):
+                parsed.append(
+                    {
+                        "ts": bucket_ms,
+                        "open": previous_close,
+                        "high": max(previous_close, ticker_price),
+                        "low": min(previous_close, ticker_price),
+                        "close": ticker_price,
+                        "volume": 0.0,
+                        "close_ts": bucket_ms + int(interval_ms) - 1,
+                    }
+                )
+            source = "coinbase_live"
+        except Exception:
+            # Keep the last valid Coinbase candle when the ticker is temporarily unavailable.
+            pass
     return parsed, str(source or "tradingview")
 
 
