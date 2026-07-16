@@ -254,6 +254,14 @@ def _get_historical_backtest_settings():
     enabled = str(os.getenv("HISTORICAL_BACKTEST_AUTO_ENABLED", "1") or "1").strip().lower() not in {
         "0", "false", "no", "off",
     }
+    daily_hour, daily_minute = _parse_daily_schedule(os.getenv("HISTORICAL_BACKTEST_TIME", "03:00"), 3, 0)
+    startup_delay_sec = max(30.0, float(os.getenv("HISTORICAL_BACKTEST_STARTUP_DELAY_SEC", 180)))
+    return {
+        "enabled": enabled,
+        "daily_hour": daily_hour,
+        "daily_minute": daily_minute,
+        "startup_delay_sec": startup_delay_sec,
+    }
 
 
 def _get_monthly_kline_download_settings():
@@ -304,14 +312,6 @@ def _compute_initial_monthly_kline_ts(settings, now_ts=None):
     if now_dt >= scheduled:
         return now_ts + settings["startup_delay_sec"]
     return scheduled.timestamp()
-    daily_hour, daily_minute = _parse_daily_schedule(os.getenv("HISTORICAL_BACKTEST_TIME", "03:00"), 3, 0)
-    startup_delay_sec = max(30.0, float(os.getenv("HISTORICAL_BACKTEST_STARTUP_DELAY_SEC", 180)))
-    return {
-        "enabled": enabled,
-        "daily_hour": daily_hour,
-        "daily_minute": daily_minute,
-        "startup_delay_sec": startup_delay_sec,
-    }
 
 
 def _compute_initial_historical_backtest_ts(settings):

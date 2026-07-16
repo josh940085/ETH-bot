@@ -31,6 +31,12 @@ def _monthly_zip_bytes(year, month, interval_ms=300_000):
 
 
 class MonthlyKlineDownloadTests(unittest.TestCase):
+    def test_existing_historical_backtest_schedule_still_initializes(self):
+        settings = program._get_historical_backtest_settings()
+        self.assertIsInstance(settings, dict)
+        self.assertEqual(settings["daily_hour"], 3)
+        self.assertIn("startup_delay_sec", settings)
+
     def test_previous_month_uses_complete_utc_calendar_month(self):
         now = dt.datetime(2026, 7, 1, 2, 0, tzinfo=dt.timezone.utc)
         self.assertEqual(monthly_kline_download._previous_utc_month(now), (2026, 6))
