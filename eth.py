@@ -110,7 +110,7 @@ NEWS_EVAL_PENDING_PATH = data_path("news_eval_pending.pkl")   # 待市場驗證�
 NEWS_STATS_CACHE_PATH = data_path("news_stats_cache.json")
 BINANCE_HOST_LEARNING_STATE_PATH = data_path("binance_host_learning_state.json")
 BINANCE_HOST_LIVE_LEARNING_STATE_PATH = data_path("binance_host_live_learning_state.json")
-NEWS_MODEL_VERSION = 2
+NEWS_MODEL_VERSION = 3
 news_model = None
 news_vectorizer = None
 PREDICTION_ACCURACY_CACHE = {"cache_key": None, "stats": None}
@@ -1325,50 +1325,110 @@ def _prepare_news_text_for_model(text):
     return prepared
 
 
+def _news_has_term(text: str, term: str) -> bool:
+    """Match news terms on word boundaries so short symbols such as ETH do not
+    accidentally match unrelated words such as whether or method."""
+    haystack = str(text or "").lower()
+    needle = str(term or "").lower().strip()
+    if not needle:
+        return False
+    pattern = r"(?<![a-z0-9])" + re.escape(needle).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
+    return re.search(pattern, haystack) is not None
+
+
+def _news_has_any(text: str, terms) -> bool:
+    return any(_news_has_term(text, term) for term in terms)
+
+
+def _news_relevance_reason(text: str) -> str:
+    """Return the ETH-market relevance group, or an empty string for noise.
+
+    The filter deliberately requires context for broad words such as bank, Fed,
+    nuclear and war. A single company, executive, IPO or criminal headline must
+    not influence ETH merely because one of those words appears in the title.
+    """
+    low = normalize_news_text(text).lower()
+    if not low:
+        return ""
+
+    corporate_noise = _news_has_any(low, [
+        "ipo", "price target", "per share", "insider sale", "insider sells", "form 4",
+        "form 144", "class a shares", "quarterly earnings", "appoints", "named ceo",
+    ])
+    personal_or_case_noise = _news_has_any(low, [
+        "sentenced to prison", "sentences", "prison for", "advisor gets", "employee jailed",
+    ])
+    if corporate_noise or personal_or_case_noise:
+        return ""
+
+    direct_crypto = _news_has_any(low, [
+        "bitcoin", "btc", "ethereum", "eth", "ether", "crypto", "cryptocurrency",
+        "cryptocurrencies", "digital asset", "digital assets", "stablecoin", "usdt",
+        "usdc", "defi", "staking", "blockchain", "web3", "spot etf", "crypto etf",
+        "bitcoin etf", "ethereum etf", "on-chain", "hash rate", "halving", "altcoin",
+        "binance", "coinbase", "kraken", "bybit", "okx", "deribit", "grayscale",
+        "microstrategy", "exchange hack", "smart contract", "layer 2", "layer2",
+    ])
+    if direct_crypto:
+        return "crypto"
+
+    us_macro = _news_has_any(low, [
+        "cpi", "pce", "nonfarm", "non-farm", "payrolls", "jobless claims", "jobs report",
+        "unemployment", "us gdp", "u.s. gdp", "retail sales", "consumer prices",
+        "producer prices", "fomc", "quantitative easing", "quantitative tightening",
+    ])
+    fed_context = _news_has_any(low, ["fed", "federal reserve", "powell"]) and _news_has_any(low, [
+        "interest rate", "rates", "rate hike", "rate cut", "inflation", "liquidity",
+        "balance sheet", "bond", "yield", "dollar", "policy", "economy",
+    ])
+    systemic_risk = _news_has_any(low, [
+        "bank collapse", "bank run", "banking crisis", "credit crisis", "liquidity crisis",
+        "financial crisis", "sovereign default", "us default", "u.s. default", "recession",
+        "stagflation", "debt ceiling",
+    ])
+    if us_macro or fed_context or systemic_risk:
+        return "macro"
+
+    cross_asset = _news_has_any(low, [
+        "s&p 500", "nasdaq", "wall st", "wall street", "us stock futures",
+        "u.s. stock futures", "stock market", "risk-off", "risk off", "dxy",
+        "dollar index", "treasury yields", "bond yields", "asian shares",
+    ]) and _news_has_any(low, [
+        "rise", "rises", "rally", "higher", "gain", "gains", "fall", "falls", "slump",
+        "drop", "drops", "plunge", "lower", "selloff", "inflation", "rate", "yield",
+        "record high", "one-month low", "one-year high", "steady",
+    ])
+    if cross_asset:
+        return "cross_asset"
+
+    oil_shock = _news_has_any(low, ["oil", "crude", "brent", "hormuz", "energy crisis"]) and _news_has_any(low, [
+        "iran", "israel", "war", "strike", "sanction", "supply", "disruption", "crisis",
+        "surge", "rise", "rises", "jump", "drop", "falls", "inflation",
+    ])
+    geopolitical_shock = (
+        _news_has_any(low, ["iran", "israel", "hormuz"]) and
+        _news_has_any(low, ["war", "strike", "missile", "attack", "ceasefire", "blockade", "sanction"])
+    ) or (
+        _news_has_any(low, ["russia", "ukraine"]) and
+        _news_has_any(low, ["ceasefire", "invasion", "escalation", "nato", "sanction", "nuclear weapon"])
+    )
+    if oil_shock or geopolitical_shock:
+        return "geopolitical"
+
+    return ""
+
+
+def _news_dedupe_key(text: str) -> str:
+    """Create a source-independent key and collapse small headline suffix changes."""
+    key = _prepare_news_text_for_model(re.sub(r"^\[[^\]]+\]\s*", "", str(text or "")))
+    key = re.sub(r"\s+(?:on|at)\s+(?:the\s+)?(?:nyse|nasdaq|wall street)$", "", key)
+    return key[:220]
+
+
 def _is_crypto_relevant_news(text: str) -> bool:
     """判斷新聞是否與 BTC/ETH、加密貨幣市場或可能影響幣價的宏觀事件有關。
     只有相關新聞才會影響 news_bias 和進入 AI 訓練資料。"""
-    low = str(text or "").lower()
-
-    # 白名單關鍵字：含任一詞即視為相關
-    CRYPTO_KEYWORDS = [
-        # 幣種
-        "bitcoin", "btc", "ethereum", "eth", "ether",
-        "crypto", "cryptocurrency", "cryptocurrencies",
-        # 機構與監管
-        "sec", "cftc", "finra", "binance", "coinbase", "kraken",
-        "ftx", "grayscale", "blackrock", "fidelity", "microstrategy",
-        "bitfinex", "okx", "bybit", "deribit",
-        # 產品與概念
-        "defi", "nft", "staking", "stablecoin", "usdt", "usdc",
-        "altcoin", "altcoins", "blockchain", "web3", "layer 2", "layer2",
-        "lightning network", "proof of work", "proof of stake",
-        "smart contract", "dex", "cefi", "dao",
-        "spot etf", "crypto etf", "bitcoin etf", "ethereum etf",
-        # 行情詞
-        "crypto market", "digital asset", "digital assets",
-        "on-chain", "hash rate", "mempool", "halving",
-        "whale", "cold wallet", "hot wallet", "exchange hack",
-        # 宏觀-加密連動
-        "fed rate crypto", "btc halving", "bitcoin halving",
-        # 宏觀經濟（影響風險資產）
-        "fed", "fomc", "powell", "federal reserve",
-        "cpi", "inflation", "interest rate", "rate hike", "rate cut",
-        "gdp", "unemployment", "jobs report", "nonfarm", "non-farm",
-        "tariff", "trade war", "trade deal", "sanctions",
-        "recession", "stagflation", "liquidity",
-        # 地緣政治與市場衝擊
-        "war", "ceasefire", "conflict", "missile", "nuclear",
-        "oil price", "crude oil", "energy crisis",
-        "stock market", "nasdaq", "s&p 500", "dow jones", "risk-off", "risk off",
-        "bank collapse", "bank run", "banking crisis", "default",
-        "dollar", "dxy", "yen", "yuan", "usd",
-    ]
-
-    for kw in CRYPTO_KEYWORDS:
-        if kw in low:
-            return True
-    return False
+    return bool(_news_relevance_reason(text))
 
 
 def _sanitize_news_label(label):
@@ -2655,7 +2715,12 @@ def _load_learning_buffer_samples(max_per_label=40):
         text, label = item
         prepared = _prepare_news_text_for_model(text)
         clean_label = _sanitize_news_label(label)
-        if not prepared or clean_label is None or prepared in seen_texts:
+        if (
+            not prepared
+            or clean_label is None
+            or prepared in seen_texts
+            or not _is_crypto_relevant_news(prepared)
+        ):
             continue
 
         seen_texts.add(prepared)
@@ -3238,7 +3303,7 @@ def analyze_news_text(raw_text, log_result=True):
 
 
 # 新增: 標準化新聞訊息格式 + 顯示 AI 學習進度
-def build_news_message(news_text, now_time=None):
+def build_news_message(news_text, now_time=None, analysis=None):
     if now_time is None:
         now_time = datetime.datetime.now().strftime("%H:%M:%S")
 
@@ -3252,7 +3317,7 @@ def build_news_message(news_text, now_time=None):
     zh_text = translate_news_to_zh(raw_text)
 
     # ===== AI 交易解讀 =====
-    analysis = analyze_news_text(raw_text)
+    analysis = analysis if isinstance(analysis, dict) else analyze_news_text(raw_text)
     sentiment = analysis["sentiment"]
     impact = analysis["impact"]
     confidence = analysis["ai_confidence"]
@@ -3331,8 +3396,10 @@ def build_panel_news_items(news_list, limit=5):
 
         if not title:
             continue
+        if not _is_crypto_relevant_news(title):
+            continue
 
-        key = normalize_news_text(title).lower()
+        key = _news_dedupe_key(title)
         if key in seen:
             continue
         seen.add(key)
@@ -3640,9 +3707,9 @@ def refresh_rss_news_cache(force=False):
                 continue
             src = str(item.get("source", "News")).strip() or "News"
             text = normalize_news_text(item.get("text", ""))
-            if not text:
+            if not text or not _is_crypto_relevant_news(text):
                 continue
-            key = f"{src}|{text.lower()}"
+            key = _news_dedupe_key(text)
             if key in dedup_now:
                 continue
             dedup_now.add(key)
@@ -3660,29 +3727,25 @@ def refresh_rss_news_cache(force=False):
             for item in startup_items:
                 src = item["source"]
                 text = item["text"]
-                refresh_rss_news_cache.seen_news.add(f"{src}|{text}")
-                if not _is_crypto_relevant_news(text):
-                    continue
+                refresh_rss_news_cache.seen_news.add(_news_dedupe_key(text))
                 analysis = analyze_news_text(text)
                 news_bias += int(analysis.get("bias", 0))
                 event_risk += int(analysis.get("event_risk", 0))
                 news_list.append(f"[{src}] {text[:200]}")
 
             for item in normalized_items[8:]:
-                refresh_rss_news_cache.seen_news.add(f"{item['source']}|{item['text']}")
+                refresh_rss_news_cache.seen_news.add(_news_dedupe_key(item["text"]))
 
             refresh_rss_news_cache.bootstrapped_news = True
         else:
             for item in normalized_items:
                 src = item["source"]
                 text = item["text"]
-                seen_key = f"{src}|{text}"
+                seen_key = _news_dedupe_key(text)
                 if seen_key in refresh_rss_news_cache.seen_news:
                     continue
 
                 refresh_rss_news_cache.seen_news.add(seen_key)
-                if not _is_crypto_relevant_news(text):
-                    continue
                 analysis = analyze_news_text(text)
                 news_bias += int(analysis.get("bias", 0))
                 event_risk += int(analysis.get("event_risk", 0))
@@ -3890,7 +3953,7 @@ def _sanitize_pending_news_eval_item(item):
 
     raw_news = normalize_news_text(item.get("news", item.get("text", "")))
     prepared = _prepare_news_text_for_model(raw_news)
-    if not raw_news or not prepared:
+    if not raw_news or not prepared or not _is_crypto_relevant_news(raw_news):
         return None
 
     predicted_bias = _sanitize_news_label(item.get("predicted_bias"))
@@ -14080,7 +14143,25 @@ def run_bot():
                     now_time = datetime.datetime.now().strftime("%H:%M:%S")
 
                     for n in new_news:
-                        msg_news = build_news_message(n, now_time)
+                        # Mark every inspected title as processed. Previously neutral/noise
+                        # titles were retried every loop and polluted the learning log.
+                        run_bot.last_news_set.add(n)
+                        raw_news = re.sub(r"^\[[^\]]+\]\s*", "", str(n)).strip()
+                        if not _is_crypto_relevant_news(raw_news):
+                            continue
+
+                        analysis = analyze_news_text(raw_news)
+                        min_confidence = max(
+                            0.0,
+                            min(1.0, _safe_float(os.getenv("NEWS_PUSH_MIN_CONFIDENCE", 0.55), 0.55)),
+                        )
+                        if (
+                            _safe_int(analysis.get("bias"), 0) == 0
+                            or _safe_float(analysis.get("ai_confidence"), 0.0) < min_confidence
+                        ):
+                            continue
+
+                        msg_news = build_news_message(n, now_time, analysis=analysis)
 
                         # 🔥 過濾中性新聞
                         if "📊 解讀: 中性" in msg_news:
@@ -14092,8 +14173,6 @@ def run_bot():
                                 _post_discord_webhook(DISCORD_NEWS, msg_news, timeout=5)
                             except Exception as _e:
                                 print("Discord news error:", _e)
-                        run_bot.last_news_set.add(n)
-
                     if len(run_bot.last_news_set) > 500:
                         run_bot.last_news_set = set(list(run_bot.last_news_set)[-200:])
 
