@@ -7,6 +7,51 @@ import eth
 
 
 class LiquidationClusterTests(unittest.TestCase):
+    def test_predicted_liquidation_zones_are_shadow_only(self):
+        now = 30_000.0
+        cohorts = [
+            {"ts": now - 60, "entry_price": 2000.0, "liquidation_price": 1905.0, "notional_usdt": 250000.0, "side": "long", "leverage": 20, "confidence": 0.7},
+            {"ts": now - 60, "entry_price": 2000.0, "liquidation_price": 2095.0, "notional_usdt": 250000.0, "side": "short", "leverage": 20, "confidence": 0.7},
+        ]
+        snapshot = eth._summarize_predicted_liquidation_zones(cohorts, 2000.0, now_ts=now)
+
+        self.assertEqual(snapshot["predicted_liquidation_mode"], "shadow")
+        self.assertEqual(snapshot["predicted_liquidation_zone_count"], 2)
+        self.assertEqual(snapshot["nearest_predicted_liquidation_below"]["dominant_side"], "long")
+        self.assertEqual(snapshot["nearest_predicted_liquidation_above"]["dominant_side"], "short")
+        self.assertEqual(eth._liquidation_cluster_guard_reason("long", snapshot), "")
+
+    def test_oi_increase_creates_long_and_short_leverage_cohorts(self):
+        old_path = eth.PREDICTED_LIQUIDATION_STATE_PATH
+        old_loaded = eth.PREDICTED_LIQUIDATION_LOADED
+        with eth.PREDICTED_LIQUIDATION_LOCK:
+            old_cohorts = list(eth.PREDICTED_LIQUIDATION_COHORTS)
+            old_stats = dict(eth.PREDICTED_LIQUIDATION_STATS)
+        try:
+            eth.PREDICTED_LIQUIDATION_STATE_PATH = old_path.with_name("test_predicted_liquidation_state.json")
+            with eth.PREDICTED_LIQUIDATION_LOCK:
+                eth.PREDICTED_LIQUIDATION_COHORTS.clear()
+                for key in eth.PREDICTED_LIQUIDATION_STATS:
+                    eth.PREDICTED_LIQUIDATION_STATS[key] = 0.0
+                eth.PREDICTED_LIQUIDATION_LOADED = True
+            created = eth._record_predicted_liquidation_cohorts(1000.0, 1100.0, 2000.0, 0.65, 0.0001, now_ts=40_000.0)
+            self.assertTrue(created)
+            with eth.PREDICTED_LIQUIDATION_LOCK:
+                rows = list(eth.PREDICTED_LIQUIDATION_COHORTS)
+            self.assertEqual(len(rows), 8)
+            self.assertTrue(all(row["liquidation_price"] < 2000.0 for row in rows if row["side"] == "long"))
+            self.assertTrue(all(row["liquidation_price"] > 2000.0 for row in rows if row["side"] == "short"))
+        finally:
+            eth.PREDICTED_LIQUIDATION_STATE_PATH = old_path
+            eth.PREDICTED_LIQUIDATION_LOADED = old_loaded
+            with eth.PREDICTED_LIQUIDATION_LOCK:
+                eth.PREDICTED_LIQUIDATION_COHORTS.clear()
+                eth.PREDICTED_LIQUIDATION_COHORTS.extend(old_cohorts)
+                eth.PREDICTED_LIQUIDATION_STATS.update(old_stats)
+            test_path = old_path.with_name("test_predicted_liquidation_state.json")
+            if test_path.exists():
+                test_path.unlink()
+
     def test_builds_dense_long_liquidation_zone_below_price(self):
         now = 10_000.0
         events = [
