@@ -15,6 +15,7 @@ import requests
 import datetime
 import time
 import base64
+import csv
 import hashlib
 import hmac
 import math
@@ -13999,6 +14000,9 @@ TWELVE_DATA_KLINE_CACHE = {}
 TWELVE_DATA_REQUEST_LOCK = threading.Lock()
 TWELVE_DATA_USAGE_STATE = {"day": "", "count": 0, "last_request_ts": 0.0}
 TWELVE_DATA_USAGE_PATH = data_path("api_token_usage.json")
+TWELVE_DATA_QUALITY_PATH = data_path("twelve_data_quality.json")
+TWELVE_DATA_HISTORY_DIR = data_path("twelve_data_history")
+TWELVE_DATA_MAINTENANCE_STARTED = False
 
 
 def _load_twelve_data_usage_state():
@@ -14099,14 +14103,15 @@ def _fetch_twelve_data_kline_rows(
         "order": "ASC",
         "apikey": api_key,
     }
+    date_format = "%Y-%m-%d" if str(interval) in {"1d", "1w", "1M"} else "%Y-%m-%d %H:%M:%S"
     if start_time_ms is not None:
         params["start_date"] = datetime.datetime.fromtimestamp(
             _safe_float(start_time_ms, 0.0) / 1000, tz=datetime.timezone.utc
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        ).strftime(date_format)
     if end_time_ms is not None:
         params["end_date"] = datetime.datetime.fromtimestamp(
             _safe_float(end_time_ms, 0.0) / 1000, tz=datetime.timezone.utc
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        ).strftime(date_format)
 
     with TWELVE_DATA_REQUEST_LOCK:
         today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
@@ -14126,8 +14131,12 @@ def _fetch_twelve_data_kline_rows(
         TWELVE_DATA_USAGE_STATE["last_request_ts"] = time.time()
         TWELVE_DATA_USAGE_STATE["count"] += 1
         _save_twelve_data_usage_state()
-    response.raise_for_status()
     payload = response.json()
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Twelve Data HTTP {response.status_code}: "
+            f"{(payload or {}).get('message', 'request failed') if isinstance(payload, dict) else 'request failed'}"
+        )
     if not isinstance(payload, dict) or payload.get("status") == "error":
         raise RuntimeError(f"Twelve Data error: {(payload or {}).get('message', 'invalid response')}")
     values = payload.get("values") if isinstance(payload.get("values"), list) else []
@@ -14137,9 +14146,12 @@ def _fetch_twelve_data_kline_rows(
         if not isinstance(item, dict):
             continue
         try:
-            stamp = datetime.datetime.strptime(str(item.get("datetime")), "%Y-%m-%d %H:%M:%S").replace(
-                tzinfo=datetime.timezone.utc
-            )
+            raw_datetime = str(item.get("datetime") or "").strip()
+            try:
+                stamp = datetime.datetime.strptime(raw_datetime, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                stamp = datetime.datetime.strptime(raw_datetime, "%Y-%m-%d")
+            stamp = stamp.replace(tzinfo=datetime.timezone.utc)
             open_ms = int(stamp.timestamp() * 1000)
             rows.append([
                 open_ms, item["open"], item["high"], item["low"], item["close"],
@@ -14154,6 +14166,270 @@ def _fetch_twelve_data_kline_rows(
     rows = rows[-selected_limit:]
     TWELVE_DATA_KLINE_CACHE[cache_key] = (time.time(), rows)
     return rows
+
+
+def _atomic_write_json(path, payload):
+    ensure_parent_dir(path)
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _read_twelve_data_quality_report():
+    try:
+        payload = json.loads(TWELVE_DATA_QUALITY_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _closed_kline_map(rows, interval, now_ms=None):
+    step_ms = KLINE_INTERVAL_MS.get(str(interval), 0)
+    now_ms = int(_safe_float(now_ms, time.time() * 1000))
+    current_bucket_ms = (now_ms // max(1, step_ms)) * max(1, step_ms)
+    parsed = {}
+    for row in rows if isinstance(rows, list) else []:
+        try:
+            open_ms = int(_safe_float(row[0], 0.0))
+            if open_ms <= 0 or open_ms >= current_bucket_ms:
+                continue
+            parsed[open_ms] = row
+        except Exception:
+            continue
+    return parsed
+
+
+def _inspect_twelve_data_quality(symbol="ETHUSDT", interval="5m"):
+    checked_at = time.time()
+    td_rows = _fetch_twelve_data_kline_rows(symbol, interval, limit=12, timeout=12)
+    binance_rows, binance_source = _fetch_binance_kline_rows(
+        symbol, interval, limit=12, timeout=12, prefix="TwelveData品質巡檢"
+    )
+    td_map = _closed_kline_map(td_rows, interval)
+    binance_map = _closed_kline_map(binance_rows, interval)
+    common = sorted(set(td_map) & set(binance_map))
+    if not common:
+        raise RuntimeError("Twelve Data 與 Binance 沒有可比對的已收盤K線")
+
+    latest_open_ms = common[-1]
+    td_close = _safe_float(td_map[latest_open_ms][4], 0.0)
+    binance_close = _safe_float(binance_map[latest_open_ms][4], 0.0)
+    if td_close <= 0 or binance_close <= 0:
+        raise RuntimeError("Twelve Data 或 Binance 收盤價無效")
+    deviation_rate = abs(td_close - binance_close) / max(td_close, binance_close, 1e-9)
+    max_deviation_rate = max(
+        0.0005,
+        _safe_float(os.getenv("TWELVE_DATA_QUALITY_MAX_DEVIATION_RATE", 0.006), 0.006),
+    )
+    td_missing = sorted(set(binance_map) - set(td_map))
+    binance_missing = sorted(set(td_map) - set(binance_map))
+    status = "ok" if deviation_rate <= max_deviation_rate and not td_missing else "warning"
+    return {
+        "ok": status == "ok",
+        "status": status,
+        "symbol": str(symbol).upper(),
+        "interval": str(interval),
+        "checked_at": checked_at,
+        "latest_open_ms": latest_open_ms,
+        "twelve_data_close": td_close,
+        "binance_close": binance_close,
+        "binance_source": binance_source,
+        "deviation_rate": deviation_rate,
+        "max_deviation_rate": max_deviation_rate,
+        "compared_bars": len(common),
+        "twelve_data_missing_bars": len(td_missing),
+        "binance_missing_bars": len(binance_missing),
+    }
+
+
+TWELVE_HISTORY_COLUMNS = (
+    "open_time", "open", "high", "low", "close", "volume", "close_time",
+    "quote_asset_volume", "number_of_trades", "taker_buy_base_asset_volume",
+    "taker_buy_quote_asset_volume", "ignore",
+)
+
+
+def _twelve_history_path(symbol, interval):
+    safe_symbol = re.sub(r"[^A-Z0-9_-]", "", str(symbol or "ETHUSDT").upper())
+    safe_interval = re.sub(r"[^A-Za-z0-9_-]", "", str(interval or "5m"))
+    return TWELVE_DATA_HISTORY_DIR / f"{safe_symbol}_{safe_interval}.csv"
+
+
+def _load_twelve_history_rows(path):
+    rows = {}
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            for item in csv.DictReader(handle):
+                open_ms = _safe_int(item.get("open_time"), 0)
+                if open_ms <= 0:
+                    continue
+                rows[open_ms] = [item.get(name, "0") for name in TWELVE_HISTORY_COLUMNS]
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        print(f"⚠️ Twelve Data 歷史庫讀取失敗 {path.name}: {exc}")
+    return rows
+
+
+def _missing_kline_ranges(open_times, interval):
+    step_ms = KLINE_INTERVAL_MS.get(str(interval), 0)
+    if step_ms <= 0:
+        return []
+    ordered = sorted({_safe_int(value, 0) for value in open_times if _safe_int(value, 0) > 0})
+    ranges = []
+    for previous, current in zip(ordered, ordered[1:]):
+        if current - previous > step_ms:
+            ranges.append((previous + step_ms, current - step_ms))
+    return ranges
+
+
+def _write_twelve_history_rows(path, rows):
+    ensure_parent_dir(path)
+    max_rows = max(5000, _safe_int(os.getenv("TWELVE_DATA_HISTORY_MAX_ROWS", 250000), 250000))
+    ordered = [rows[key] for key in sorted(rows)[-max_rows:]]
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    with tmp_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(TWELVE_HISTORY_COLUMNS)
+        writer.writerows(ordered)
+    tmp_path.replace(path)
+    return ordered
+
+
+def _sync_twelve_data_history(symbol="ETHUSDT", interval="5m"):
+    path = _twelve_history_path(symbol, interval)
+    stored = _load_twelve_history_rows(path)
+    before_count = len(stored)
+    fetched = _fetch_twelve_data_kline_rows(symbol, interval, limit=5000, timeout=20)
+    for row in fetched:
+        if isinstance(row, list) and len(row) >= len(TWELVE_HISTORY_COLUMNS):
+            stored[_safe_int(row[0], 0)] = list(row[: len(TWELVE_HISTORY_COLUMNS)])
+
+    gap_ranges = _missing_kline_ranges(stored, interval)
+    max_gap_fetches = max(0, min(10, _safe_int(os.getenv("TWELVE_DATA_HISTORY_MAX_GAP_FETCHES", 3), 3)))
+    repaired_ranges = 0
+    binance_fallback_ranges = 0
+    for start_ms, end_ms in gap_ranges[:max_gap_fetches]:
+        try:
+            gap_rows = _fetch_twelve_data_kline_rows(
+                symbol,
+                interval,
+                limit=min(5000, max(1, (end_ms - start_ms) // KLINE_INTERVAL_MS[interval] + 1)),
+                start_time_ms=start_ms,
+                end_time_ms=end_ms,
+                timeout=20,
+            )
+        except Exception as exc:
+            print(
+                f"⚠️ Twelve Data {interval} 缺口補抓失敗 "
+                f"{start_ms}-{end_ms}: {exc}；改用 Binance 補齊"
+            )
+            try:
+                gap_rows, _ = _fetch_binance_kline_rows(
+                    symbol,
+                    interval,
+                    limit=min(1500, max(1, (end_ms - start_ms) // KLINE_INTERVAL_MS[interval] + 1)),
+                    start_time_ms=start_ms,
+                    end_time_ms=end_ms,
+                    timeout=20,
+                    prefix="TwelveData歷史缺口備援",
+                )
+                binance_fallback_ranges += 1
+            except Exception as fallback_exc:
+                print(f"⚠️ Binance {interval} 歷史缺口備援失敗: {fallback_exc}")
+                continue
+        added = 0
+        for row in gap_rows:
+            if isinstance(row, list) and len(row) >= len(TWELVE_HISTORY_COLUMNS):
+                open_ms = _safe_int(row[0], 0)
+                if open_ms not in stored:
+                    added += 1
+                stored[open_ms] = list(row[: len(TWELVE_HISTORY_COLUMNS)])
+        if added:
+            repaired_ranges += 1
+
+    written = _write_twelve_history_rows(path, stored)
+    remaining_gaps = _missing_kline_ranges((_safe_int(row[0], 0) for row in written), interval)
+    return {
+        "ok": not remaining_gaps,
+        "symbol": str(symbol).upper(),
+        "interval": str(interval),
+        "path": str(path),
+        "before_rows": before_count,
+        "fetched_rows": len(fetched),
+        "stored_rows": len(written),
+        "added_rows": max(0, len(written) - min(before_count, len(written))),
+        "detected_gap_ranges": len(gap_ranges),
+        "repaired_gap_ranges": repaired_ranges,
+        "binance_fallback_ranges": binance_fallback_ranges,
+        "remaining_gap_ranges": len(remaining_gaps),
+        "synced_at": time.time(),
+    }
+
+
+def _run_twelve_data_maintenance_cycle(include_history=False):
+    report = _read_twelve_data_quality_report()
+    try:
+        report["quality"] = _inspect_twelve_data_quality(
+            os.getenv("TWELVE_DATA_QUALITY_SYMBOL", "ETHUSDT"),
+            os.getenv("TWELVE_DATA_QUALITY_INTERVAL", "5m"),
+        )
+        print(
+            "🔎 Twelve Data 品質巡檢完成 | "
+            f"價差={report['quality']['deviation_rate'] * 100:.3f}% | "
+            f"缺K={report['quality']['twelve_data_missing_bars']}"
+        )
+    except Exception as exc:
+        report["quality"] = {"ok": False, "status": "error", "checked_at": time.time(), "error": str(exc)}
+        print(f"⚠️ Twelve Data 品質巡檢失敗: {exc}")
+    report["last_quality_check_ts"] = time.time()
+    _atomic_write_json(TWELVE_DATA_QUALITY_PATH, report)
+
+    if include_history:
+        history = []
+        intervals = [
+            item.strip() for item in str(os.getenv("TWELVE_DATA_HISTORY_INTERVALS", "5m,1h,1d")).split(",")
+            if item.strip() in TWELVE_DATA_INTERVAL_MAP
+        ]
+        for interval in intervals:
+            try:
+                history.append(_sync_twelve_data_history("ETHUSDT", interval))
+            except Exception as exc:
+                history.append({"ok": False, "symbol": "ETHUSDT", "interval": interval, "error": str(exc), "synced_at": time.time()})
+                print(f"⚠️ Twelve Data {interval} 歷史補洞失敗: {exc}")
+        report["history"] = history
+        report["last_history_sync_ts"] = time.time()
+        _atomic_write_json(TWELVE_DATA_QUALITY_PATH, report)
+        print(
+            "🧩 Twelve Data 歷史補洞完成 | "
+            + " | ".join(
+                f"{item.get('interval')}={item.get('stored_rows', 0)}根/剩餘缺口{item.get('remaining_gap_ranges', '?')}"
+                for item in history
+            )
+        )
+    return report
+
+
+def _start_twelve_data_maintenance_worker():
+    global TWELVE_DATA_MAINTENANCE_STARTED
+    if TWELVE_DATA_MAINTENANCE_STARTED or not LIVE_RUNTIME_ENABLED:
+        return
+    if not str(os.getenv("TWELVE_DATA_API_KEY", "") or "").strip():
+        return
+    if not _is_truthy(os.getenv("TWELVE_DATA_MAINTENANCE_ENABLED", "1")):
+        return
+
+    def worker():
+        quality_interval_sec = max(300, _safe_int(os.getenv("TWELVE_DATA_QUALITY_INTERVAL_SEC", 300), 300))
+        history_interval_sec = max(3600, _safe_int(os.getenv("TWELVE_DATA_HISTORY_SYNC_INTERVAL_SEC", 86400), 86400))
+        while True:
+            previous = _read_twelve_data_quality_report()
+            last_history_ts = _safe_float(previous.get("last_history_sync_ts"), 0.0)
+            _run_twelve_data_maintenance_cycle(include_history=time.time() - last_history_ts >= history_interval_sec)
+            time.sleep(quality_interval_sec)
+
+    threading.Thread(target=worker, name="twelve-data-maintenance", daemon=True).start()
+    TWELVE_DATA_MAINTENANCE_STARTED = True
 
 
 def _fetch_kraken_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
@@ -14431,6 +14707,7 @@ def run_bot():
     load_model()  # 加載所有模型，包括新聞模型
     if model is None:
         retrain_model()
+    _start_twelve_data_maintenance_worker()
 
     last_signal = None
     last_trade_time = 0

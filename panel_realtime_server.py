@@ -12,6 +12,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from urllib.parse import parse_qsl
 
+import requests
+
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -45,6 +47,8 @@ def _load_local_env():
 
 
 _load_local_env()
+
+TWELVE_API_USAGE_CACHE = {"ts": 0.0, "data": None, "error": ""}
 
 
 def _load_origins():
@@ -96,12 +100,40 @@ def _build_api_token_usage() -> dict:
     twelve = twelve if isinstance(twelve, dict) else {}
     twelve_used = max(0, int(twelve.get("count", 0))) if str(twelve.get("day") or "") == today else 0
     twelve_limit = max(1, _safe_int_env("TWELVE_DATA_DAILY_REQUEST_LIMIT", 800))
+    twelve_key = str(_runtime_env_value("TWELVE_DATA_API_KEY", "") or "").strip()
+    official = TWELVE_API_USAGE_CACHE.get("data") if isinstance(TWELVE_API_USAGE_CACHE.get("data"), dict) else {}
+    refresh_sec = max(60, _safe_int_env("TWELVE_DATA_USAGE_REFRESH_SEC", 300))
+    if twelve_key and time.time() - float(TWELVE_API_USAGE_CACHE.get("ts", 0) or 0) >= refresh_sec:
+        try:
+            response = requests.get(
+                "https://api.twelvedata.com/api_usage",
+                headers={"Authorization": f"apikey {twelve_key}", "User-Agent": "ETH-bot/1.0"},
+                timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("status") == "error":
+                raise RuntimeError(str((payload or {}).get("message") or "invalid response"))
+            official = payload
+            TWELVE_API_USAGE_CACHE.update({"ts": time.time(), "data": payload, "error": ""})
+        except Exception as exc:
+            TWELVE_API_USAGE_CACHE.update({"ts": time.time(), "error": str(exc)})
+
+    minute_used = max(0, int(official.get("current_usage", 0) or 0))
+    minute_limit = max(1, int(official.get("plan_limit", 8) or 8))
+    daily_used = max(0, int(official.get("daily_usage", twelve_used) or 0))
+    daily_limit = max(1, int(official.get("plan_daily_limit", twelve_limit) or twelve_limit))
+    official_ts = float(TWELVE_API_USAGE_CACHE.get("ts", 0) or 0)
 
     items = [
         {
-            "id": "twelve_data", "name": "Twelve Data", "configured": bool(str(_runtime_env_value("TWELVE_DATA_API_KEY", "") or "").strip()),
-            "used": twelve_used, "limit": twelve_limit, "remaining": max(0, twelve_limit - twelve_used),
-            "unit": "requests/day", "reset": f"{today} 24:00 UTC", "measurable": True,
+            "id": "twelve_data", "name": "Twelve Data", "configured": bool(twelve_key),
+            "used": minute_used, "limit": minute_limit, "remaining": max(0, minute_limit - minute_used),
+            "daily_used": daily_used, "daily_limit": daily_limit, "daily_remaining": max(0, daily_limit - daily_used),
+            "plan": str(official.get("plan_category") or ""), "official": bool(official),
+            "unit": "credits/min", "reset": "每分鐘重置；每日額度於 00:00 UTC 重置", "measurable": True,
+            "official_updated_ts": official_ts,
+            "error": str(TWELVE_API_USAGE_CACHE.get("error") or ""),
             "last_request_ts": float(twelve.get("last_request_ts", 0) or 0),
         },
         {

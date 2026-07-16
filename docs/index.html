@@ -2016,6 +2016,11 @@
         const remaining = Math.max(0, Number(item.remaining) || 0);
         const pct = Math.min(100, used / limit * 100);
         const tone = pct >= 90 ? "bad" : (pct >= 70 ? "warn" : "good");
+        const hasDaily = Number.isFinite(Number(item.daily_used)) && Number.isFinite(Number(item.daily_limit));
+        const dailyText = hasDaily
+          ? `每日 ${Number(item.daily_used)} / ${Number(item.daily_limit)} credits ｜ 剩餘 ${Number(item.daily_remaining)}`
+          : "";
+        const officialText = item.official ? "官方即時 credits" : "本地暫存用量";
         return `
           <div class="token-usage-item">
             <div class="token-ring ${tone}" style="--ring-progress:${(pct * 3.6).toFixed(2)}deg">
@@ -2023,7 +2028,8 @@
             </div>
             <div class="token-usage-copy">
               <div class="token-usage-name">${escapeHtml(item.name)}</div>
-              <div class="token-usage-status">${status} ｜ 剩餘 ${remaining}</div>
+              <div class="token-usage-status">${status} ｜ 本分鐘剩餘 ${remaining}</div>
+              <div class="token-usage-detail">${escapeHtml(`${officialText}${dailyText ? ` ｜ ${dailyText}` : ""}`)}</div>
               <div class="token-usage-detail">${escapeHtml(item.reset || "")}</div>
             </div>
           </div>`;
