@@ -149,6 +149,20 @@ def _connect():
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gpt_teacher_review (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_key TEXT NOT NULL UNIQUE,
+            created_at REAL NOT NULL,
+            completed_at REAL,
+            teacher_model TEXT NOT NULL,
+            episode_ids_json TEXT NOT NULL,
+            lesson TEXT,
+            status TEXT NOT NULL
+        )
+        """
+    )
     connection.commit()
     return connection
 
@@ -176,6 +190,119 @@ def release_auto_analysis(period_key):
             (str(period_key or ""),),
         )
         connection.commit()
+
+
+def gpt_teacher_review_batch(limit=8):
+    """Return evaluated MLX episodes that have not been reviewed by GPT yet."""
+    limit = max(2, min(20, int(limit)))
+    with _LOCK, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, created_at, evaluated_at, direction, question, response,
+                   market_json, return_pct, success, tp_price, sl_price,
+                   primary_reason, market_regime, confidence
+            FROM analysis_episode
+            WHERE evaluated_at IS NOT NULL
+              AND question NOT LIKE 'actual-trade:%'
+              AND id NOT IN (
+                  SELECT CAST(value AS INTEGER)
+                  FROM gpt_teacher_review, json_each(episode_ids_json)
+                  WHERE status = 'completed'
+              )
+            ORDER BY evaluated_at DESC
+            LIMIT ?
+            """,
+            (max(40, limit * 10),),
+        ).fetchall()
+    rows = [dict(row) for row in rows]
+    failed_limit = (limit + 1) // 2
+    successful_limit = limit // 2
+    selected = (
+        [row for row in rows if not int(row.get("success") or 0)][:failed_limit]
+        + [row for row in rows if int(row.get("success") or 0) > 0][:successful_limit]
+    )
+    selected_ids = {int(row["id"]) for row in selected}
+    selected.extend(row for row in rows if int(row["id"]) not in selected_ids)
+    return selected[:limit]
+
+
+def claim_gpt_teacher_review(review_key, episode_ids, teacher_model):
+    review_key = str(review_key or "").strip()
+    clean_ids = [int(item) for item in episode_ids if int(item) > 0]
+    if not review_key or not clean_ids:
+        return False
+    with _LOCK, _connect() as connection:
+        cursor = connection.execute(
+            """
+            INSERT OR IGNORE INTO gpt_teacher_review
+                (review_key, created_at, teacher_model, episode_ids_json, status)
+            VALUES (?, ?, ?, ?, 'pending')
+            """,
+            (
+                review_key,
+                time.time(),
+                str(teacher_model or "unknown")[:120],
+                json.dumps(clean_ids),
+            ),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
+
+def complete_gpt_teacher_review(review_key, lesson):
+    clean_lesson = re.sub(r"\s+", " ", str(lesson or "")).strip()[:8000]
+    if not clean_lesson:
+        return False
+    with _LOCK, _connect() as connection:
+        cursor = connection.execute(
+            """
+            UPDATE gpt_teacher_review
+            SET completed_at = ?, lesson = ?, status = 'completed'
+            WHERE review_key = ? AND status = 'pending'
+            """,
+            (time.time(), clean_lesson, str(review_key or "")),
+        )
+        connection.commit()
+        return cursor.rowcount > 0
+
+
+def release_gpt_teacher_review(review_key):
+    with _LOCK, _connect() as connection:
+        connection.execute(
+            "DELETE FROM gpt_teacher_review WHERE review_key = ? AND status = 'pending'",
+            (str(review_key or ""),),
+        )
+        connection.commit()
+
+
+def recent_gpt_teacher_lessons(limit=3):
+    limit = max(0, min(10, int(limit)))
+    if not limit:
+        return []
+    with _LOCK, _connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT teacher_model, lesson, completed_at
+            FROM gpt_teacher_review
+            WHERE status = 'completed' AND lesson IS NOT NULL AND lesson <> ''
+            ORDER BY completed_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def gpt_teacher_last_completed_at():
+    with _LOCK, _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT MAX(completed_at) AS completed_at
+            FROM gpt_teacher_review
+            WHERE status = 'completed'
+            """
+        ).fetchone()
+    return float(row["completed_at"] or 0.0)
 
 
 def record_higher_timeframe_context(context):
@@ -1424,13 +1551,27 @@ def build_learning_context(market, limit=None):
                 f"- {row['direction']}｜{result}｜後續漲跌 {row['return_pct']:+.2f}%"
                 f"｜當時分析：{response}"
             )
-    if not examples:
-        return ""
-    return (
-        "【過去已驗證經驗】\n"
-        "以下案例只作校準，不可取代目前市場資料；應避免重複失敗案例的推理：\n"
-        + "\n".join(examples)
+    sections = []
+    teacher_lessons = recent_gpt_teacher_lessons(
+        max(0, int(os.getenv("MLX_GPT_TEACHER_CONTEXT_LIMIT", "3") or "3"))
     )
+    if teacher_lessons:
+        sections.append(
+            "【GPT教師校正】\n"
+            "以下是從已有真實結果的 MLX 案例歸納出的分析規則；只用來改善推理，"
+            "不得取代目前行情、風控或直接觸發實單：\n"
+            + "\n".join(
+                f"- {' '.join(str(row['lesson']).split())[:1800]}"
+                for row in teacher_lessons
+            )
+        )
+    if examples:
+        sections.append(
+            "【過去已驗證經驗】\n"
+            "以下案例只作校準，不可取代目前市場資料；應避免重複失敗案例的推理：\n"
+            + "\n".join(examples)
+        )
+    return "\n\n".join(sections)
 
 
 def learning_stats():
@@ -1476,6 +1617,15 @@ def learning_stats():
         sl_reviews = connection.execute(
             "SELECT COUNT(*) AS total FROM sl_review_event"
         ).fetchone()
+        gpt_teacher = connection.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                MAX(completed_at) AS last_completed_at
+            FROM gpt_teacher_review
+            WHERE status = 'completed'
+            """
+        ).fetchone()
         actual_trades = connection.execute(
             """
             SELECT
@@ -1520,6 +1670,8 @@ def learning_stats():
         "auto_analyses": int(auto_analyses["total"] or 0),
         "structured_analyses": int(structured["total"] or 0),
         "sl_reviews": int(sl_reviews["total"] or 0),
+        "gpt_teacher_lessons": int(gpt_teacher["total"] or 0),
+        "gpt_teacher_last_completed_at": float(gpt_teacher["last_completed_at"] or 0.0),
         "actual_trades": int(actual_trades["total"] or 0),
         "actual_trades_evaluated": int(actual_trades["evaluated"] or 0),
         "actual_trades_successful": int(actual_trades["successful"] or 0),

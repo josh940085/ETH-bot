@@ -54,8 +54,12 @@ from mlx_learning import (
     build_daily_strategy_report,
     build_learning_context as build_mlx_learning_context,
     claim_auto_analysis,
+    claim_gpt_teacher_review,
+    complete_gpt_teacher_review,
     daily_report_was_sent,
     evaluate_pending as evaluate_mlx_learning,
+    gpt_teacher_last_completed_at,
+    gpt_teacher_review_batch,
     learning_stats as get_mlx_learning_stats,
     mark_daily_report_sent,
     predict_replacement_probability as predict_mlx_replacement_probability,
@@ -65,6 +69,7 @@ from mlx_learning import (
     record_sl_review,
     record_strategy_outcome,
     release_auto_analysis,
+    release_gpt_teacher_review,
     sl_review_summary,
     update_actual_trade_outcome,
 )
@@ -235,6 +240,15 @@ OPENAI_PAID_API_ENABLED = str(os.getenv("OPENAI_PAID_API_ENABLED", "0") or "0").
     "yes",
     "on",
 }
+MLX_GPT_TEACHER_ENABLED = str(os.getenv("MLX_GPT_TEACHER_ENABLED", "0") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+MLX_GPT_TEACHER_MODEL = (
+    os.getenv("MLX_GPT_TEACHER_MODEL", DEFAULT_OPENAI_CHAT_MODEL) or DEFAULT_OPENAI_CHAT_MODEL
+).strip()
 MLX_AGENT_ENABLED = str(os.getenv("MLX_AGENT_ENABLED", "1") or "1").strip().lower() in {
     "1",
     "true",
@@ -13245,6 +13259,142 @@ def ask_ai_analysis(prompt, market_context=None, question="", learning_limit=Non
     return "AI分析已停用：MLX agent 與 OpenAI 付費 API 均未啟用。"
 
 
+def run_mlx_gpt_teacher_learning(force=False):
+    """Use GPT as a bounded teacher for evaluated MLX analyses, never for execution."""
+    if not MLX_GPT_TEACHER_ENABLED:
+        return {"status": "disabled", "detail": "MLX_GPT_TEACHER_ENABLED=0"}
+    if not OPENAI_API_KEY:
+        return {"status": "disabled", "detail": "缺少 OPENAI_API_KEY"}
+
+    interval_sec = max(
+        3600.0,
+        _safe_float(os.getenv("MLX_GPT_TEACHER_INTERVAL_SEC", "86400"), 86400.0),
+    )
+    last_completed = gpt_teacher_last_completed_at()
+    if not force and last_completed and time.time() - last_completed < interval_sec:
+        return {"status": "not_due", "last_completed_at": last_completed}
+
+    batch_size = max(2, min(12, _safe_int(os.getenv("MLX_GPT_TEACHER_BATCH_SIZE", "8"), 8)))
+    rows = gpt_teacher_review_batch(limit=batch_size)
+    if len(rows) < 2:
+        return {"status": "no_data", "examples": len(rows)}
+
+    episode_ids = [int(row["id"]) for row in rows]
+    digest = hashlib.sha256(",".join(map(str, episode_ids)).encode("utf-8")).hexdigest()[:16]
+    review_key = f"gpt-teacher:{digest}"
+    if not claim_gpt_teacher_review(review_key, episode_ids, MLX_GPT_TEACHER_MODEL):
+        return {"status": "already_claimed", "review_key": review_key}
+
+    examples = []
+    for row in rows:
+        try:
+            market = json.loads(row.get("market_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            market = {}
+        examples.append(
+            {
+                "episode_id": row["id"],
+                "result": "success" if int(row.get("success") or 0) else "failure",
+                "direction": row.get("direction"),
+                "return_pct": row.get("return_pct"),
+                "market_regime": row.get("market_regime") or market.get("regime"),
+                "primary_reason": row.get("primary_reason"),
+                "confidence": row.get("confidence"),
+                "market": {
+                    key: market.get(key)
+                    for key in (
+                        "price", "rsi_15m", "htf", "mid_trend", "daily_trend",
+                        "weekly_trend", "regime", "breakout", "volume_spike",
+                        "atr_15m", "timeframe_conflict",
+                    )
+                    if market.get(key) is not None
+                },
+                "mlx_analysis": " ".join(str(row.get("response") or "").split())[:2200],
+            }
+        )
+
+    prompt = (
+        "你是本地 MLX ETH 分析模型的教師。請比較下列已有真實結果的成功與失敗案例，"
+        "找出 MLX 推理中可重用的錯誤模式與改進規則。只輸出 3 到 6 條繁體中文規則，"
+        "每條必須可操作、簡短，並指出何時降低信心或等待；不可給當前行情方向、不可建議真實下單，"
+        "不可把事後結果假裝成事前已知。案例 JSON：\n"
+        + json.dumps(examples, ensure_ascii=False, default=str)
+    )
+    try:
+        payload = _build_openai_chat_payload(
+            MLX_GPT_TEACHER_MODEL,
+            [
+                {
+                    "role": _openai_instruction_role(MLX_GPT_TEACHER_MODEL),
+                    "content": "你負責校正交易分析推理，不負責下單。只從已驗證案例歸納一般規則。",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        response = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=max(30, _safe_int(os.getenv("MLX_GPT_TEACHER_TIMEOUT_SEC", "90"), 90)),
+        )
+        response.raise_for_status()
+        lesson = _extract_openai_chat_text(response.json())
+        if not lesson:
+            raise ValueError("GPT 教師回傳空內容")
+        if not complete_gpt_teacher_review(review_key, lesson):
+            raise RuntimeError("GPT 教師校正無法寫入學習庫")
+        return {
+            "status": "learned",
+            "review_key": review_key,
+            "teacher_model": MLX_GPT_TEACHER_MODEL,
+            "examples": len(rows),
+            "lesson": lesson,
+        }
+    except Exception as exc:
+        release_gpt_teacher_review(review_key)
+        return {"status": "error", "review_key": review_key, "detail": str(exc)}
+
+
+def _maybe_start_mlx_gpt_teacher_learning():
+    if not MLX_GPT_TEACHER_ENABLED:
+        return False
+    now = time.time()
+    if getattr(_maybe_start_mlx_gpt_teacher_learning, "_running", False):
+        return False
+    retry_after = _safe_float(
+        getattr(_maybe_start_mlx_gpt_teacher_learning, "_retry_after", 0.0), 0.0
+    )
+    if now < retry_after:
+        return False
+    last_attempt = _safe_float(getattr(_maybe_start_mlx_gpt_teacher_learning, "_last_attempt", 0.0), 0.0)
+    if now - last_attempt < 300:
+        return False
+    _maybe_start_mlx_gpt_teacher_learning._last_attempt = now
+    _maybe_start_mlx_gpt_teacher_learning._running = True
+
+    def worker():
+        try:
+            result = run_mlx_gpt_teacher_learning(force=False)
+            if result.get("status") == "learned":
+                print(
+                    f"🧑‍🏫 GPT 教師校正已寫入 MLX 學習庫: "
+                    f"model={result.get('teacher_model')} examples={result.get('examples')}"
+                )
+            elif result.get("status") == "error":
+                retry_sec = max(
+                    3600.0,
+                    _safe_float(os.getenv("MLX_GPT_TEACHER_ERROR_RETRY_SEC", "21600"), 21600.0),
+                )
+                _maybe_start_mlx_gpt_teacher_learning._retry_after = time.time() + retry_sec
+                print(f"⚠️ GPT 教師校正失敗: {result.get('detail')}")
+        finally:
+            _maybe_start_mlx_gpt_teacher_learning._running = False
+
+    threading.Thread(target=worker, daemon=True, name="mlx-gpt-teacher").start()
+    return True
+
+
 def _start_mlx_auto_analysis(period_key, market_context):
     if not MLX_AGENT_ENABLED or not _is_truthy(os.getenv("MLX_AUTO_ANALYSIS_ENABLED", "1")):
         return False
@@ -14939,6 +15089,7 @@ def run_bot():
     if model is None:
         retrain_model()
     _start_twelve_data_maintenance_worker()
+    _maybe_start_mlx_gpt_teacher_learning()
 
     last_signal = None
     last_trade_time = 0
@@ -16389,6 +16540,7 @@ def run_bot():
 
             # 定期重訓 batch model；每次平倉樣本都會先即時落盤
             maybe_train_model_periodically(force=False)
+            _maybe_start_mlx_gpt_teacher_learning()
 
             # ===== 更新信號（平滑 + 防洗單記錄）=====
             last_signal = score
