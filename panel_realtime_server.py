@@ -137,11 +137,6 @@ def _build_api_token_usage() -> dict:
             "last_request_ts": float(twelve.get("last_request_ts", 0) or 0),
         },
         {
-            "id": "openai", "name": "OpenAI", "configured": bool(str(_runtime_env_value("OPENAI_API_KEY", "") or "").strip()),
-            "enabled": _safe_bool_env("OPENAI_PAID_API_ENABLED", False), "measurable": False,
-            "note": "用量由 OpenAI 帳務後台統計",
-        },
-        {
             "id": "binance", "name": "Binance", "configured": bool(str(_runtime_env_value("BINANCE_API_KEY", "") or "").strip()),
             "measurable": False, "note": "交易所採動態 request weight，程式已啟用429保護",
         },
