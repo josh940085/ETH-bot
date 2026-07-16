@@ -1484,6 +1484,8 @@
 
   let livePrice = 0;
   let liveMarkPrice = 0;
+  let LIVE_PRICE_TS = 0;
+  let LIVE_PRICE_VALIDATED = false;
   const TELEGRAM_WEBAPP = (window.Telegram && window.Telegram.WebApp) ? Telegram.WebApp : null;
   const TELEGRAM_INIT_DATA = TELEGRAM_WEBAPP ? String(TELEGRAM_WEBAPP.initData || "").trim() : "";
   const HAS_TELEGRAM_AUTH = TELEGRAM_INIT_DATA.length > 0;
@@ -1520,12 +1522,14 @@
   const KLINE_FETCH_TIMEOUT_MS = 1800;
   const KLINE_REFRESH_INTERVAL_MS = 60000;
   const TOKEN_USAGE_REFRESH_INTERVAL_MS = 60000;
+  const PRICE_REFRESH_INTERVAL_MS = 1000;
   const PANEL_REFRESH_INTERVAL_MS = 1500;
   const APP_VERSION_CHECK_INTERVAL_MS = 30000;
   const WS_RECONNECT_DELAY_MS = 2500;
   const EXCHANGE_PNL_FRESH_SEC = 4;
   let refreshInFlight = false;
   let refreshQueued = false;
+  let priceRefreshInFlight = false;
   let realtimeSocket = null;
   let realtimeSocketConnected = false;
   let realtimeReconnectTimer = null;
@@ -1982,25 +1986,35 @@
   // ── 取得即時價格 ──
   async function fetchPrice() {
     const url = buildPanelApiUrl("/api/market/price");
-    if (!url) return;
+    if (!url) return false;
     const data = await fetchJsonWithTimeout(url, PRICE_FETCH_TIMEOUT_MS, {
       headers: buildViewerAuthHeaders(),
     });
     const px = Number(data && data.price);
-    if (!data || data.source !== "binance_mark_price" || !Number.isFinite(px) || px <= 0) return;
-    const ts = Number(data.ts);
+    const exchangeTs = Number(data && data.exchange_ts);
+    const symbolMatches = String(data && data.symbol || "").toUpperCase() === String(PAIR || "").toUpperCase();
+    const ageSec = Number.isFinite(exchangeTs) ? Math.max(0, Date.now() / 1000 - exchangeTs) : Infinity;
+    if (!data || data.source !== "binance_mark_price" || data.validated !== true || !symbolMatches || !Number.isFinite(px) || px <= 0 || ageSec > 10) {
+      currentExecutionPrice();
+      return false;
+    }
     livePrice = px;
     liveMarkPrice = px;
+    LIVE_PRICE_TS = exchangeTs;
+    LIVE_PRICE_VALIDATED = true;
     BINANCE_MARK_PRICE = px;
-    BINANCE_MARK_PRICE_TS = Number.isFinite(ts) && ts > 0 ? ts : Math.floor(Date.now() / 1000);
+    BINANCE_MARK_PRICE_TS = exchangeTs;
+    return true;
   }
 
   function currentExecutionPrice() {
-    if (Number.isFinite(Number(livePrice)) && Number(livePrice) > 0) return Number(livePrice);
-    const ageSec = BINANCE_MARK_PRICE_TS > 0 ? Math.max(0, Date.now() / 1000 - BINANCE_MARK_PRICE_TS) : Infinity;
-    if (Number.isFinite(Number(BINANCE_MARK_PRICE)) && Number(BINANCE_MARK_PRICE) > 0 && ageSec <= 30) {
-      return Number(BINANCE_MARK_PRICE);
+    const ageSec = LIVE_PRICE_TS > 0 ? Math.max(0, Date.now() / 1000 - LIVE_PRICE_TS) : Infinity;
+    if (LIVE_PRICE_VALIDATED && Number.isFinite(Number(livePrice)) && Number(livePrice) > 0 && ageSec <= 10) {
+      return Number(livePrice);
     }
+    livePrice = 0;
+    liveMarkPrice = 0;
+    LIVE_PRICE_VALIDATED = false;
     return 0;
   }
 
@@ -2013,7 +2027,18 @@
     KLINES_4H_FETCH_TS = now;
   }
 
-  // ── 同時更新倉位資料與即時價格 ──
+  async function refreshExecutionPrice() {
+    if (priceRefreshInFlight) return;
+    priceRefreshInFlight = true;
+    try {
+      await fetchPrice();
+      render();
+    } finally {
+      priceRefreshInFlight = false;
+    }
+  }
+
+  // ── 更新倉位與較慢資料；即時價格走獨立快車道 ──
   async function refresh() {
     if (refreshInFlight) {
       refreshQueued = true;
@@ -2021,7 +2046,7 @@
     }
     refreshInFlight = true;
     try {
-      await Promise.all([fetchPositionData(), fetchPrice(), fetchFourHourKlines(), fetchApiTokenUsage()]);
+      await Promise.all([fetchPositionData(), fetchFourHourKlines(), fetchApiTokenUsage()]);
       render();
     } finally {
       refreshInFlight = false;
@@ -2034,14 +2059,8 @@
 
   // ── 計算未實現盈虧 ──
   function calcPnl(live) {
-    const livePx = (Number.isFinite(Number(live)) && Number(live) > 0)
-      ? Number(live)
-      : ((Number.isFinite(Number(liveMarkPrice)) && Number(liveMarkPrice) > 0)
-        ? Number(liveMarkPrice)
-        : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : 0));
-    const markPx = (Number.isFinite(Number(liveMarkPrice)) && Number(liveMarkPrice) > 0)
-      ? Number(liveMarkPrice)
-      : (BINANCE_MARK_PRICE > 0 ? BINANCE_MARK_PRICE : livePx);
+    const livePx = (Number.isFinite(Number(live)) && Number(live) > 0) ? Number(live) : 0;
+    const markPx = livePx;
     if (!livePx || !ENTRY) {
       return {
         gross_pct: 0,
@@ -2740,7 +2759,7 @@
       <div class="command-symbol">ETH / USDT</div>
       <div class="command-price">${marketPrice > 0 ? fmt(marketPrice) : "-"}</div>
       <div class="command-change ${regime.changePct >= 0 ? "positive" : "negative"}">4H×20 ${fmt_signed(regime.changePct)}%</div>
-      <div class="command-meta">BINANCE MARK ｜ 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
+      <div class="command-meta">${marketPrice > 0 ? "BINANCE MARK · 已交叉驗證" : "價格驗證失敗 · 暫停顯示"} ｜ 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
     </section>
 
     <section class="command-card command-chart">
@@ -3066,7 +3085,9 @@
   // ── 啟動 ──
   connectRealtimeSocket();
   void Promise.all([fetchPerformanceSummary(), fetchBacktestPanelSummary(), fetchApiTokenUsage()]).then(render);
+  void refreshExecutionPrice();
   refresh();
+  setInterval(refreshExecutionPrice, PRICE_REFRESH_INTERVAL_MS);
   setInterval(refresh, PANEL_REFRESH_INTERVAL_MS);
   setInterval(checkAppVersion, APP_VERSION_CHECK_INTERVAL_MS);
 

@@ -191,7 +191,12 @@ CLIENTS_LOCK = asyncio.Lock()
 MARKET_DATA_CACHE = {}
 MARKET_DATA_LOCK = asyncio.Lock()
 MARKET_DATA_TTL_SEC = max(3.0, _safe_float_env("POSITION_PANEL_MARKET_DATA_TTL_SEC", 8.0))
-MARKET_PRICE_TTL_SEC = max(1.0, _safe_float_env("POSITION_PANEL_MARKET_PRICE_TTL_SEC", 2.0))
+MARKET_PRICE_TTL_SEC = max(0.5, _safe_float_env("POSITION_PANEL_MARKET_PRICE_TTL_SEC", 1.0))
+MARKET_PRICE_MAX_AGE_SEC = max(2.0, _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_AGE_SEC", 10.0))
+MARKET_PRICE_MAX_DEVIATION_RATE = max(
+    0.001,
+    min(0.05, _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_DEVIATION_RATE", 0.01)),
+)
 PANEL_ERROR_LOG_ENABLED = _safe_bool_env("POSITION_PANEL_ERROR_LOG_ENABLED", True)
 APP_VERSION_RE = re.compile(r'const\s+APP_VERSION\s*=\s*["\']([^"\']*)["\'];')
 
@@ -324,18 +329,56 @@ def _normalize_market_symbol(symbol: str) -> str:
     return clean if clean else "ETHUSDT"
 
 
-def _fetch_binance_mark_price_sync(symbol: str) -> float:
-    response = requests.get(
+def _fetch_binance_mark_price_sync(symbol: str) -> dict:
+    expected_symbol = _normalize_market_symbol(symbol)
+    mark_response = requests.get(
         "https://fapi.binance.com/fapi/v1/premiumIndex",
-        params={"symbol": _normalize_market_symbol(symbol)},
+        params={"symbol": expected_symbol},
         timeout=6,
     )
-    response.raise_for_status()
-    payload = response.json()
-    price = float(payload.get("markPrice", 0) or 0)
-    if price <= 0:
-        raise RuntimeError("Binance mark price is invalid")
-    return price
+    mark_response.raise_for_status()
+    mark_payload = mark_response.json()
+    ticker_response = requests.get(
+        "https://fapi.binance.com/fapi/v1/ticker/price",
+        params={"symbol": expected_symbol},
+        timeout=6,
+    )
+    ticker_response.raise_for_status()
+    ticker_payload = ticker_response.json()
+
+    if str(mark_payload.get("symbol") or "").upper() != expected_symbol:
+        raise RuntimeError("Binance mark price symbol mismatch")
+    if str(ticker_payload.get("symbol") or "").upper() != expected_symbol:
+        raise RuntimeError("Binance ticker symbol mismatch")
+
+    mark_price = float(mark_payload.get("markPrice", 0) or 0)
+    index_price = float(mark_payload.get("indexPrice", 0) or 0)
+    last_price = float(ticker_payload.get("price", 0) or 0)
+    exchange_ts_ms = int(float(mark_payload.get("time", 0) or 0))
+    ticker_ts_ms = int(float(ticker_payload.get("time", 0) or 0))
+    if min(mark_price, index_price, last_price, exchange_ts_ms, ticker_ts_ms) <= 0:
+        raise RuntimeError("Binance price payload is incomplete")
+
+    now_ms = int(time.time() * 1000)
+    mark_age_sec = max(0.0, (now_ms - exchange_ts_ms) / 1000.0)
+    ticker_age_sec = max(0.0, (now_ms - ticker_ts_ms) / 1000.0)
+    if mark_age_sec > MARKET_PRICE_MAX_AGE_SEC or ticker_age_sec > MARKET_PRICE_MAX_AGE_SEC:
+        raise RuntimeError("Binance price payload is stale")
+
+    index_deviation = abs(mark_price - index_price) / index_price
+    ticker_deviation = abs(mark_price - last_price) / last_price
+    max_deviation = max(index_deviation, ticker_deviation)
+    if max_deviation > MARKET_PRICE_MAX_DEVIATION_RATE:
+        raise RuntimeError("Binance mark price cross-check failed")
+
+    return {
+        "symbol": expected_symbol,
+        "price": mark_price,
+        "index_price": index_price,
+        "last_price": last_price,
+        "exchange_ts": exchange_ts_ms / 1000.0,
+        "max_deviation_rate": max_deviation,
+    }
 
 
 def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
@@ -953,7 +996,7 @@ async def get_market_price(request: Request):
             return JSONResponse(dict(cached.get("payload") or {}))
 
     try:
-        price = await asyncio.to_thread(_fetch_binance_mark_price_sync, symbol)
+        snapshot = await asyncio.to_thread(_fetch_binance_mark_price_sync, symbol)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"mark price unavailable: {exc}") from exc
 
@@ -961,7 +1004,12 @@ async def get_market_price(request: Request):
         "ok": True,
         "symbol": symbol,
         "source": "binance_mark_price",
-        "price": price,
+        "validated": True,
+        "price": snapshot["price"],
+        "index_price": snapshot["index_price"],
+        "last_price": snapshot["last_price"],
+        "exchange_ts": snapshot["exchange_ts"],
+        "max_deviation_rate": snapshot["max_deviation_rate"],
         "ts": int(now_ts),
     }
     async with MARKET_DATA_LOCK:

@@ -31,20 +31,66 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
                 panel_realtime_server._fetch_market_klines_sync("ETHUSDT", "4h", 5)
 
     @patch("panel_realtime_server.requests.get")
-    def test_current_price_uses_binance_mark_price_endpoint(self, get):
-        response = Mock()
-        response.json.return_value = {"markPrice": "1874.62"}
-        get.return_value = response
+    @patch("panel_realtime_server.time.time", return_value=2000.0)
+    def test_current_price_cross_checks_binance_payloads(self, _time, get):
+        mark_response = Mock()
+        mark_response.json.return_value = {
+            "symbol": "ETHUSDT", "markPrice": "1874.62", "indexPrice": "1874.50", "time": 1_999_500,
+        }
+        ticker_response = Mock()
+        ticker_response.json.return_value = {"symbol": "ETHUSDT", "price": "1874.70", "time": 1_999_600}
+        get.side_effect = [mark_response, ticker_response]
 
-        price = panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
+        snapshot = panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
 
-        self.assertEqual(price, 1874.62)
-        get.assert_called_once_with(
-            "https://fapi.binance.com/fapi/v1/premiumIndex",
-            params={"symbol": "ETHUSDT"},
-            timeout=6,
-        )
-        response.raise_for_status.assert_called_once_with()
+        self.assertEqual(snapshot["price"], 1874.62)
+        self.assertEqual(snapshot["symbol"], "ETHUSDT")
+        self.assertLess(snapshot["max_deviation_rate"], 0.01)
+        self.assertEqual(get.call_count, 2)
+        mark_response.raise_for_status.assert_called_once_with()
+        ticker_response.raise_for_status.assert_called_once_with()
+
+    @patch("panel_realtime_server.requests.get")
+    @patch("panel_realtime_server.time.time", return_value=2000.0)
+    def test_current_price_rejects_stale_payload(self, _time, get):
+        mark_response = Mock()
+        mark_response.json.return_value = {
+            "symbol": "ETHUSDT", "markPrice": "1874.62", "indexPrice": "1874.50", "time": 1_900_000,
+        }
+        ticker_response = Mock()
+        ticker_response.json.return_value = {"symbol": "ETHUSDT", "price": "1874.70", "time": 1_900_000}
+        get.side_effect = [mark_response, ticker_response]
+
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
+
+    @patch("panel_realtime_server.requests.get")
+    @patch("panel_realtime_server.time.time", return_value=2000.0)
+    def test_current_price_rejects_symbol_mismatch(self, _time, get):
+        mark_response = Mock()
+        mark_response.json.return_value = {
+            "symbol": "BTCUSDT", "markPrice": "1874.62", "indexPrice": "1874.50", "time": 1_999_500,
+        }
+        ticker_response = Mock()
+        ticker_response.json.return_value = {"symbol": "ETHUSDT", "price": "1874.70", "time": 1_999_600}
+        get.side_effect = [mark_response, ticker_response]
+
+        with self.assertRaisesRegex(RuntimeError, "symbol mismatch"):
+            panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
+
+    @patch("panel_realtime_server.requests.get")
+    @patch("panel_realtime_server.time.time", return_value=2000.0)
+    def test_current_price_rejects_cross_check_outlier(self, _time, get):
+        mark_response = Mock()
+        mark_response.json.return_value = {
+            "symbol": "ETHUSDT", "markPrice": "2100", "indexPrice": "1874.50", "time": 1_999_500,
+        }
+        ticker_response = Mock()
+        ticker_response.json.return_value = {"symbol": "ETHUSDT", "price": "1874.70", "time": 1_999_600}
+        get.side_effect = [mark_response, ticker_response]
+
+        with self.assertRaisesRegex(RuntimeError, "cross-check failed"):
+            panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
 
 
 if __name__ == "__main__":
