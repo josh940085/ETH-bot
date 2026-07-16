@@ -1476,6 +1476,7 @@
   let KLINES_4H_FETCH_TS = 0;
   let API_TOKEN_USAGE = null;
   let API_TOKEN_USAGE_FETCH_TS = 0;
+  const MARKET_DATA_SOURCES = {};
   let PREDICTED_LIQUIDATION_CONFIDENCE = 0;
   let LIQUIDATION_CLUSTER_RISK = "";
   let LIQUIDATION_STREAM_LIVE = false;
@@ -1949,6 +1950,9 @@
     const data = await fetchJsonWithTimeout(url, timeoutMs, {
       headers: buildViewerAuthHeaders(),
     });
+    if (data && typeof data.source === "string" && data.source) {
+      MARKET_DATA_SOURCES[interval] = data.source;
+    }
     const rows = data && Array.isArray(data.rows) ? data.rows : [];
     return rows
       .map((row) => ({
@@ -1977,13 +1981,27 @@
 
   // ── 取得即時價格 ──
   async function fetchPrice() {
-    const rows = await fetchPanelMarketKlines("1m", 2, PRICE_FETCH_TIMEOUT_MS);
-    const latest = rows[rows.length - 1] || {};
-    const px = Number(latest.close);
-    if (Number.isFinite(px) && px > 0) {
-      livePrice = px;
-      liveMarkPrice = px;
+    const url = buildPanelApiUrl("/api/market/price");
+    if (!url) return;
+    const data = await fetchJsonWithTimeout(url, PRICE_FETCH_TIMEOUT_MS, {
+      headers: buildViewerAuthHeaders(),
+    });
+    const px = Number(data && data.price);
+    if (!data || data.source !== "binance_mark_price" || !Number.isFinite(px) || px <= 0) return;
+    const ts = Number(data.ts);
+    livePrice = px;
+    liveMarkPrice = px;
+    BINANCE_MARK_PRICE = px;
+    BINANCE_MARK_PRICE_TS = Number.isFinite(ts) && ts > 0 ? ts : Math.floor(Date.now() / 1000);
+  }
+
+  function currentExecutionPrice() {
+    if (Number.isFinite(Number(livePrice)) && Number(livePrice) > 0) return Number(livePrice);
+    const ageSec = BINANCE_MARK_PRICE_TS > 0 ? Math.max(0, Date.now() / 1000 - BINANCE_MARK_PRICE_TS) : Infinity;
+    if (Number.isFinite(Number(BINANCE_MARK_PRICE)) && Number(BINANCE_MARK_PRICE) > 0 && ageSec <= 30) {
+      return Number(BINANCE_MARK_PRICE);
     }
+    return 0;
   }
 
   async function fetchFourHourKlines() {
@@ -2599,7 +2617,7 @@
     <div class="mini-kline">
       <div class="mini-kline-head">
         <div class="mini-kline-title">4H K 線圖</div>
-        <div class="mini-kline-meta">${PAIR}</div>
+        <div class="mini-kline-meta">${PAIR} ｜ ${escapeHtml(MARKET_DATA_SOURCES["4h"] || "非 Binance")}</div>
       </div>
       <div class="mini-kline-empty">K 線載入中</div>
     </div>`;
@@ -2647,7 +2665,7 @@
     <div class="mini-kline">
       <div class="mini-kline-head">
         <div class="mini-kline-title">4H K 線圖</div>
-        <div class="mini-kline-meta">${PAIR} ｜ ${fmt(levels.resistance)} ｜ ${fmt(levels.support)}</div>
+        <div class="mini-kline-meta">${PAIR} ｜ ${escapeHtml(MARKET_DATA_SOURCES["4h"] || "非 Binance")} ｜ ${fmt(levels.resistance)} ｜ ${fmt(levels.support)}</div>
       </div>
       <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="4H K 線圖">
         <style>
@@ -2696,7 +2714,7 @@
 
   function renderCommandDeck(live, totalAssetsUsdt) {
     const regime = buildMarketRegimeSnapshot();
-    const marketPrice = Number(live) > 0 ? Number(live) : (KLINES_4H[KLINES_4H.length - 1]?.close || 0);
+    const marketPrice = Number(live) > 0 ? Number(live) : 0;
     const confidenceFromModel = PREDICTED_LIQUIDATION_CONFIDENCE > 0;
     const confidenceScore = confidenceFromModel
       ? clamp(PREDICTED_LIQUIDATION_CONFIDENCE * 100, 0, 100)
@@ -2722,7 +2740,7 @@
       <div class="command-symbol">ETH / USDT</div>
       <div class="command-price">${marketPrice > 0 ? fmt(marketPrice) : "-"}</div>
       <div class="command-change ${regime.changePct >= 0 ? "positive" : "negative"}">4H×20 ${fmt_signed(regime.changePct)}%</div>
-      <div class="command-meta">總資產 ${fmt(totalAssetsUsdt)} USDT</div>
+      <div class="command-meta">BINANCE MARK ｜ 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
     </section>
 
     <section class="command-card command-chart">
@@ -2825,7 +2843,7 @@
     </div>
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
   </div>
-  ${renderCommandDeck(livePrice > 0 ? livePrice : BINANCE_MARK_PRICE, totalAssetsUsdt)}
+  ${renderCommandDeck(currentExecutionPrice(), totalAssetsUsdt)}
   ${renderTotalAssetsHero(totalAssetsUsdt)}
   <div class="card close-summary-card">
     <div class="close-hit ${hitClass}">${hitText}</div>
@@ -2852,7 +2870,7 @@
       return;
     }
 
-    const live = livePrice > 0 ? livePrice : BINANCE_MARK_PRICE;
+    const live = currentExecutionPrice();
     const pnl  = calcPnl(live);
     const sl_off = slTriggered(live);
     const isLong  = DIR === "long";

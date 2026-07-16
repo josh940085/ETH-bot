@@ -191,6 +191,7 @@ CLIENTS_LOCK = asyncio.Lock()
 MARKET_DATA_CACHE = {}
 MARKET_DATA_LOCK = asyncio.Lock()
 MARKET_DATA_TTL_SEC = max(3.0, _safe_float_env("POSITION_PANEL_MARKET_DATA_TTL_SEC", 8.0))
+MARKET_PRICE_TTL_SEC = max(1.0, _safe_float_env("POSITION_PANEL_MARKET_PRICE_TTL_SEC", 2.0))
 PANEL_ERROR_LOG_ENABLED = _safe_bool_env("POSITION_PANEL_ERROR_LOG_ENABLED", True)
 APP_VERSION_RE = re.compile(r'const\s+APP_VERSION\s*=\s*["\']([^"\']*)["\'];')
 
@@ -323,6 +324,20 @@ def _normalize_market_symbol(symbol: str) -> str:
     return clean if clean else "ETHUSDT"
 
 
+def _fetch_binance_mark_price_sync(symbol: str) -> float:
+    response = requests.get(
+        "https://fapi.binance.com/fapi/v1/premiumIndex",
+        params={"symbol": _normalize_market_symbol(symbol)},
+        timeout=6,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    price = float(payload.get("markPrice", 0) or 0)
+    if price <= 0:
+        raise RuntimeError("Binance mark price is invalid")
+    return price
+
+
 def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
     os.environ.setdefault("ETH_BOT_DISABLE_LIVE", "1")
     import eth  # noqa: WPS433 - lazy import keeps panel startup light and disables live side effects.
@@ -332,8 +347,12 @@ def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
         interval,
         limit=limit,
         timeout=10,
-        prefix="面板TradingView K線",
+        prefix="面板非Binance K線",
+        source_preference="kraken_first",
+        allow_binance_fallback=False,
     )
+    if str(source or "").lower().startswith("binance"):
+        raise RuntimeError("panel kline source must not use Binance")
     interval_ms = getattr(eth, "KLINE_INTERVAL_MS", {}).get(interval, 60 * 1000)
     parsed = []
     for row in rows if isinstance(rows, list) else []:
@@ -913,6 +932,36 @@ async def get_market_klines(request: Request):
         "interval": interval,
         "source": source,
         "rows": rows,
+        "ts": int(now_ts),
+    }
+    async with MARKET_DATA_LOCK:
+        MARKET_DATA_CACHE[cache_key] = {"ts": now_ts, "payload": payload}
+    return JSONResponse(payload)
+
+
+@app.get("/api/market/price")
+async def get_market_price(request: Request):
+    if not _viewer_authorized_http(request):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    symbol = _normalize_market_symbol(request.query_params.get("symbol", "ETHUSDT"))
+    cache_key = f"mark_price:{symbol}"
+    now_ts = time.time()
+    async with MARKET_DATA_LOCK:
+        cached = MARKET_DATA_CACHE.get(cache_key)
+        if cached and now_ts - float(cached.get("ts", 0.0)) < MARKET_PRICE_TTL_SEC:
+            return JSONResponse(dict(cached.get("payload") or {}))
+
+    try:
+        price = await asyncio.to_thread(_fetch_binance_mark_price_sync, symbol)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"mark price unavailable: {exc}") from exc
+
+    payload = {
+        "ok": True,
+        "symbol": symbol,
+        "source": "binance_mark_price",
+        "price": price,
         "ts": int(now_ts),
     }
     async with MARKET_DATA_LOCK:

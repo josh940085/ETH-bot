@@ -14639,11 +14639,17 @@ def _fetch_market_kline_rows(
     timeout=10,
     prefix="K線",
     source_preference=None,
+    allow_binance_fallback=None,
 ):
     errors = []
     source_preference = str(
         source_preference or os.getenv("MARKET_KLINE_SOURCE_PREFERENCE", "kraken_first")
     ).lower()
+    binance_fallback_enabled = (
+        ALLOW_BINANCE_MARKET_DATA_FALLBACK
+        if allow_binance_fallback is None
+        else bool(allow_binance_fallback)
+    )
     if str(interval) == "12h":
         try:
             source_start = None
@@ -14657,6 +14663,7 @@ def _fetch_market_kline_rows(
                 end_time_ms=end_time_ms,
                 timeout=timeout,
                 prefix=f"{prefix}-4h合成",
+                allow_binance_fallback=binance_fallback_enabled,
             )
             buckets = {}
             for row in source_rows:
@@ -14715,7 +14722,7 @@ def _fetch_market_kline_rows(
         except Exception as exc:
             errors.append(f"tradingview_4h_resampled_12h: {exc}")
             _log_kline_source_failure("tradingview_4h_resampled_12h", exc, prefix=prefix)
-        if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
+        if not binance_fallback_enabled:
             raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 12h 合成失敗")
 
     if source_preference == "kraken_first":
@@ -14746,7 +14753,7 @@ def _fetch_market_kline_rows(
             errors.append(f"twelve_data: {exc}")
             _log_kline_source_failure("twelve_data", exc, prefix=prefix)
 
-    if source_preference == "binance_first" and ALLOW_BINANCE_MARKET_DATA_FALLBACK:
+    if source_preference == "binance_first" and binance_fallback_enabled:
         try:
             rows, source = _fetch_binance_kline_rows(
                 symbol,
@@ -14785,7 +14792,7 @@ def _fetch_market_kline_rows(
             _mark_tradingview_failure(symbol, interval)
             _log_kline_source_failure("tradingview", exc, prefix=prefix)
 
-    if not ALLOW_BINANCE_MARKET_DATA_FALLBACK:
+    if not binance_fallback_enabled:
         raise RuntimeError("; ".join(errors) or f"{prefix} TradingView 來源失敗")
 
     rows, source = _fetch_binance_kline_rows(
