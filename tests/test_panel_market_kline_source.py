@@ -1,12 +1,29 @@
 import sys
 import types
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import panel_realtime_server
 
 
 class PanelMarketKlineSourceTests(unittest.TestCase):
+    def test_local_preview_can_read_public_market_data_without_viewer_token(self):
+        request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+
+        with patch.object(panel_realtime_server, "_viewer_authorized_http", return_value=False):
+            self.assertTrue(panel_realtime_server._market_data_authorized_http(request))
+
+    def test_remote_market_data_still_requires_viewer_authorization(self):
+        request = SimpleNamespace(client=SimpleNamespace(host="203.0.113.10"))
+
+        with patch.object(panel_realtime_server, "_viewer_authorized_http", return_value=False):
+            self.assertFalse(panel_realtime_server._market_data_authorized_http(request))
+
+    def test_direct_file_origin_is_allowed_for_local_preview(self):
+        with patch.dict(panel_realtime_server.os.environ, {"POSITION_PANEL_ALLOWED_ORIGINS": "https://example.com"}):
+            self.assertIn("null", panel_realtime_server._load_origins())
+
     def _fake_eth(self, source="kraken"):
         def fetch(symbol, interval, **kwargs):
             self.assertEqual(kwargs.get("source_preference"), "kraken_first")

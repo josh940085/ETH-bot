@@ -5657,7 +5657,6 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
         if avg_price > 0:
             active_trade["entry"] = avg_price
             active_trade["avg_entry"] = avg_price
-            sync_position_panel(_safe_float(WS_PRICE, avg_price))
     except Exception:
         pass
 
@@ -7327,6 +7326,18 @@ def sync_position_panel(current_price=None):
 
     payload.update(
         {
+            "strategy_price": round(_safe_float(POSITION_PANEL_STATE.get("strategy_price"), 0.0), 4),
+            "strategy_price_ts": _safe_int(POSITION_PANEL_STATE.get("strategy_price_ts"), 0),
+            "strategy_evaluated_ts": _safe_int(POSITION_PANEL_STATE.get("strategy_evaluated_ts"), 0),
+            "strategy_execution_status": str(POSITION_PANEL_STATE.get("strategy_execution_status") or "waiting"),
+            "strategy_execution_reason": str(POSITION_PANEL_STATE.get("strategy_execution_reason") or "等待實際開單策略"),
+            "strategy_actual_open": bool(POSITION_PANEL_STATE.get("strategy_actual_open", False)),
+            "strategy_signal": str(POSITION_PANEL_STATE.get("strategy_signal") or "wait"),
+            "strategy_score": round(_safe_float(POSITION_PANEL_STATE.get("strategy_score"), 0.5), 4),
+            "strategy_ai_prob": round(_safe_float(POSITION_PANEL_STATE.get("strategy_ai_prob"), 0.5), 4),
+            "strategy_ai_long_prob": round(_safe_float(POSITION_PANEL_STATE.get("strategy_ai_long_prob"), 0.5), 4),
+            "strategy_ai_short_prob": round(_safe_float(POSITION_PANEL_STATE.get("strategy_ai_short_prob"), 0.5), 4),
+            "strategy_regime": str(POSITION_PANEL_STATE.get("strategy_regime") or ""),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -9305,6 +9316,88 @@ def _validated_market_price(kline_price, reference_price=None, now_ts=None):
             f"deviation={deviation*100:.3f}%"
         )
     return ws_price if ws_price > 0 and ws_age <= max_age else kline_price
+
+
+def _fetch_strategy_mark_price(symbol="ETHUSDT"):
+    """Read the already cross-checked Mark Price from the local panel service."""
+    symbol = str(symbol or "ETHUSDT").upper()
+    base = _panel_realtime_internal_base_url().rstrip("/")
+    headers = {}
+    if POSITION_PANEL_REALTIME_TOKEN:
+        headers["X-Panel-Token"] = POSITION_PANEL_REALTIME_TOKEN
+    response = HTTP_SESSION.get(
+        f"{base}/api/market/price",
+        params={"symbol": symbol},
+        headers=headers,
+        timeout=min(2.0, POSITION_PANEL_REALTIME_TIMEOUT_SEC),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("策略標記價格回應格式錯誤")
+    exchange_ts = _safe_float(payload.get("exchange_ts"), 0.0)
+    age_sec = max(0.0, time.time() - exchange_ts)
+    if (
+        payload.get("validated") is not True
+        or str(payload.get("source") or "") != "binance_mark_price"
+        or str(payload.get("symbol") or "").upper() != symbol
+        or _safe_float(payload.get("price"), 0.0) <= 0
+        or age_sec > 10.0
+    ):
+        raise RuntimeError("策略標記價格驗證失敗")
+    return payload
+
+
+def _validated_strategy_mark_price(mark_payload, kline_price, reference_price=None):
+    """Require the validated Mark Price to agree with independent market data."""
+    payload = mark_payload if isinstance(mark_payload, dict) else {}
+    mark_price = max(0.0, _safe_float(payload.get("price"), 0.0))
+    kline_price = max(0.0, _safe_float(kline_price, 0.0))
+    reference_price = max(0.0, _safe_float(reference_price, 0.0))
+    max_deviation = max(0.0005, _safe_float(os.getenv("MARKET_PRICE_VALIDATION_MAX_DEVIATION_RATE", 0.003), 0.003))
+    comparisons = [value for value in (kline_price, reference_price) if value > 0]
+    if mark_price <= 0 or not comparisons:
+        raise RuntimeError("策略標記價格缺少交叉驗證參考")
+    for comparison in comparisons:
+        deviation = abs(mark_price - comparison) / max(mark_price, comparison, 1e-9)
+        if deviation > max_deviation:
+            raise RuntimeError(
+                f"策略標記價格交叉驗證失敗 mark={mark_price:.2f} reference={comparison:.2f} "
+                f"deviation={deviation*100:.3f}%"
+            )
+    return mark_price
+
+
+def _update_panel_execution_snapshot(decision, current_price, status, reason="", *, actual_open=False):
+    """Publish one atomic price -> strategy -> execution result for the UI."""
+    decision = decision if isinstance(decision, dict) else {}
+    direction = str(active_trade.get("direction") or "") if actual_open else ""
+    if direction not in {"long", "short"}:
+        direction = ""
+    score = _safe_float(decision.get("score"), POSITION_PANEL_STATE.get("strategy_score", 0.5))
+    ai_prob = _safe_float(decision.get("ai_prob"), POSITION_PANEL_STATE.get("strategy_ai_prob", 0.5))
+    ai_long_prob = _safe_float(
+        decision.get("ai_long_prob"), POSITION_PANEL_STATE.get("strategy_ai_long_prob", 0.5)
+    )
+    ai_short_prob = _safe_float(
+        decision.get("ai_short_prob"), POSITION_PANEL_STATE.get("strategy_ai_short_prob", 0.5)
+    )
+    POSITION_PANEL_STATE.update(
+        {
+            "strategy_price": round(max(0.0, _safe_float(current_price, 0.0)), 4),
+            "strategy_price_ts": _safe_int(POSITION_PANEL_STATE.get("binance_mark_price_ts"), int(time.time())),
+            "strategy_evaluated_ts": int(time.time()),
+            "strategy_execution_status": str(status or "waiting"),
+            "strategy_execution_reason": str(reason or decision.get("final") or "等待實際開單策略"),
+            "strategy_actual_open": bool(actual_open),
+            "strategy_signal": direction if actual_open else "wait",
+            "strategy_score": round(score, 4),
+            "strategy_ai_prob": round(ai_prob, 4),
+            "strategy_ai_long_prob": round(ai_long_prob, 4),
+            "strategy_ai_short_prob": round(ai_short_prob, 4),
+            "strategy_regime": str(decision.get("regime") or POSITION_PANEL_STATE.get("strategy_regime") or ""),
+        }
+    )
 
 # =============================
 # Indicators
@@ -15013,7 +15106,7 @@ def run_bot():
             breakout = 0
             recent_high = df_5m["high"].iloc[-5:-1].max()
             recent_low = df_5m["low"].iloc[-5:-1].min()
-            price = _validated_market_price(
+            validated_kline_price = _validated_market_price(
                 df_1m["close"].iloc[-1],
                 reference_price=df_5m["close"].iloc[-1],
             )
@@ -15021,6 +15114,14 @@ def run_bot():
             # strategy may validate against Binance WebSocket prices, but
             # shadow entries and grading use the externally routed 1m candle.
             shadow_price = max(0.0, _safe_float(df_1m["close"].iloc[-1], 0.0))
+            mark_payload = _fetch_strategy_mark_price(COPY_TRADE_SYMBOL)
+            price = _validated_strategy_mark_price(
+                mark_payload,
+                validated_kline_price,
+                reference_price=df_5m["close"].iloc[-1],
+            )
+            POSITION_PANEL_STATE["binance_mark_price"] = price
+            POSITION_PANEL_STATE["binance_mark_price_ts"] = _safe_int(mark_payload.get("exchange_ts"), int(time.time()))
             sr_analysis = analyze_multi_tf_sr(price)
 
             # ===== Macro（時事）=====
@@ -15623,6 +15724,13 @@ def run_bot():
                     print(f"📰 新聞監控中 | {latest_news_preview}")
                     run_bot.last_news_monitor_ts = time.time()
 
+                _update_panel_execution_snapshot(
+                    decision,
+                    price,
+                    "position_open",
+                    reason="實際持倉管理策略已執行",
+                    actual_open=True,
+                )
                 sync_position_panel(price)
                 time.sleep(0.8)
                 continue
@@ -16013,38 +16121,46 @@ def run_bot():
                     if price_change < MIN_PRICE_CHANGE:
                         final = "觀望（價格未達門檻）"
 
-            sync_position_panel(price)
+            strategy_price_age = max(
+                0.0,
+                time.time() - _safe_float(POSITION_PANEL_STATE.get("binance_mark_price_ts"), 0.0),
+            )
+            if not final.startswith("觀望") and strategy_price_age > 10.0:
+                final = f"觀望（標記價格已過期 {strategy_price_age:.1f}s）"
 
             # ===== 最終過濾 =====
-            if final.startswith("觀望"):
-                pending_entry_confirmation = None
-                continue
-
             # ===== 最終安全檢查：拒絕假突破低信心單 =====
-            if not daily_min_trade and fake_breakout and abs(score - 0.5) < 0.22:
-                pending_entry_confirmation = None
-                continue
+            if not final.startswith("觀望") and not daily_min_trade and fake_breakout and abs(score - 0.5) < 0.22:
+                final = "觀望（假突破風控攔截）"
 
             # ===== 多週期壓力/支撐阻擋：靠近關鍵反向區域先觀望 =====
             support_hits = _safe_int(sr_analysis.get("support_hits"), 0)
             resistance_hits = _safe_int(sr_analysis.get("resistance_hits"), 0)
             if (
+                not final.startswith("觀望")
+                and
                 not daily_min_trade
                 and "做多" in final
                 and resistance_hits >= 2
                 and repeated_resistance_tests < 2
                 and score < 0.72
             ):
-                pending_entry_confirmation = None
-                continue
+                final = "觀望（多單壓力區攔截）"
             if (
+                not final.startswith("觀望")
+                and
                 not daily_min_trade
                 and "做空" in final
                 and support_hits >= 2
                 and repeated_support_tests < 2
                 and score > 0.28
             ):
+                final = "觀望（空單支撐區攔截）"
+
+            if final.startswith("觀望"):
                 pending_entry_confirmation = None
+                _update_panel_execution_snapshot(decision, price, "waiting", reason=final, actual_open=False)
+                sync_position_panel(price)
                 continue
 
             if not final.startswith("觀望"):
@@ -16076,6 +16192,13 @@ def run_bot():
                                 "candle_id": candle_id,
                             }
                         print(f"⏳ 進場延遲確認 | {direction} | {confirm_msg} | 價格 {price:.2f}")
+                        _update_panel_execution_snapshot(
+                            decision,
+                            price,
+                            "pending_confirmation",
+                            reason=f"延遲確認：{confirm_msg}",
+                            actual_open=False,
+                        )
                         sync_position_panel(price)
                         continue
                     print(f"✅ 進場延遲確認 | {direction} | {confirm_msg}")
@@ -16083,10 +16206,18 @@ def run_bot():
 
                 # 保險：再次確認沒有持倉
                 if active_trade["open"]:
+                    _update_panel_execution_snapshot(
+                        decision, price, "position_open", reason="實際持倉已存在", actual_open=True
+                    )
+                    sync_position_panel(price)
                     continue
 
                 # 防止同一訊號重複刷
                 if not daily_min_trade and last_signal_cache == msg:
+                    _update_panel_execution_snapshot(
+                        decision, price, "waiting", reason="觀望（相同開單訊號已處理）", actual_open=False
+                    )
+                    sync_position_panel(price)
                     continue
 
                 # ===== 建立真實交易 =====
@@ -16169,6 +16300,13 @@ def run_bot():
                         learn_features = _build_directional_learning_features(features, direction)
                         active_trade["open"] = True
                         _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
+                        _update_panel_execution_snapshot(
+                            decision,
+                            price,
+                            "opened",
+                            reason="Binance 實際開單成功",
+                            actual_open=True,
+                        )
                         sync_active_trade_from_binance(send_notice=False)
                         if daily_min_trade:
                             correction_msg = _enforce_daily_min_trade_size(planned_open_size, price)
@@ -16201,6 +16339,13 @@ def run_bot():
                         # 開單失敗，清除本地倉位狀態，避免面板顯示假倉位
                         pending_training_sample = None
                         _reset_active_trade_state()
+                        _update_panel_execution_snapshot(
+                            decision,
+                            price,
+                            "open_failed",
+                            reason=f"實際開單失敗：{copy_msg}",
+                            actual_open=False,
+                        )
                         sync_position_panel(price)
                 else:
                     # 未開啟跟單，僅本地追蹤
@@ -16230,10 +16375,17 @@ def run_bot():
                     pending_training_sample = _save_pending_training_sample_state(pending_training_sample)
                     active_trade["open"] = True
                     _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
+                    _update_panel_execution_snapshot(
+                        decision,
+                        price,
+                        "local_tracking",
+                        reason="未啟用實際跟單，僅本地追蹤",
+                        actual_open=False,
+                    )
                     sync_position_panel(price)
 
             # ===== 學習標籤改為真實 TP/SL，避免用 1.2 秒短噪音污染模型 =====
-            new_price = WS_PRICE if WS_PRICE else price
+            new_price = price
 
             # 定期重訓 batch model；每次平倉樣本都會先即時落盤
             maybe_train_model_periodically(force=False)

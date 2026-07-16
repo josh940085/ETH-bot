@@ -55,7 +55,13 @@ def _load_origins():
     raw = str(os.getenv("POSITION_PANEL_ALLOWED_ORIGINS", "*") or "").strip()
     if not raw or raw == "*":
         return ["*"]
-    return [item.strip() for item in raw.split(",") if item.strip()]
+    origins = [item.strip() for item in raw.split(",") if item.strip()]
+    # A directly opened docs/index.html has the opaque Origin "null".  Permit
+    # that local preview to read public market data from the loopback server;
+    # protected position/state endpoints still enforce viewer authorization.
+    if "null" not in origins:
+        origins.append("null")
+    return origins
 
 
 def _safe_float_env(name: str, default: float) -> float:
@@ -840,6 +846,12 @@ def _is_loopback_request(request: Request) -> bool:
     return host in {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
+def _market_data_authorized_http(request: Request) -> bool:
+    # Mark price and K-lines are public exchange data.  Local previews may read
+    # them without exposing private position/state data to unauthenticated users.
+    return _is_loopback_request(request) or _viewer_authorized_http(request)
+
+
 def _viewer_authorized_ws(websocket: WebSocket) -> bool:
     settings = _viewer_auth_settings()
     panel_token = str(settings.get("panel_token", "") or "").strip()
@@ -943,7 +955,7 @@ async def healthz():
 
 @app.get("/api/market/klines")
 async def get_market_klines(request: Request):
-    if not _viewer_authorized_http(request):
+    if not _market_data_authorized_http(request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     symbol = _normalize_market_symbol(request.query_params.get("symbol", "ETHUSDT"))
@@ -984,7 +996,7 @@ async def get_market_klines(request: Request):
 
 @app.get("/api/market/price")
 async def get_market_price(request: Request):
-    if not _viewer_authorized_http(request):
+    if not _market_data_authorized_http(request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
     symbol = _normalize_market_symbol(request.query_params.get("symbol", "ETHUSDT"))
