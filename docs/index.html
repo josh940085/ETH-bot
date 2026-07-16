@@ -769,6 +769,486 @@
       color: #888;
     }
 
+    /* Stealth Tactical theme: low-glow graphite instrumentation with restrained alerts. */
+    :root {
+      --tactical-bg: #070909;
+      --tactical-panel: #0d100f;
+      --tactical-panel-raised: #141816;
+      --tactical-border: #303732;
+      --tactical-border-strong: #4b554d;
+      --tactical-text: #e2e7e2;
+      --tactical-muted: #879088;
+      --tactical-olive: #9fba55;
+      --tactical-amber: #d4a23f;
+      --tactical-danger: #d45443;
+    }
+
+    body.theme-stealth {
+      isolation: isolate;
+      font-family: "SFMono-Regular", "Roboto Mono", Menlo, Monaco, Consolas, monospace;
+      color: var(--tactical-text);
+      background:
+        linear-gradient(180deg, rgba(212, 162, 63, 0.035), transparent 190px),
+        radial-gradient(circle at 50% -20%, #202521 0, #0d100f 34%, var(--tactical-bg) 72%);
+    }
+
+    body.theme-stealth::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      opacity: 0.20;
+      background:
+        repeating-linear-gradient(0deg, transparent 0 3px, rgba(255,255,255,0.018) 4px),
+        linear-gradient(90deg, transparent 49.9%, rgba(159,186,85,0.045) 50%, transparent 50.1%);
+    }
+
+    body.theme-stealth #app {
+      position: relative;
+      z-index: 1;
+    }
+
+    body.theme-stealth .header {
+      padding: 8px 10px;
+      border-top: 1px solid var(--tactical-border-strong);
+      border-bottom: 1px solid var(--tactical-border);
+      background: linear-gradient(90deg, rgba(20,24,22,0.96), rgba(10,12,11,0.78));
+      box-shadow: inset 3px 0 0 var(--tactical-amber);
+    }
+
+    body.theme-stealth .eth-icon {
+      border-radius: 2px;
+      color: #111410;
+      background: linear-gradient(145deg, #b6c681, #69784c);
+      border: 1px solid #c5d49a;
+      box-shadow: 4px 4px 0 rgba(0,0,0,0.42);
+      clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
+    }
+
+    body.theme-stealth .pair-name,
+    body.theme-stealth .asset-hero-value,
+    body.theme-stealth .asset-hero-winrate-value,
+    body.theme-stealth .direction-val,
+    body.theme-stealth .size-val,
+    body.theme-stealth .price-entry,
+    body.theme-stealth .price-live,
+    body.theme-stealth .metric-value,
+    body.theme-stealth .token-ring-value {
+      color: var(--tactical-text);
+      text-shadow: 0 1px 0 #000;
+    }
+
+    body.theme-stealth .pair-sub,
+    body.theme-stealth .card-title,
+    body.theme-stealth .asset-hero-title,
+    body.theme-stealth .asset-hero-sub,
+    body.theme-stealth .asset-hero-winrate-label,
+    body.theme-stealth .asset-hero-winrate-sub,
+    body.theme-stealth .label,
+    body.theme-stealth .metric-label,
+    body.theme-stealth .metric-sub,
+    body.theme-stealth .section-note,
+    body.theme-stealth .mini-kline-title,
+    body.theme-stealth .mini-kline-meta,
+    body.theme-stealth .token-usage-status,
+    body.theme-stealth .token-usage-detail,
+    body.theme-stealth .update-time,
+    body.theme-stealth .legend {
+      color: var(--tactical-muted);
+    }
+
+    body.theme-stealth .card-title,
+    body.theme-stealth .metric-label,
+    body.theme-stealth .mini-kline-title,
+    body.theme-stealth .hit-history-title {
+      font-weight: 750;
+      letter-spacing: 0.9px;
+    }
+
+    body.theme-stealth .card,
+    body.theme-stealth .asset-hero,
+    body.theme-stealth .hit-history,
+    body.theme-stealth .close-summary-card {
+      position: relative;
+      overflow: hidden;
+      border-radius: 2px;
+      border: 1px solid var(--tactical-border);
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.025), transparent 28%),
+        linear-gradient(180deg, rgba(20,24,22,0.99), rgba(10,13,12,0.99));
+      box-shadow:
+        0 12px 26px rgba(0,0,0,0.30),
+        inset 0 1px 0 rgba(255,255,255,0.035),
+        inset 3px 0 0 rgba(159,186,85,0.10);
+    }
+
+    body.theme-stealth .card::after,
+    body.theme-stealth .asset-hero::after,
+    body.theme-stealth .hit-history::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 42px;
+      height: 3px;
+      background: repeating-linear-gradient(90deg, var(--tactical-amber) 0 6px, transparent 6px 9px);
+      opacity: 0.72;
+    }
+
+    body.theme-stealth .asset-hero {
+      border-color: var(--tactical-border-strong);
+      background:
+        linear-gradient(90deg, rgba(159,186,85,0.085), transparent 40%),
+        linear-gradient(180deg, #171b19, #0c0f0e);
+      box-shadow: inset 4px 0 0 var(--tactical-olive), 0 14px 28px rgba(0,0,0,0.30);
+    }
+
+    body.theme-stealth .metric-card,
+    body.theme-stealth .token-usage-item,
+    body.theme-stealth .tp-box,
+    body.theme-stealth .sl-box,
+    body.theme-stealth .mini-kline,
+    body.theme-stealth .news-marker-label {
+      border-radius: 2px;
+      border-color: #2b312d;
+      background: linear-gradient(180deg, #111513, #0a0d0c);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.025);
+    }
+
+    body.theme-stealth .metric-card {
+      border-left: 2px solid #414941;
+    }
+
+    body.theme-stealth .badge-open,
+    body.theme-stealth .status-chip,
+    body.theme-stealth .phase-badge,
+    body.theme-stealth .table-pill,
+    body.theme-stealth .sl-status,
+    body.theme-stealth .close-hit {
+      border-radius: 2px;
+      letter-spacing: 0.25px;
+    }
+
+    body.theme-stealth .badge-open,
+    body.theme-stealth .status-chip.good {
+      color: #b6cf72;
+      background: #151b12;
+      border-color: #526133;
+    }
+
+    body.theme-stealth .status-chip.warn {
+      color: #edc475;
+      background: #211a0d;
+      border-color: #71541d;
+    }
+
+    body.theme-stealth .status-chip.bad {
+      color: #f0a198;
+      background: #24110f;
+      border-color: #70352e;
+    }
+
+    body.theme-stealth .status-chip.info {
+      color: #c9d0ca;
+      background: #151817;
+      border-color: #454d47;
+    }
+
+    body.theme-stealth .token-ring {
+      border: 1px solid #465047;
+      box-shadow: 0 7px 16px rgba(0,0,0,0.36), inset 0 0 0 2px rgba(0,0,0,0.55);
+    }
+
+    body.theme-stealth .token-ring::before {
+      background: #0c0f0e;
+    }
+
+    body.theme-stealth .token-ring.info { --ring-color: var(--tactical-olive); }
+    body.theme-stealth .token-ring.warn { --ring-color: var(--tactical-amber); }
+    body.theme-stealth .token-ring.bad { --ring-color: var(--tactical-danger); }
+
+    body.theme-stealth .data-table th {
+      color: #a7aea8;
+      background: rgba(255,255,255,0.018);
+    }
+
+    body.theme-stealth .data-table td {
+      color: #d3d8d3;
+      border-bottom-color: #292e2a;
+    }
+
+    body.theme-stealth .news-map {
+      border-radius: 2px;
+      border-color: #3c443e;
+      filter: saturate(0.58) contrast(1.08);
+      box-shadow: inset 0 0 48px #000;
+    }
+
+    body.theme-stealth .range-marker {
+      border-color: #e1c376;
+      background: var(--tactical-amber);
+      box-shadow: 0 0 0 2px rgba(212,162,63,0.18);
+    }
+
+    body.theme-stealth .divider {
+      background: repeating-linear-gradient(90deg, transparent 0 6px, #343b36 6px 16px, transparent 16px 22px);
+    }
+
+    body.theme-stealth ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+
+    body.theme-stealth ::-webkit-scrollbar-track { background: #090b0a; }
+    body.theme-stealth ::-webkit-scrollbar-thumb {
+      background: #394139;
+      border: 1px solid #171a18;
+    }
+
+    .command-deck {
+      display: grid;
+      grid-template-columns: 1.05fr 1.35fr 1.35fr 1.05fr;
+      grid-template-areas:
+        "market chart chart confidence"
+        "signal chart chart position"
+        "regime regime services services";
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .command-card {
+      min-width: 0;
+      position: relative;
+      padding: 11px 12px;
+      overflow: hidden;
+      border: 1px solid var(--tactical-border);
+      border-radius: 2px;
+      background:
+        linear-gradient(135deg, rgba(255,255,255,0.024), transparent 34%),
+        linear-gradient(180deg, #141816, #0a0d0c);
+      box-shadow: inset 2px 0 0 rgba(159,186,85,0.16), 0 7px 18px rgba(0,0,0,0.24);
+    }
+
+    .command-card::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      right: 0;
+      width: 26px;
+      height: 2px;
+      background: var(--tactical-amber);
+      opacity: 0.65;
+    }
+
+    .command-market { grid-area: market; }
+    .command-chart { grid-area: chart; padding: 8px 10px; }
+    .command-confidence { grid-area: confidence; }
+    .command-signal { grid-area: signal; }
+    .command-position { grid-area: position; }
+    .command-regime { grid-area: regime; }
+    .command-services { grid-area: services; }
+
+    .command-label {
+      color: #969e97;
+      font-size: 9px;
+      font-weight: 750;
+      letter-spacing: 0.9px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    .command-price {
+      color: var(--tactical-text);
+      font-size: clamp(20px, 3vw, 29px);
+      font-weight: 820;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .command-symbol {
+      color: #c8cec9;
+      font-size: 12px;
+      font-weight: 750;
+      margin-bottom: 7px;
+    }
+
+    .command-change,
+    .command-meta {
+      margin-top: 7px;
+      color: var(--tactical-muted);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
+    .command-change.positive,
+    .command-signal-value.long,
+    .command-regime-value.bull { color: #a9c65e; }
+    .command-change.negative,
+    .command-signal-value.short,
+    .command-regime-value.bear { color: #dc6a59; }
+    .command-signal-value.wait,
+    .command-regime-value.range { color: var(--tactical-amber); }
+
+    .command-signal-value,
+    .command-regime-value {
+      font-size: 19px;
+      font-weight: 820;
+      letter-spacing: 0.4px;
+    }
+
+    .command-confidence-layout {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .command-confidence-ring {
+      --confidence-progress: 0deg;
+      width: 68px;
+      height: 68px;
+      flex: 0 0 68px;
+      position: relative;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: conic-gradient(var(--tactical-olive) var(--confidence-progress), #242a25 0);
+      box-shadow: inset 0 0 0 1px #4b554c, 0 6px 16px rgba(0,0,0,0.34);
+    }
+
+    .command-confidence-ring::before {
+      content: "";
+      position: absolute;
+      inset: 7px;
+      border-radius: 50%;
+      background: #0c0f0e;
+      border: 1px solid #252b27;
+    }
+
+    .command-confidence-value {
+      position: relative;
+      z-index: 1;
+      color: var(--tactical-text);
+      font-size: 17px;
+      font-weight: 820;
+    }
+
+    .command-list {
+      display: grid;
+      gap: 5px;
+      margin-top: 4px;
+    }
+
+    .command-list-row,
+    .service-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: #aeb5af;
+      font-size: 10px;
+      line-height: 1.25;
+    }
+
+    .command-list-row strong {
+      color: #e0e4e0;
+      font-weight: 700;
+      text-align: right;
+    }
+
+    .command-regime-grid,
+    .command-service-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .command-regime-stat {
+      padding: 7px 8px;
+      border: 1px solid #2a302c;
+      background: #0a0d0c;
+    }
+
+    .command-regime-stat span {
+      display: block;
+      color: #7f8881;
+      font-size: 8px;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+
+    .command-regime-stat strong {
+      color: #d8ddd8;
+      font-size: 11px;
+      font-weight: 720;
+    }
+
+    .service-row {
+      padding: 7px 8px;
+      border: 1px solid #2a302c;
+      background: #0a0d0c;
+    }
+
+    .service-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: #9ca49d;
+      white-space: nowrap;
+    }
+
+    .service-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #586059;
+    }
+
+    .service-state.good { color: #a9c65e; }
+    .service-state.good .service-dot { background: #a9c65e; box-shadow: 0 0 7px rgba(169,198,94,0.4); }
+    .service-state.warn { color: var(--tactical-amber); }
+    .service-state.warn .service-dot { background: var(--tactical-amber); }
+
+    .command-chart .mini-kline {
+      height: 100%;
+      margin-top: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .command-chart .mini-kline svg,
+    .command-chart .mini-kline-empty {
+      height: 174px;
+    }
+
+    @media (max-width: 819px) {
+      .command-deck {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-areas:
+          "market confidence"
+          "signal position"
+          "chart chart"
+          "regime regime"
+          "services services";
+      }
+
+      .command-chart .mini-kline svg,
+      .command-chart .mini-kline-empty {
+        height: 155px;
+      }
+    }
+
+    @media (max-width: 430px) {
+      .command-confidence-layout { align-items: flex-start; }
+      .command-confidence-ring { width: 58px; height: 58px; flex-basis: 58px; }
+      .command-confidence-value { font-size: 14px; }
+      .command-regime-grid,
+      .command-service-grid { grid-template-columns: 1fr; }
+    }
+
     @media (min-width: 820px) {
       body {
         padding: 18px 20px 32px;
@@ -853,12 +1333,12 @@
     }
   </style>
 </head>
-<body>
+<body class="theme-stealth">
 
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260713-18";
+  const APP_VERSION = "20260717-19";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -996,6 +1476,10 @@
   let KLINES_4H_FETCH_TS = 0;
   let API_TOKEN_USAGE = null;
   let API_TOKEN_USAGE_FETCH_TS = 0;
+  let PREDICTED_LIQUIDATION_CONFIDENCE = 0;
+  let LIQUIDATION_CLUSTER_RISK = "";
+  let LIQUIDATION_STREAM_LIVE = false;
+  let TIME_HORIZON = "";
 
   let livePrice = 0;
   let liveMarkPrice = 0;
@@ -1231,6 +1715,10 @@
     BREAK_EVEN_ACTIVE = Boolean(data.break_even_active);
     BREAK_EVEN_TARGET = Number.isFinite(Number(data.break_even_target)) ? Number(data.break_even_target) : BREAK_EVEN_TARGET;
     BREAK_EVEN_TS = Number.isFinite(Number(data.break_even_ts)) ? Number(data.break_even_ts) : BREAK_EVEN_TS;
+    PREDICTED_LIQUIDATION_CONFIDENCE = Number.isFinite(Number(data.predicted_liquidation_confidence)) ? Number(data.predicted_liquidation_confidence) : PREDICTED_LIQUIDATION_CONFIDENCE;
+    LIQUIDATION_CLUSTER_RISK = String(data.liquidation_cluster_risk || LIQUIDATION_CLUSTER_RISK || "");
+    LIQUIDATION_STREAM_LIVE = Boolean(data.liquidation_stream_live);
+    TIME_HORIZON = String(data.time_horizon || TIME_HORIZON || "");
     if (Array.isArray(data.close_hits)) {
       CLOSE_HITS = data.close_hits
         .map((h) => ({
@@ -2188,6 +2676,111 @@
     </div>`;
   }
 
+  function buildMarketRegimeSnapshot() {
+    const rows = KLINES_4H.slice(-20);
+    if (rows.length < 2) {
+      return { label: "資料同步中", tone: "range", changePct: 0, momentumPct: 0, volatilityPct: 0 };
+    }
+    const first = rows[0];
+    const last = rows[rows.length - 1];
+    const recentBase = rows[Math.max(0, rows.length - 6)];
+    const changePct = first.open > 0 ? ((last.close - first.open) / first.open) * 100 : 0;
+    const momentumPct = recentBase.close > 0 ? ((last.close - recentBase.close) / recentBase.close) * 100 : 0;
+    const high = Math.max(...rows.map((row) => row.high));
+    const low = Math.min(...rows.map((row) => row.low));
+    const volatilityPct = last.close > 0 ? ((high - low) / last.close) * 100 : 0;
+    if (changePct >= 1.2) return { label: "多頭趨勢", tone: "bull", changePct, momentumPct, volatilityPct };
+    if (changePct <= -1.2) return { label: "空頭趨勢", tone: "bear", changePct, momentumPct, volatilityPct };
+    return { label: "區間整理", tone: "range", changePct, momentumPct, volatilityPct };
+  }
+
+  function renderCommandDeck(live, totalAssetsUsdt) {
+    const regime = buildMarketRegimeSnapshot();
+    const marketPrice = Number(live) > 0 ? Number(live) : (KLINES_4H[KLINES_4H.length - 1]?.close || 0);
+    const confidenceFromModel = PREDICTED_LIQUIDATION_CONFIDENCE > 0;
+    const confidenceScore = confidenceFromModel
+      ? clamp(PREDICTED_LIQUIDATION_CONFIDENCE * 100, 0, 100)
+      : (Number.isFinite(Number(PERFORMANCE_WIN_RATE)) ? clamp(Number(PERFORMANCE_WIN_RATE), 0, 100) : null);
+    const confidenceText = confidenceScore === null ? "-" : `${confidenceScore.toFixed(0)}%`;
+    const confidenceSource = confidenceFromModel ? "爆倉模型信心" : (confidenceScore === null ? "等待模型資料" : "固定回測勝率");
+    const directionLabel = POSITION_OPEN ? (DIR === "long" ? "LONG ↑" : "SHORT ↓") : "WAIT";
+    const directionTone = POSITION_OPEN ? (DIR === "long" ? "long" : "short") : "wait";
+    const pnl = POSITION_OPEN ? calcPnl(marketPrice) : null;
+    const qty = BINANCE_QTY > 0
+      ? BINANCE_QTY
+      : (marketPrice > 0 && POSITION_NOTIONAL_USDT > 0 ? POSITION_NOTIONAL_USDT / marketPrice : 0);
+    const apiItems = API_TOKEN_USAGE && Array.isArray(API_TOKEN_USAGE.items) ? API_TOKEN_USAGE.items : [];
+    const binanceConfigured = Boolean(apiItems.find((item) => item && item.id === "binance" && item.configured)) || totalAssetsUsdt > 0;
+    const dataFeedReady = marketPrice > 0 && KLINES_4H.length > 0;
+    const panelReady = HAS_POSITION_PAYLOAD && PANEL_ACCESS_STATE !== "unauthorized";
+    const liquidationRisk = LIQUIDATION_CLUSTER_RISK ? escapeHtml(LIQUIDATION_CLUSTER_RISK) : "未偵測";
+
+    return `
+  <div class="command-deck" aria-label="戰術交易總覽">
+    <section class="command-card command-market">
+      <div class="command-label">MARKET</div>
+      <div class="command-symbol">ETH / USDT</div>
+      <div class="command-price">${marketPrice > 0 ? fmt(marketPrice) : "-"}</div>
+      <div class="command-change ${regime.changePct >= 0 ? "positive" : "negative"}">4H×20 ${fmt_signed(regime.changePct)}%</div>
+      <div class="command-meta">總資產 ${fmt(totalAssetsUsdt)} USDT</div>
+    </section>
+
+    <section class="command-card command-chart">
+      ${renderFourHourKlineChart(marketPrice)}
+    </section>
+
+    <section class="command-card command-confidence">
+      <div class="command-label">MODEL CONFIDENCE</div>
+      <div class="command-confidence-layout">
+        <div class="command-confidence-ring" style="--confidence-progress:${confidenceScore === null ? 0 : (confidenceScore * 3.6).toFixed(1)}deg">
+          <div class="command-confidence-value">${confidenceText}</div>
+        </div>
+        <div class="command-list">
+          <div class="command-list-row"><span>來源</span><strong>${confidenceSource}</strong></div>
+          <div class="command-list-row"><span>爆倉風險</span><strong>${liquidationRisk}</strong></div>
+          <div class="command-list-row"><span>週期</span><strong>${escapeHtml(TIME_HORIZON || "待命")}</strong></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="command-card command-signal">
+      <div class="command-label">LONG / SHORT SIGNAL</div>
+      <div class="command-signal-value ${directionTone}">${directionLabel}</div>
+      <div class="command-meta">${POSITION_OPEN ? `策略持倉 ${fmt_size(SIZE)}% ｜ ${LEV}x` : "目前無正式進場訊號"}</div>
+    </section>
+
+    <section class="command-card command-position">
+      <div class="command-label">POSITION</div>
+      <div class="command-list">
+        <div class="command-list-row"><span>狀態</span><strong>${POSITION_OPEN ? "持倉中" : "無持倉"}</strong></div>
+        <div class="command-list-row"><span>數量</span><strong>${qty > 0 ? `${qty.toFixed(4)} ETH` : "-"}</strong></div>
+        <div class="command-list-row"><span>進場價</span><strong>${ENTRY > 0 ? fmt(ENTRY) : "-"}</strong></div>
+        <div class="command-list-row"><span>損益</span><strong>${pnl ? `${fmt_signed(pnl.shown_usdt)} USDT` : "-"}</strong></div>
+      </div>
+    </section>
+
+    <section class="command-card command-regime">
+      <div class="command-label">MARKET REGIME</div>
+      <div class="command-regime-value ${regime.tone}">${regime.label}</div>
+      <div class="command-regime-grid">
+        <div class="command-regime-stat"><span>Trend</span><strong>${fmt_signed(regime.changePct)}%</strong></div>
+        <div class="command-regime-stat"><span>Momentum</span><strong>${fmt_signed(regime.momentumPct)}%</strong></div>
+        <div class="command-regime-stat"><span>Volatility</span><strong>${regime.volatilityPct.toFixed(2)}%</strong></div>
+      </div>
+    </section>
+
+    <section class="command-card command-services">
+      <div class="command-label">SERVICE STATUS</div>
+      <div class="command-service-grid">
+        <div class="service-row"><span>行情資料</span><span class="service-state ${dataFeedReady ? "good" : "warn"}"><i class="service-dot"></i>${dataFeedReady ? "正常" : "同步中"}</span></div>
+        <div class="service-row"><span>即時面板</span><span class="service-state ${panelReady ? "good" : "warn"}"><i class="service-dot"></i>${panelReady ? "正常" : "連線中"}</span></div>
+        <div class="service-row"><span>Binance</span><span class="service-state ${binanceConfigured ? "good" : "warn"}"><i class="service-dot"></i>${binanceConfigured ? "已設定" : "未確認"}</span></div>
+      </div>
+      <div class="command-meta">爆倉串流 ${LIQUIDATION_STREAM_LIVE ? "ONLINE" : "STANDBY"} ｜ ${PAIR}</div>
+    </section>
+  </div>`;
+  }
+
   // ── 渲染 UI ──
   function render() {
     if ((REMOTE_STATE_URL || REMOTE_WS_URL) && !HAS_VIEWER_AUTH) {
@@ -2232,9 +2825,8 @@
     </div>
     <div class="badge-open" style="background:#2a1a1a;color:#e74c3c;border-color:#e74c3c;">● 已平倉</div>
   </div>
-  ${renderApiTokenUsage()}
+  ${renderCommandDeck(livePrice > 0 ? livePrice : BINANCE_MARK_PRICE, totalAssetsUsdt)}
   ${renderTotalAssetsHero(totalAssetsUsdt)}
-  ${renderBacktestPanel()}
   <div class="card close-summary-card">
     <div class="close-hit ${hitClass}">${hitText}</div>
     <div class="close-summary-icon">📋</div>
@@ -2252,6 +2844,8 @@
       ${renderMetricCard("TP / SL", `${TP > 0 ? fmt(TP) : "-"} / ${SL > 0 ? fmt(SL) : "-"}`)}
     </div>
   </div>
+  ${renderApiTokenUsage()}
+  ${renderBacktestPanel()}
   ${renderLatestNews()}
   <div class="update-time">最後更新：${now_str()} ｜ 倉位來源：${LAST_POSITION_SOURCE || "URL 參數"} ｜ 倉位時間：${ts_str(LAST_POSITION_TS)}</div>
 </div>`;
@@ -2314,9 +2908,8 @@
     <div class="badge-open">● 持倉中</div>
   </div>
 
-  ${renderApiTokenUsage()}
+  ${renderCommandDeck(live, totalAssetsUsdt)}
   ${renderTotalAssetsHero(totalAssetsUsdt)}
-  ${renderBacktestPanel()}
 
   <!-- Direction + Size -->
   <div class="card">
@@ -2437,7 +3030,9 @@
     </div>
   </div>
 
-  ${renderFourHourKlineChart(live)}
+  ${renderApiTokenUsage()}
+
+  ${renderBacktestPanel()}
 
   ${renderLatestNews()}
 
