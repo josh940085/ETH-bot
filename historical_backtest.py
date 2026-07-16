@@ -10,7 +10,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from telegram import REPO_DIR, data_path
+import requests
+
+from telegram import REPO_DIR, data_path, load_local_env
 
 
 BACKTEST_FILE = REPO_DIR / "backtest.py"
@@ -23,6 +25,133 @@ PERIODS = (
     ("2025", "2025-01-01", "2026-01-01", "backtest_2025_market_profile_try5"),
     ("2026H1", "2026-01-01", "2026-07-01", "backtest_2026h1_market_profile_try5"),
 )
+
+
+def _is_truthy(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _compact_backtest_summary(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    keys = (
+        "trades",
+        "final_equity",
+        "total_return_pct",
+        "win_rate",
+        "max_drawdown_pct",
+        "profit_factor",
+        "avg_trade_return_pct",
+        "avg_mfe_pct",
+        "avg_mae_pct",
+        "long_trades",
+        "short_trades",
+        "exit_reason_counts",
+    )
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
+def _extract_openai_response_text(payload):
+    if not isinstance(payload, dict):
+        return ""
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+    parts = []
+    for item in payload.get("output") or []:
+        if not isinstance(item, dict):
+            continue
+        for content in item.get("content") or []:
+            if not isinstance(content, dict):
+                continue
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n".join(parts).strip()
+
+
+def _request_openai_backtest_review(candidate_summaries, baseline_summaries, acceptance, http_post=None):
+    model = (os.getenv("HISTORICAL_BACKTEST_OPENAI_MODEL", "gpt-5.6-terra") or "gpt-5.6-terra").strip()
+    if not _is_truthy(os.getenv("HISTORICAL_BACKTEST_OPENAI_ENABLED", "0")):
+        return {"status": "disabled", "model": model}
+
+    api_key = str(os.getenv("OPENAI_API_KEY", "") or "").strip()
+    if not api_key:
+        return {"status": "skipped", "model": model, "error": "OPENAI_API_KEY 未設定"}
+
+    review_input = {
+        "hard_acceptance_gate": acceptance,
+        "candidate": {
+            label: _compact_backtest_summary(candidate_summaries.get(label))
+            for label, _start, _end, _basename in PERIODS
+        },
+        "baseline": {
+            label: _compact_backtest_summary(baseline_summaries.get(label))
+            for label, _start, _end, _basename in PERIODS
+            if label in baseline_summaries
+        },
+    }
+    prompt = (
+        "請以繁體中文審核這次 ETH 歷年回測。硬性規則是複利報酬必須增加，"
+        "總單數與每個年度單數都不能下降；不得建議繞過規則。"
+        "請用精簡條列說明：1. 是否達標，2. 主要改善或退步來源，"
+        "3. 最大風險，4. 下一輪可驗證且不降低單數的調整方向。\n\n"
+        + json.dumps(review_input, ensure_ascii=False, separators=(",", ":"))
+    )
+    reasoning_effort = (
+        os.getenv("HISTORICAL_BACKTEST_OPENAI_REASONING_EFFORT", "medium") or "medium"
+    ).strip().lower()
+    max_output_tokens = max(200, int(os.getenv("HISTORICAL_BACKTEST_OPENAI_MAX_OUTPUT_TOKENS", "1200")))
+    timeout_sec = max(15.0, float(os.getenv("HISTORICAL_BACKTEST_OPENAI_TIMEOUT_SEC", "90")))
+    payload = {
+        "model": model,
+        "instructions": (
+            "你是歷史回測稽核員。只根據提供的統計數據判斷，"
+            "清楚區分數據與推論，不承諾獲利，不得更改程式的硬性發布門檻。"
+        ),
+        "input": prompt,
+        "reasoning": {"effort": reasoning_effort},
+        "max_output_tokens": max_output_tokens,
+        "store": False,
+    }
+    post = http_post or requests.post
+    try:
+        response = post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=timeout_sec,
+        )
+        response.raise_for_status()
+        response_payload = response.json()
+        review_text = _extract_openai_response_text(response_payload)
+        if not review_text:
+            raise RuntimeError("OpenAI 回傳空內容")
+        return {
+            "status": "ok",
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "review": review_text,
+            "usage": response_payload.get("usage") or {},
+            "response_id": response_payload.get("id"),
+        }
+    except requests.HTTPError as exc:
+        error_payload = {}
+        try:
+            error_payload = response.json().get("error") or {}
+        except Exception:
+            error_payload = {}
+        return {
+            "status": "error",
+            "model": model,
+            "error": str(error_payload.get("message") or exc)[:500],
+            "error_type": error_payload.get("type"),
+            "error_code": error_payload.get("code"),
+        }
+    except Exception as exc:
+        return {"status": "error", "model": model, "error": str(exc)[:500]}
 
 
 def _write_report(payload):
@@ -135,6 +264,7 @@ def _evaluate_candidate(candidate_summaries, baseline_summaries, min_return_impr
 
 
 def main():
+    load_local_env()
     started_at = dt.datetime.now().astimezone().isoformat()
     results = []
     report = {"started_at": started_at, "finished_at": None, "success": False, "periods": results}
@@ -201,6 +331,15 @@ def main():
             return 1
 
         report["acceptance"] = acceptance
+        report["openai_review"] = _request_openai_backtest_review(
+            candidate_summaries,
+            baseline_summaries,
+            acceptance,
+        )
+        _write_report(report)
+        review_status = report["openai_review"].get("status")
+        review_model = report["openai_review"].get("model")
+        print(f"🤖 OpenAI 歷年回測審核: status={review_status} | model={review_model}", flush=True)
         report["published"] = False
         if not acceptance.get("accepted"):
             report["success"] = True
