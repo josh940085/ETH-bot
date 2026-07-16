@@ -1,4 +1,7 @@
+import os
 import unittest
+
+os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 
 import eth
 

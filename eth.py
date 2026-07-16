@@ -408,6 +408,17 @@ BINANCE_SPOT_MARKET_CACHE_LOCK = threading.Lock()
 DERIVATIVES_FLOW_CACHE_TTL_SEC = max(15.0, _safe_float_env("DERIVATIVES_FLOW_CACHE_TTL_SEC", 60.0))
 DERIVATIVES_FLOW_CACHE = {"ts": 0.0, "snapshot": {}}
 DERIVATIVES_FLOW_CACHE_LOCK = threading.Lock()
+LIQUIDATION_EVENTS_PATH = data_path("liquidation_events.json")
+LIQUIDATION_CLUSTER_WINDOW_SEC = max(300.0, _safe_float_env("LIQUIDATION_CLUSTER_WINDOW_SEC", 3600.0))
+LIQUIDATION_CLUSTER_BUCKET_RATE = max(0.0005, _safe_float_env("LIQUIDATION_CLUSTER_BUCKET_RATE", 0.0025))
+LIQUIDATION_CLUSTER_MIN_NOTIONAL_USDT = max(10000.0, _safe_float_env("LIQUIDATION_CLUSTER_MIN_NOTIONAL_USDT", 50000.0))
+LIQUIDATION_CLUSTER_MIN_EVENTS = max(2, _safe_int_env("LIQUIDATION_CLUSTER_MIN_EVENTS", 2))
+LIQUIDATION_CLUSTER_PROXIMITY_RATE = max(0.0025, _safe_float_env("LIQUIDATION_CLUSTER_PROXIMITY_RATE", 0.01))
+LIQUIDATION_EVENTS = deque(maxlen=4000)
+LIQUIDATION_EVENTS_LOCK = threading.Lock()
+LIQUIDATION_EVENTS_LOADED = False
+LIQUIDATION_STREAM_LAST_EVENT_TS = 0.0
+LIQUIDATION_STREAM_CONNECTED = False
 FOLLOW_BUTTON_TEXT_DISABLED = "📈 開啟跟單"
 FOLLOW_BUTTON_TEXT_ENABLED = "✅ 跟單中（點擊關閉）"
 WEBAPP_COMMAND_PREFIX = "__webapp__:"
@@ -3805,6 +3816,225 @@ def _safe_int(value, default=0):
         return default
 
 
+def _normalize_liquidation_event(item):
+    if not isinstance(item, dict):
+        return None
+    ts = _safe_float(item.get("ts"), 0.0)
+    price = max(0.0, _safe_float(item.get("price"), 0.0))
+    qty = max(0.0, _safe_float(item.get("qty"), 0.0))
+    notional = max(0.0, _safe_float(item.get("notional"), price * qty))
+    liquidation_side = str(item.get("liquidation_side") or "").lower()
+    if ts <= 0 or price <= 0 or qty <= 0 or liquidation_side not in {"long", "short"}:
+        return None
+    return {
+        "ts": round(ts, 3),
+        "price": price,
+        "qty": qty,
+        "notional": notional,
+        "liquidation_side": liquidation_side,
+    }
+
+
+def _summarize_liquidation_clusters(events, current_price, now_ts=None):
+    """Aggregate recent executed force orders into price bands.
+
+    These are observed liquidation clusters, not an unverifiable estimate of
+    other traders' leverage or future liquidation prices.
+    """
+    now_ts = _safe_float(now_ts, time.time())
+    current_price = max(0.0, _safe_float(current_price, 0.0))
+    empty = {
+        "liquidation_event_count": 0,
+        "long_liquidation_notional": 0.0,
+        "short_liquidation_notional": 0.0,
+        "liquidation_pressure": 0.0,
+        "liquidation_cluster_count": 0,
+        "liquidation_cluster_risk": 0.0,
+        "nearest_liquidation_above": {},
+        "nearest_liquidation_below": {},
+        "liquidation_clusters": [],
+    }
+    if current_price <= 0:
+        return empty
+
+    window_sec = LIQUIDATION_CLUSTER_WINDOW_SEC
+    bucket_width = max(current_price * LIQUIDATION_CLUSTER_BUCKET_RATE, 0.01)
+    buckets = {}
+    long_total = 0.0
+    short_total = 0.0
+    event_count = 0
+    for raw in list(events or []):
+        event = _normalize_liquidation_event(raw)
+        if event is None:
+            continue
+        age = max(0.0, now_ts - event["ts"])
+        if age > window_sec:
+            continue
+        price = event["price"]
+        if abs(price - current_price) / current_price > 0.12:
+            continue
+        weight = max(0.20, 1.0 - age / window_sec)
+        weighted_notional = event["notional"] * weight
+        bucket_id = int(round(price / bucket_width))
+        bucket = buckets.setdefault(
+            bucket_id,
+            {"price_weighted": 0.0, "weight": 0.0, "notional": 0.0, "count": 0, "long": 0.0, "short": 0.0},
+        )
+        bucket["price_weighted"] += price * weighted_notional
+        bucket["weight"] += weighted_notional
+        bucket["notional"] += weighted_notional
+        bucket["count"] += 1
+        bucket[event["liquidation_side"]] += weighted_notional
+        if event["liquidation_side"] == "long":
+            long_total += weighted_notional
+        else:
+            short_total += weighted_notional
+        event_count += 1
+
+    dense = []
+    for bucket in buckets.values():
+        if bucket["count"] < LIQUIDATION_CLUSTER_MIN_EVENTS:
+            continue
+        if bucket["notional"] < LIQUIDATION_CLUSTER_MIN_NOTIONAL_USDT:
+            continue
+        zone_price = bucket["price_weighted"] / max(bucket["weight"], 1e-9)
+        dominant = "long" if bucket["long"] > bucket["short"] else "short" if bucket["short"] > bucket["long"] else "mixed"
+        dense.append(
+            {
+                "price": round(zone_price, 4),
+                "distance_rate": round((zone_price - current_price) / current_price, 6),
+                "notional_usdt": round(bucket["notional"], 2),
+                "event_count": int(bucket["count"]),
+                "dominant_side": dominant,
+                "long_notional_usdt": round(bucket["long"], 2),
+                "short_notional_usdt": round(bucket["short"], 2),
+            }
+        )
+
+    dense.sort(key=lambda row: abs(row["distance_rate"]))
+    above = [row for row in dense if row["distance_rate"] >= 0]
+    below = [row for row in dense if row["distance_rate"] < 0]
+    nearest_above = above[0] if above else {}
+    nearest_below = below[0] if below else {}
+    nearest = dense[0] if dense else {}
+    risk = 0.0
+    if nearest:
+        distance = abs(_safe_float(nearest.get("distance_rate"), 0.0))
+        if distance <= LIQUIDATION_CLUSTER_PROXIMITY_RATE:
+            density = min(1.0, _safe_float(nearest.get("notional_usdt"), 0.0) / LIQUIDATION_CLUSTER_MIN_NOTIONAL_USDT)
+            proximity = max(0.0, 1.0 - distance / LIQUIDATION_CLUSTER_PROXIMITY_RATE)
+            risk = min(1.0, density * (0.65 + proximity * 0.35))
+
+    total = long_total + short_total
+    pressure = (short_total - long_total) / total if total > 0 else 0.0
+    return {
+        "liquidation_event_count": event_count,
+        "long_liquidation_notional": round(long_total, 2),
+        "short_liquidation_notional": round(short_total, 2),
+        "liquidation_pressure": round(max(-1.0, min(1.0, pressure)), 4),
+        "liquidation_cluster_count": len(dense),
+        "liquidation_cluster_risk": round(risk, 4),
+        "nearest_liquidation_above": nearest_above,
+        "nearest_liquidation_below": nearest_below,
+        "liquidation_clusters": dense[:6],
+    }
+
+
+def _liquidation_cluster_guard_reason(direction, snapshot):
+    if not _is_truthy(os.getenv("TRADE_LIQUIDATION_CLUSTER_GUARD_ENABLED", "1")):
+        return ""
+    if direction not in {"long", "short"} or not isinstance(snapshot, dict):
+        return ""
+    risk = _safe_float(snapshot.get("liquidation_cluster_risk"), 0.0)
+    pressure = _safe_float(snapshot.get("liquidation_pressure"), 0.0)
+    min_risk = max(0.40, min(0.95, _safe_float(os.getenv("TRADE_LIQUIDATION_CLUSTER_MIN_RISK", 0.65), 0.65)))
+    min_pressure = max(0.15, min(0.80, _safe_float(os.getenv("TRADE_LIQUIDATION_CLUSTER_MIN_PRESSURE", 0.25), 0.25)))
+    if risk < min_risk:
+        return ""
+    if direction == "long" and pressure <= -min_pressure:
+        return f"多單靠近爆倉密集區（風險{risk:.2f} / 多單爆倉壓力{pressure:+.2f}）"
+    if direction == "short" and pressure >= min_pressure:
+        return f"空單靠近爆倉密集區（風險{risk:.2f} / 空單爆倉壓力{pressure:+.2f}）"
+    return ""
+
+
+def _load_liquidation_events_once():
+    global LIQUIDATION_EVENTS_LOADED
+    if LIQUIDATION_EVENTS_LOADED:
+        return
+    try:
+        raw = json.loads(LIQUIDATION_EVENTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        raw = []
+    cutoff = time.time() - LIQUIDATION_CLUSTER_WINDOW_SEC
+    with LIQUIDATION_EVENTS_LOCK:
+        for item in raw if isinstance(raw, list) else []:
+            event = _normalize_liquidation_event(item)
+            if event is not None and event["ts"] >= cutoff:
+                LIQUIDATION_EVENTS.append(event)
+        LIQUIDATION_EVENTS_LOADED = True
+
+
+def _save_liquidation_events():
+    cutoff = time.time() - LIQUIDATION_CLUSTER_WINDOW_SEC
+    with LIQUIDATION_EVENTS_LOCK:
+        rows = [dict(item) for item in LIQUIDATION_EVENTS if _safe_float(item.get("ts"), 0.0) >= cutoff]
+    try:
+        _write_json_atomic(LIQUIDATION_EVENTS_PATH, rows[-4000:])
+    except Exception as e:
+        if time.time() - _safe_float(getattr(_save_liquidation_events, "_last_err_ts", 0.0), 0.0) > 300:
+            print(f"⚠️ 儲存爆倉事件失敗: {e}")
+            _save_liquidation_events._last_err_ts = time.time()
+
+
+def _record_liquidation_force_order(payload):
+    global LIQUIDATION_STREAM_LAST_EVENT_TS
+    data = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+    order = data.get("o") if isinstance(data, dict) and isinstance(data.get("o"), dict) else {}
+    if str(order.get("s") or "").upper() != COPY_TRADE_SYMBOL:
+        return False
+    side = str(order.get("S") or "").upper()
+    liquidation_side = "long" if side == "SELL" else "short" if side == "BUY" else ""
+    price = max(0.0, _safe_float(order.get("ap"), 0.0)) or max(0.0, _safe_float(order.get("p"), 0.0))
+    qty = max(0.0, _safe_float(order.get("z"), 0.0))
+    if qty <= 0:
+        qty = max(0.0, _safe_float(order.get("l"), 0.0))
+    if qty <= 0:
+        qty = max(0.0, _safe_float(order.get("q"), 0.0))
+    event_ts = _safe_float(order.get("T"), _safe_float(data.get("E") if isinstance(data, dict) else 0.0, time.time() * 1000.0)) / 1000.0
+    event = _normalize_liquidation_event(
+        {"ts": event_ts, "price": price, "qty": qty, "notional": price * qty, "liquidation_side": liquidation_side}
+    )
+    if event is None:
+        return False
+    _load_liquidation_events_once()
+    signature = (round(event["ts"], 3), event["liquidation_side"], round(event["price"], 4), round(event["qty"], 6))
+    with LIQUIDATION_EVENTS_LOCK:
+        if any(
+            (round(row["ts"], 3), row["liquidation_side"], round(row["price"], 4), round(row["qty"], 6)) == signature
+            for row in list(LIQUIDATION_EVENTS)[-20:]
+        ):
+            return False
+        LIQUIDATION_EVENTS.append(event)
+    LIQUIDATION_STREAM_LAST_EVENT_TS = time.time()
+    if time.time() - _safe_float(getattr(_record_liquidation_force_order, "_last_save_ts", 0.0), 0.0) >= 5.0:
+        _save_liquidation_events()
+        _record_liquidation_force_order._last_save_ts = time.time()
+    return True
+
+
+def get_liquidation_cluster_snapshot(current_price=None):
+    _load_liquidation_events_once()
+    price = max(0.0, _safe_float(current_price, 0.0))
+    if price <= 0:
+        price = max(0.0, _safe_float(WS_PRICE, 0.0))
+    with LIQUIDATION_EVENTS_LOCK:
+        rows = list(LIQUIDATION_EVENTS)
+    snapshot = _summarize_liquidation_clusters(rows, price)
+    snapshot["liquidation_stream_live"] = bool(LIQUIDATION_STREAM_CONNECTED)
+    return snapshot
+
+
 def _default_derivatives_flow_snapshot():
     return {
         "ts": 0,
@@ -3819,6 +4049,16 @@ def _default_derivatives_flow_snapshot():
         "taker_buy_ratio": 0.5,
         "long_short_ratio": 1.0,
         "derivatives_pressure": 0.0,
+        "liquidation_event_count": 0,
+        "long_liquidation_notional": 0.0,
+        "short_liquidation_notional": 0.0,
+        "liquidation_pressure": 0.0,
+        "liquidation_cluster_count": 0,
+        "liquidation_cluster_risk": 0.0,
+        "nearest_liquidation_above": {},
+        "nearest_liquidation_below": {},
+        "liquidation_clusters": [],
+        "liquidation_stream_live": False,
         "stale": False,
     }
 
@@ -3839,6 +4079,16 @@ def _normalize_derivatives_flow_snapshot(snapshot):
     payload["taker_buy_ratio"] = max(0.0, min(1.0, _safe_float(payload.get("taker_buy_ratio"), 0.5)))
     payload["long_short_ratio"] = max(0.0, _safe_float(payload.get("long_short_ratio"), 1.0))
     payload["derivatives_pressure"] = max(-1.0, min(1.0, _safe_float(payload.get("derivatives_pressure"), 0.0)))
+    payload["liquidation_event_count"] = max(0, _safe_int(payload.get("liquidation_event_count"), 0))
+    payload["long_liquidation_notional"] = max(0.0, _safe_float(payload.get("long_liquidation_notional"), 0.0))
+    payload["short_liquidation_notional"] = max(0.0, _safe_float(payload.get("short_liquidation_notional"), 0.0))
+    payload["liquidation_pressure"] = max(-1.0, min(1.0, _safe_float(payload.get("liquidation_pressure"), 0.0)))
+    payload["liquidation_cluster_count"] = max(0, _safe_int(payload.get("liquidation_cluster_count"), 0))
+    payload["liquidation_cluster_risk"] = max(0.0, min(1.0, _safe_float(payload.get("liquidation_cluster_risk"), 0.0)))
+    payload["nearest_liquidation_above"] = payload.get("nearest_liquidation_above") if isinstance(payload.get("nearest_liquidation_above"), dict) else {}
+    payload["nearest_liquidation_below"] = payload.get("nearest_liquidation_below") if isinstance(payload.get("nearest_liquidation_below"), dict) else {}
+    payload["liquidation_clusters"] = payload.get("liquidation_clusters") if isinstance(payload.get("liquidation_clusters"), list) else []
+    payload["liquidation_stream_live"] = bool(payload.get("liquidation_stream_live", False))
     payload["ts"] = _safe_int(payload.get("ts"), 0)
     payload["stale"] = bool(payload.get("stale", False))
     return payload
@@ -3869,6 +4119,7 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         snapshot.update(previous)
         snapshot["symbol"] = symbol
         snapshot["ts"] = int(now_ts)
+        snapshot.update(get_liquidation_cluster_snapshot(snapshot.get("mark_price")))
         snapshot["stale"] = True
         with DERIVATIVES_FLOW_CACHE_LOCK:
             DERIVATIVES_FLOW_CACHE["ts"] = now_ts
@@ -3928,6 +4179,9 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         oi_pressure = max(-1.0, min(1.0, snapshot["open_interest_change"] * 25.0))
         premium_pressure = max(-1.0, min(1.0, snapshot["mark_premium_rate"] * 800.0))
         crowded_funding = max(-1.0, min(1.0, snapshot["funding_rate_live"] * 500.0))
+        liquidation_snapshot = get_liquidation_cluster_snapshot(mark_price)
+        snapshot.update(liquidation_snapshot)
+        liquidation_pressure = _safe_float(liquidation_snapshot.get("liquidation_pressure"), 0.0)
         snapshot["derivatives_pressure"] = max(
             -1.0,
             min(
@@ -3935,7 +4189,8 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
                 taker_pressure * 0.55
                 + oi_pressure * 0.30
                 + premium_pressure * 0.10
-                - crowded_funding * 0.05,
+                - crowded_funding * 0.05
+                + liquidation_pressure * 0.15,
             ),
         )
 
@@ -3947,6 +4202,7 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
     except Exception as e:
         fallback = previous if cached_snapshot else snapshot
         fallback = _normalize_derivatives_flow_snapshot(fallback)
+        fallback.update(get_liquidation_cluster_snapshot(fallback.get("mark_price")))
         fallback["stale"] = True
         fallback["ts"] = int(now_ts)
         if now_ts - _safe_float(getattr(get_derivatives_flow_snapshot, "_last_err_ts", 0.0), 0.0) > 300:
@@ -6674,6 +6930,19 @@ def sync_position_panel(current_price=None):
             "ts": int(time.time()),
         }
 
+    payload.update(
+        {
+            "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
+            "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
+            "liquidation_cluster_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_cluster_count"), 0),
+            "long_liquidation_notional": round(_safe_float(POSITION_PANEL_STATE.get("long_liquidation_notional"), 0.0), 2),
+            "short_liquidation_notional": round(_safe_float(POSITION_PANEL_STATE.get("short_liquidation_notional"), 0.0), 2),
+            "nearest_liquidation_above": POSITION_PANEL_STATE.get("nearest_liquidation_above", {}),
+            "nearest_liquidation_below": POSITION_PANEL_STATE.get("nearest_liquidation_below", {}),
+            "liquidation_clusters": list(POSITION_PANEL_STATE.get("liquidation_clusters") or [])[:6],
+            "liquidation_stream_live": bool(POSITION_PANEL_STATE.get("liquidation_stream_live", False)),
+        }
+    )
     POSITION_PANEL_STATE.update(payload)
     _write_json_atomic(POSITION_PANEL_FILE, payload)
     _queue_panel_realtime_publish(payload)
@@ -7669,16 +7938,21 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
             and learned_scaling.get("volume_confirmed")
         )
     )
+    liquidation_guard_reason = _liquidation_cluster_guard_reason(direction, POSITION_PANEL_STATE)
 
     add_trigger = (
         not break_even_active
         and not scale_add_paused
+        and not liquidation_guard_reason
         and daily_min_add_ok
         and add_count < max_add_count
         and size < max_size - 1e-9
         and min_add_drawdown <= drawdown_progress <= max_add_drawdown
         and learned_scaling.get("add_ok")
     )
+
+    if liquidation_guard_reason and min_add_drawdown <= drawdown_progress <= max_add_drawdown:
+        print(f"🛡️ 爆倉密集區暫停補倉: {liquidation_guard_reason}")
 
     reduce_trigger = (
         reduce_count < max_reduce_count
@@ -8550,8 +8824,59 @@ def ws_price_stream():
         except:
             time.sleep(2)
 
+
+def ws_liquidation_stream():
+    """Collect public ETHUSDT force-order events and persist a rolling window."""
+    def on_open(ws):
+        global LIQUIDATION_STREAM_CONNECTED
+        LIQUIDATION_STREAM_CONNECTED = True
+        print("✅ Binance 爆倉密集區串流已連線")
+
+    def on_close(ws, status_code, message):
+        global LIQUIDATION_STREAM_CONNECTED
+        LIQUIDATION_STREAM_CONNECTED = False
+
+    def on_error(ws, error):
+        global LIQUIDATION_STREAM_CONNECTED
+        LIQUIDATION_STREAM_CONNECTED = False
+
+    def on_message(ws, msg):
+        try:
+            payload = json.loads(msg)
+            if _record_liquidation_force_order(payload):
+                event = _normalize_liquidation_event((list(LIQUIDATION_EVENTS) or [{}])[-1])
+                if event and event["notional"] >= LIQUIDATION_CLUSTER_MIN_NOTIONAL_USDT:
+                    side_text = "多單" if event["liquidation_side"] == "long" else "空單"
+                    print(
+                        f"💥 捕捉{side_text}爆倉 | 價格 {event['price']:.2f} | "
+                        f"金額 ${event['notional']:,.0f}"
+                    )
+        except Exception as e:
+            if time.time() - _safe_float(getattr(ws_liquidation_stream, "_last_parse_err_ts", 0.0), 0.0) > 300:
+                print(f"⚠️ 爆倉資料解析失敗: {e}")
+                ws_liquidation_stream._last_parse_err_ts = time.time()
+
+    _load_liquidation_events_once()
+    while True:
+        try:
+            ws = websocket.WebSocketApp(
+                "wss://fstream.binance.com/ws/ethusdt@forceOrder",
+                on_message=on_message,
+                on_open=on_open,
+                on_close=on_close,
+                on_error=on_error,
+            )
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as e:
+            if time.time() - _safe_float(getattr(ws_liquidation_stream, "_last_err_ts", 0.0), 0.0) > 300:
+                print(f"⚠️ 爆倉 WebSocket 暫時中斷: {e}")
+                ws_liquidation_stream._last_err_ts = time.time()
+        time.sleep(2)
+
+
 if LIVE_RUNTIME_ENABLED:
     threading.Thread(target=ws_price_stream, daemon=True).start()
+    threading.Thread(target=ws_liquidation_stream, name="binance-liquidation-stream", daemon=True).start()
 
 
 def _validated_market_price(kline_price, reference_price=None, now_ts=None):
@@ -10833,6 +11158,15 @@ def build_trade_signal_snapshot(
             "regime": "range",
             "atr": 0.0,
             "derivatives_pressure": 0.0,
+            "liquidation_pressure": 0.0,
+            "liquidation_cluster_risk": 0.0,
+            "liquidation_cluster_count": 0,
+            "long_liquidation_notional": 0.0,
+            "short_liquidation_notional": 0.0,
+            "nearest_liquidation_above": {},
+            "nearest_liquidation_below": {},
+            "liquidation_clusters": [],
+            "liquidation_stream_live": False,
             "open_interest_change": 0.0,
             "mark_premium_rate": 0.0,
             "funding_rate_live": 0.0,
@@ -10942,6 +11276,9 @@ def build_trade_signal_snapshot(
     funding_rate_live = _safe_float(derivatives_flow.get("funding_rate_live"), 0.0)
     taker_buy_ratio = max(0.0, min(1.0, _safe_float(derivatives_flow.get("taker_buy_ratio"), 0.5)))
     derivatives_pressure = max(-1.0, min(1.0, _safe_float(derivatives_flow.get("derivatives_pressure"), 0.0)))
+    liquidation_pressure = max(-1.0, min(1.0, _safe_float(derivatives_flow.get("liquidation_pressure"), 0.0)))
+    liquidation_cluster_risk = max(0.0, min(1.0, _safe_float(derivatives_flow.get("liquidation_cluster_risk"), 0.0)))
+    liquidation_cluster_count = max(0, _safe_int(derivatives_flow.get("liquidation_cluster_count"), 0))
 
     features = {
         "htf": htf,
@@ -10989,6 +11326,9 @@ def build_trade_signal_snapshot(
         "funding_rate_live": funding_rate_live,
         "taker_buy_ratio": taker_buy_ratio,
         "derivatives_pressure": derivatives_pressure,
+        "liquidation_pressure": liquidation_pressure,
+        "liquidation_cluster_risk": liquidation_cluster_risk,
+        "liquidation_cluster_count": liquidation_cluster_count,
     }
 
     ai_prob = 0.5
@@ -11363,6 +11703,10 @@ def build_trade_signal_snapshot(
         fake_breakout = True
     if breakout == -1 and btc_change > 0:
         fake_breakout = True
+    if breakout == 1 and _liquidation_cluster_guard_reason("long", derivatives_flow):
+        fake_breakout = True
+    if breakout == -1 and _liquidation_cluster_guard_reason("short", derivatives_flow):
+        fake_breakout = True
 
     entry_threshold = max(0.08, 0.14 - _safe_int(event_risk, 0) * 0.02)
     if regime == "range":
@@ -11607,6 +11951,11 @@ def build_trade_signal_snapshot(
                     conflict_count += 1
                 if conflict_count >= 2 and (score < conflict_long_min_score or net_edge_rate_est < conflict_min_edge_rate):
                     final = "觀望（多單逆向共振不足）"
+        if not final.startswith("觀望"):
+            direction_name = "long" if "做多" in final else "short"
+            liquidation_guard_reason = _liquidation_cluster_guard_reason(direction_name, derivatives_flow)
+            if liquidation_guard_reason:
+                final = f"觀望（{liquidation_guard_reason}）"
         if (
             not final.startswith("觀望")
             and _is_truthy(os.getenv("TRADE_USE_30M_MACD_PRIMARY", "0"))
@@ -11752,6 +12101,15 @@ def build_trade_signal_snapshot(
         "funding_rate_live": funding_rate_live,
         "taker_buy_ratio": taker_buy_ratio,
         "derivatives_pressure": derivatives_pressure,
+        "liquidation_pressure": liquidation_pressure,
+        "liquidation_cluster_risk": liquidation_cluster_risk,
+        "liquidation_cluster_count": liquidation_cluster_count,
+        "long_liquidation_notional": _safe_float(derivatives_flow.get("long_liquidation_notional"), 0.0),
+        "short_liquidation_notional": _safe_float(derivatives_flow.get("short_liquidation_notional"), 0.0),
+        "nearest_liquidation_above": derivatives_flow.get("nearest_liquidation_above", {}),
+        "nearest_liquidation_below": derivatives_flow.get("nearest_liquidation_below", {}),
+        "liquidation_clusters": derivatives_flow.get("liquidation_clusters", []),
+        "liquidation_stream_live": bool(derivatives_flow.get("liquidation_stream_live", False)),
         "derivatives_flow_stale": bool(derivatives_flow.get("stale", False)),
         "content_override": content_override,
         "host_opening_logic": host_opening_logic,
@@ -13971,6 +14329,15 @@ def run_bot():
             # ===== Macro（時事）=====
             sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk, news_list = get_macro_bias()
             derivatives_flow = get_derivatives_flow_snapshot(COPY_TRADE_SYMBOL)
+            POSITION_PANEL_STATE["liquidation_pressure"] = _safe_float(derivatives_flow.get("liquidation_pressure"), 0.0)
+            POSITION_PANEL_STATE["liquidation_cluster_risk"] = _safe_float(derivatives_flow.get("liquidation_cluster_risk"), 0.0)
+            POSITION_PANEL_STATE["liquidation_cluster_count"] = _safe_int(derivatives_flow.get("liquidation_cluster_count"), 0)
+            POSITION_PANEL_STATE["long_liquidation_notional"] = _safe_float(derivatives_flow.get("long_liquidation_notional"), 0.0)
+            POSITION_PANEL_STATE["short_liquidation_notional"] = _safe_float(derivatives_flow.get("short_liquidation_notional"), 0.0)
+            POSITION_PANEL_STATE["nearest_liquidation_above"] = derivatives_flow.get("nearest_liquidation_above", {})
+            POSITION_PANEL_STATE["nearest_liquidation_below"] = derivatives_flow.get("nearest_liquidation_below", {})
+            POSITION_PANEL_STATE["liquidation_clusters"] = list(derivatives_flow.get("liquidation_clusters") or [])[:6]
+            POSITION_PANEL_STATE["liquidation_stream_live"] = bool(derivatives_flow.get("liquidation_stream_live", False))
             if not derivatives_flow.get("stale"):
                 POSITION_PANEL_STATE["funding_rate"] = _safe_float(derivatives_flow.get("funding_rate_live"), POSITION_PANEL_STATE.get("funding_rate", 0.0))
                 POSITION_PANEL_STATE["funding_next_ts"] = _safe_int(derivatives_flow.get("funding_next_ts"), POSITION_PANEL_STATE.get("funding_next_ts", 0))
@@ -14741,6 +15108,10 @@ def run_bot():
                 flow_text = "偏多" if derivatives_pressure > 0 else "偏空"
                 reason.append(
                     f"衍生品流向{flow_text}（壓力{derivatives_pressure:+.2f} / 買盤{taker_buy_ratio:.2f} / OI{open_interest_change*100:+.2f}%）"
+                )
+            if liquidation_cluster_count > 0:
+                reason.append(
+                    f"爆倉密集區（{liquidation_cluster_count}區 / 風險{liquidation_cluster_risk:.2f} / 壓力{liquidation_pressure:+.2f}）"
                 )
             if net_edge_rate_est:
                 reason.append(f"AI期望值（{net_edge_rate_est*100:+.3f}%）")
