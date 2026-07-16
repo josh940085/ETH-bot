@@ -6933,6 +6933,7 @@ def sync_position_panel(current_price=None):
     payload.update(
         {
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
+            "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
             "liquidation_cluster_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_cluster_count"), 0),
             "long_liquidation_notional": round(_safe_float(POSITION_PANEL_STATE.get("long_liquidation_notional"), 0.0), 2),
@@ -14330,6 +14331,7 @@ def run_bot():
             sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk, news_list = get_macro_bias()
             derivatives_flow = get_derivatives_flow_snapshot(COPY_TRADE_SYMBOL)
             POSITION_PANEL_STATE["liquidation_pressure"] = _safe_float(derivatives_flow.get("liquidation_pressure"), 0.0)
+            POSITION_PANEL_STATE["liquidation_event_count"] = _safe_int(derivatives_flow.get("liquidation_event_count"), 0)
             POSITION_PANEL_STATE["liquidation_cluster_risk"] = _safe_float(derivatives_flow.get("liquidation_cluster_risk"), 0.0)
             POSITION_PANEL_STATE["liquidation_cluster_count"] = _safe_int(derivatives_flow.get("liquidation_cluster_count"), 0)
             POSITION_PANEL_STATE["long_liquidation_notional"] = _safe_float(derivatives_flow.get("long_liquidation_notional"), 0.0)
