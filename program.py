@@ -24,6 +24,7 @@ from telegram import (
 ETH_FILE = REPO_DIR / "eth.py"
 BACKTEST_FILE = REPO_DIR / "backtest.py"
 HISTORICAL_BACKTEST_FILE = REPO_DIR / "historical_backtest.py"
+MONTHLY_KLINE_DOWNLOAD_FILE = REPO_DIR / "monthly_kline_download.py"
 MAINTENANCE_FILE = REPO_DIR / "maintenance.py"
 RESTART_DELAY_SEC = 2
 SUPERVISOR_RESTART_EXIT_CODE = 75
@@ -34,6 +35,7 @@ BACKTEST_TRADES_PATH = data_path("backtest_latest_trades.csv")
 BACKTEST_LEARN_PATH = ai_data_path("backtest_ai_data.csv")
 MAINTENANCE_REPORT_PATH = data_path("maintenance_latest_report.json")
 HISTORICAL_BACKTEST_REPORT_PATH = data_path("historical_backtest_latest_report.json")
+MONTHLY_KLINE_DOWNLOAD_REPORT_PATH = data_path("monthly_kline_download_latest.json")
 SUPERVISOR_LOCK_PATH = data_path(".program_supervisor.lock")
 SUPERVISOR_LOCK_FH = None
 
@@ -252,6 +254,56 @@ def _get_historical_backtest_settings():
     enabled = str(os.getenv("HISTORICAL_BACKTEST_AUTO_ENABLED", "1") or "1").strip().lower() not in {
         "0", "false", "no", "off",
     }
+
+
+def _get_monthly_kline_download_settings():
+    enabled = str(os.getenv("MONTHLY_KLINE_AUTO_ENABLED", "1") or "1").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    daily_hour, daily_minute = _parse_daily_schedule(os.getenv("MONTHLY_KLINE_TIME", "10:00"), 10, 0)
+    return {
+        "enabled": enabled,
+        "daily_hour": daily_hour,
+        "daily_minute": daily_minute,
+        "startup_delay_sec": max(30.0, float(os.getenv("MONTHLY_KLINE_STARTUP_DELAY_SEC", 150))),
+        "retry_sec": max(900.0, float(os.getenv("MONTHLY_KLINE_RETRY_SEC", 6 * 3600))),
+    }
+
+
+def _previous_utc_month_key(now_ts=None):
+    now_utc = datetime.datetime.fromtimestamp(now_ts or time.time(), tz=datetime.timezone.utc)
+    first = datetime.datetime(now_utc.year, now_utc.month, 1, tzinfo=datetime.timezone.utc)
+    previous = first - datetime.timedelta(days=1)
+    return f"{previous.year:04d}-{previous.month:02d}"
+
+
+def _next_monthly_schedule_ts(hour, minute, now_ts=None):
+    now_dt = datetime.datetime.fromtimestamp(now_ts or time.time()).astimezone()
+    if now_dt.month == 12:
+        target = now_dt.replace(year=now_dt.year + 1, month=1, day=1, hour=hour, minute=minute, second=0, microsecond=0)
+    else:
+        target = now_dt.replace(month=now_dt.month + 1, day=1, hour=hour, minute=minute, second=0, microsecond=0)
+    return target.timestamp()
+
+
+def _read_monthly_kline_report():
+    try:
+        payload = json.loads(MONTHLY_KLINE_DOWNLOAD_REPORT_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+
+
+def _compute_initial_monthly_kline_ts(settings, now_ts=None):
+    now_ts = now_ts or time.time()
+    now_dt = datetime.datetime.fromtimestamp(now_ts).astimezone()
+    report = _read_monthly_kline_report()
+    if report.get("success") and str(report.get("target_month") or "") == _previous_utc_month_key(now_ts):
+        return _next_monthly_schedule_ts(settings["daily_hour"], settings["daily_minute"], now_ts)
+    scheduled = now_dt.replace(day=1, hour=settings["daily_hour"], minute=settings["daily_minute"], second=0, microsecond=0)
+    if now_dt >= scheduled:
+        return now_ts + settings["startup_delay_sec"]
+    return scheduled.timestamp()
     daily_hour, daily_minute = _parse_daily_schedule(os.getenv("HISTORICAL_BACKTEST_TIME", "03:00"), 3, 0)
     startup_delay_sec = max(30.0, float(os.getenv("HISTORICAL_BACKTEST_STARTUP_DELAY_SEC", 180)))
     return {
@@ -367,6 +419,21 @@ def _start_historical_backtest_process(env):
     return subprocess.Popen(cmd, cwd=str(REPO_DIR), env=env)
 
 
+def _start_monthly_kline_download_process(env):
+    if not MONTHLY_KLINE_DOWNLOAD_FILE.exists():
+        return None
+    cmd = [sys.executable, str(MONTHLY_KLINE_DOWNLOAD_FILE)]
+    print(f"📥 啟動上月K線下載: {' '.join(cmd)}")
+    return subprocess.Popen(
+        cmd,
+        cwd=str(REPO_DIR),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
 def _terminate_process(proc, timeout=10):
     if proc is None or proc.poll() is not None:
         return
@@ -385,6 +452,7 @@ def run_once() -> int:
     backtest_settings = _get_backtest_settings()
     maintenance_settings = _get_maintenance_settings()
     historical_backtest_settings = _get_historical_backtest_settings()
+    monthly_kline_settings = _get_monthly_kline_download_settings()
 
     env = os.environ.copy()
     env["BOT_SUPERVISOR"] = "1"
@@ -396,9 +464,11 @@ def run_once() -> int:
     backtest_proc = None
     maintenance_proc = None
     historical_backtest_proc = None
+    monthly_kline_proc = None
     next_backtest_ts = time.time() + backtest_settings["startup_delay_sec"]
     next_maintenance_ts = _compute_initial_maintenance_ts(maintenance_settings)
     next_historical_backtest_ts = _compute_initial_historical_backtest_ts(historical_backtest_settings)
+    next_monthly_kline_ts = _compute_initial_monthly_kline_ts(monthly_kline_settings)
     shutdown_requested = {"value": False, "signal": None}
 
     def _forward_signal(sig, _frame):
@@ -412,6 +482,8 @@ def run_once() -> int:
             maintenance_proc.send_signal(sig)
         if historical_backtest_proc is not None and historical_backtest_proc.poll() is None:
             historical_backtest_proc.send_signal(sig)
+        if monthly_kline_proc is not None and monthly_kline_proc.poll() is None:
+            monthly_kline_proc.send_signal(sig)
 
     signal.signal(signal.SIGTERM, _forward_signal)
     signal.signal(signal.SIGINT, _forward_signal)
@@ -422,6 +494,7 @@ def run_once() -> int:
             _terminate_process(backtest_proc)
             _terminate_process(maintenance_proc)
             _terminate_process(historical_backtest_proc)
+            _terminate_process(monthly_kline_proc)
             if shutdown_requested["value"]:
                 return SUPERVISOR_STOP_EXIT_CODE
             return code
@@ -440,7 +513,7 @@ def run_once() -> int:
                     print(output)
                 next_backtest_ts = time.time() + backtest_settings["interval_sec"]
                 backtest_proc = None
-        elif backtest_settings["enabled"] and maintenance_proc is None and historical_backtest_proc is None and time.time() >= next_backtest_ts:
+        elif backtest_settings["enabled"] and maintenance_proc is None and historical_backtest_proc is None and monthly_kline_proc is None and time.time() >= next_backtest_ts:
             backtest_proc = _start_backtest_process(env, backtest_settings)
             next_backtest_ts = time.time() + backtest_settings["interval_sec"]
 
@@ -465,6 +538,7 @@ def run_once() -> int:
             maintenance_settings["enabled"]
             and backtest_proc is None
             and historical_backtest_proc is None
+            and monthly_kline_proc is None
             and time.time() >= next_maintenance_ts
         ):
             maintenance_proc = _start_maintenance_process(env, maintenance_settings)
@@ -481,9 +555,38 @@ def run_once() -> int:
             historical_backtest_settings["enabled"]
             and backtest_proc is None
             and maintenance_proc is None
+            and monthly_kline_proc is None
             and time.time() >= next_historical_backtest_ts
         ):
             historical_backtest_proc = _start_historical_backtest_process(env)
+
+        if monthly_kline_proc is not None:
+            monthly_code = monthly_kline_proc.poll()
+            if monthly_code is not None:
+                output = ""
+                try:
+                    stdout, _ = monthly_kline_proc.communicate(timeout=2)
+                    output = (stdout or "").strip()
+                except Exception:
+                    output = ""
+                print(f"📥 上月K線下載結束，exit_code={monthly_code}")
+                if output:
+                    print(output)
+                if monthly_code == 0:
+                    next_monthly_kline_ts = _next_monthly_schedule_ts(
+                        monthly_kline_settings["daily_hour"], monthly_kline_settings["daily_minute"]
+                    )
+                else:
+                    next_monthly_kline_ts = time.time() + monthly_kline_settings["retry_sec"]
+                monthly_kline_proc = None
+        elif (
+            monthly_kline_settings["enabled"]
+            and backtest_proc is None
+            and maintenance_proc is None
+            and historical_backtest_proc is None
+            and time.time() >= next_monthly_kline_ts
+        ):
+            monthly_kline_proc = _start_monthly_kline_download_process(env)
 
         poll_telegram_commands()
 
@@ -493,6 +596,7 @@ def run_once() -> int:
             _terminate_process(backtest_proc)
             _terminate_process(maintenance_proc)
             _terminate_process(historical_backtest_proc)
+            _terminate_process(monthly_kline_proc)
             return SUPERVISOR_RESTART_EXIT_CODE
 
         time.sleep(POLL_INTERVAL_SEC)

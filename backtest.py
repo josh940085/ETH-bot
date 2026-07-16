@@ -176,7 +176,7 @@ def _binance_history_cache_path(symbol, interval, year, month, day=None):
 
 def _download_binance_history_zip(symbol, interval, year, month, day=None):
     cache_path = _binance_history_cache_path(symbol, interval, year, month, day=day)
-    if cache_path.exists() and cache_path.stat().st_size > 0:
+    if cache_path.exists() and _validate_binance_history_zip(cache_path, symbol, interval, year, month, day=day):
         return cache_path
 
     url = _binance_history_zip_url(symbol, interval, year, month, day=day)
@@ -187,6 +187,9 @@ def _download_binance_history_zip(symbol, interval, year, month, day=None):
         return None
     response.raise_for_status()
     tmp_path.write_bytes(response.content)
+    if not _validate_binance_history_zip(tmp_path, symbol, interval, year, month, day=day):
+        tmp_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Binance historical kline archive validation failed: {url}")
     tmp_path.replace(cache_path)
     return cache_path
 
@@ -198,6 +201,51 @@ def _read_binance_history_zip(path):
             return pd.DataFrame()
         with archive.open(csv_names[0]) as fh:
             return pd.read_csv(io.BytesIO(fh.read()))
+
+
+def _history_interval_ms(interval):
+    match = re.fullmatch(r"(\d+)([mhd])", str(interval or "").strip().lower())
+    if not match:
+        return 0
+    value = int(match.group(1))
+    unit_ms = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}[match.group(2)]
+    return value * unit_ms
+
+
+def _validate_binance_history_zip(path, symbol, interval, year, month, day=None):
+    path = Path(path)
+    if not path.exists() or path.stat().st_size <= 0:
+        return False
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if archive.testzip() is not None:
+                return False
+        frame = _read_binance_history_zip(path)
+        required = {"open_time", "open", "high", "low", "close", "volume", "close_time"}
+        if frame.empty or not required.issubset(frame.columns):
+            return False
+        open_times = pd.to_numeric(frame["open_time"], errors="coerce").dropna()
+        if open_times.empty:
+            return False
+        # Binance archives may use microseconds; normalize only for validation.
+        if float(open_times.iloc[0]) > 100_000_000_000_000:
+            open_times = open_times / 1000.0
+        start_dt = dt.datetime(year, month, day or 1, tzinfo=dt.timezone.utc)
+        end_dt = start_dt + dt.timedelta(days=1) if day is not None else _next_month(start_dt)
+        start_ms = int(start_dt.timestamp() * 1000)
+        end_ms = int(end_dt.timestamp() * 1000)
+        interval_ms = _history_interval_ms(interval)
+        if abs(float(open_times.iloc[0]) - start_ms) > max(interval_ms, 60_000):
+            return False
+        if float(open_times.iloc[-1]) >= end_ms or float(open_times.iloc[-1]) < end_ms - max(interval_ms * 2, 120_000):
+            return False
+        if interval_ms > 0:
+            expected = max(1, (end_ms - start_ms) // interval_ms)
+            if len(open_times) < int(expected * 0.995):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 def _fetch_klines_from_binance_history(symbol, interval, start_ms, end_ms):
