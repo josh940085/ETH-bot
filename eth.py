@@ -109,6 +109,7 @@ NEWS_PERFORMANCE_LOG = data_path("news_predictions.jsonl")   # 記錄所有預�
 NEWS_LEARNING_BUFFER = data_path("learning_buffer.pkl")       # 增量學習緩衝區
 NEWS_EVAL_PENDING_PATH = data_path("news_eval_pending.pkl")   # 待市場驗證的新聞預測
 NEWS_STATS_CACHE_PATH = data_path("news_stats_cache.json")
+NEWS_PUSH_DEDUPE_PATH = data_path("news_push_dedupe.json")
 BINANCE_HOST_LEARNING_STATE_PATH = data_path("binance_host_learning_state.json")
 BINANCE_HOST_LIVE_LEARNING_STATE_PATH = data_path("binance_host_live_learning_state.json")
 NEWS_MODEL_VERSION = 3
@@ -1451,6 +1452,70 @@ def _news_dedupe_key(text: str) -> str:
     key = _prepare_news_text_for_model(re.sub(r"^\[[^\]]+\]\s*", "", str(text or "")))
     key = re.sub(r"\s+(?:on|at)\s+(?:the\s+)?(?:nyse|nasdaq|wall street)$", "", key)
     return key[:220]
+
+
+def _news_dedupe_tokens(text: str):
+    prepared = _news_dedupe_key(text)
+    stop_words = {
+        "a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or",
+        "the", "to", "with", "after", "before", "amid", "says", "said", "update", "live",
+    }
+    return {
+        token for token in re.findall(r"[a-z0-9%]+|[\u4e00-\u9fff]{2,}", prepared)
+        if len(token) >= 2 and token not in stop_words
+    }
+
+
+def _news_titles_are_similar(first: str, second: str) -> bool:
+    first_key = _news_dedupe_key(first)
+    second_key = _news_dedupe_key(second)
+    if not first_key or not second_key:
+        return False
+    if first_key == second_key:
+        return True
+    first_tokens = _news_dedupe_tokens(first_key)
+    second_tokens = _news_dedupe_tokens(second_key)
+    intersection = len(first_tokens & second_tokens)
+    if intersection < 4:
+        return False
+    union = len(first_tokens | second_tokens)
+    smaller = min(len(first_tokens), len(second_tokens))
+    jaccard = intersection / max(1, union)
+    containment = intersection / max(1, smaller)
+    threshold = max(0.6, min(0.95, _safe_float(os.getenv("NEWS_PUSH_SIMILARITY_THRESHOLD", 0.78), 0.78)))
+    return jaccard >= threshold or (containment >= 0.9 and abs(len(first_tokens) - len(second_tokens)) <= 4)
+
+
+def _register_news_push_if_new(text: str, now_ts=None) -> bool:
+    """Persist recently pushed headlines and reject source/wording variants."""
+    now_ts = _safe_float(now_ts, time.time())
+    window_sec = max(300.0, _safe_float(os.getenv("NEWS_PUSH_DEDUPE_WINDOW_SEC", 43200), 43200))
+    history = getattr(_register_news_push_if_new, "_history", None)
+    if not isinstance(history, list):
+        payload = _read_json_file(NEWS_PUSH_DEDUPE_PATH, {})
+        history = payload.get("items", []) if isinstance(payload, dict) else []
+    fresh = []
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+        item_ts = _safe_float(item.get("ts"), 0.0)
+        item_text = str(item.get("text") or item.get("key") or "").strip()
+        if item_text and now_ts - item_ts <= window_sec:
+            fresh.append({"key": str(item.get("key") or _news_dedupe_key(item_text)), "text": item_text, "ts": item_ts})
+
+    candidate_key = _news_dedupe_key(text)
+    if not candidate_key:
+        return False
+    for item in fresh:
+        if candidate_key == item.get("key") or _news_titles_are_similar(text, item.get("text", "")):
+            _register_news_push_if_new._history = fresh
+            return False
+
+    fresh.append({"key": candidate_key, "text": normalize_news_text(text)[:300], "ts": now_ts})
+    fresh = fresh[-500:]
+    _register_news_push_if_new._history = fresh
+    _write_json_file(NEWS_PUSH_DEDUPE_PATH, {"updated_at": now_ts, "window_sec": window_sec, "items": fresh})
+    return True
 
 
 def _is_crypto_relevant_news(text: str) -> bool:
@@ -3700,7 +3765,7 @@ def fetch_macro_rss_news():
         text = normalize_news_text(item.get("text", ""))
         if not text:
             continue
-        key = f"{src}|{text.lower()}"
+        key = _news_dedupe_key(text)
         if key in seen:
             continue
         seen.add(key)
@@ -15078,7 +15143,8 @@ def run_bot():
                 new_news = []
 
                 for n in news_list:
-                    if n and n not in run_bot.last_news_set:
+                    news_key = _news_dedupe_key(n)
+                    if news_key and news_key not in run_bot.last_news_set:
                         new_news.append(n)
 
                 if not run_bot.startup_news_snapshot_sent and news_list:
@@ -15089,6 +15155,16 @@ def run_bot():
                         "━━━━━━━━━━━━━━"
                     )
                     print("\n" + snapshot_header)
+                    # 啟動時 RSS 會回傳目前仍在 feed 裡的舊標題；只拿來建立
+                    # 面板/分析快照並寫入持久化去重，不重新推送一輪。
+                    for startup_news in news_list:
+                        startup_key = _news_dedupe_key(startup_news)
+                        if startup_key:
+                            run_bot.last_news_set.add(startup_key)
+                        startup_raw = re.sub(r"^\[[^\]]+\]\s*", "", str(startup_news)).strip()
+                        if startup_raw:
+                            _register_news_push_if_new(startup_raw)
+                    new_news = []
                     run_bot.startup_news_snapshot_sent = True
 
                 new_news = new_news[:15]
@@ -15099,7 +15175,9 @@ def run_bot():
                     for n in new_news:
                         # Mark every inspected title as processed. Previously neutral/noise
                         # titles were retried every loop and polluted the learning log.
-                        run_bot.last_news_set.add(n)
+                        news_key = _news_dedupe_key(n)
+                        if news_key:
+                            run_bot.last_news_set.add(news_key)
                         raw_news = re.sub(r"^\[[^\]]+\]\s*", "", str(n)).strip()
                         if not _is_crypto_relevant_news(raw_news):
                             continue
@@ -15113,6 +15191,10 @@ def run_bot():
                             _safe_int(analysis.get("bias"), 0) == 0
                             or _safe_float(analysis.get("ai_confidence"), 0.0) < min_confidence
                         ):
+                            continue
+
+                        if not _register_news_push_if_new(raw_news):
+                            print(f"🔕 重複/近似新聞已略過: {raw_news[:90]}")
                             continue
 
                         msg_news = build_news_message(n, now_time, analysis=analysis)
