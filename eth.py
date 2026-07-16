@@ -4108,7 +4108,9 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
             and str(cached_snapshot.get("symbol") or "").upper() == symbol
             and (now_ts - cached_ts) < DERIVATIVES_FLOW_CACHE_TTL_SEC
         ):
-            return _normalize_derivatives_flow_snapshot(cached_snapshot)
+            cached_payload = _normalize_derivatives_flow_snapshot(cached_snapshot)
+            cached_payload.update(get_liquidation_cluster_snapshot(cached_payload.get("mark_price")))
+            return _normalize_derivatives_flow_snapshot(cached_payload)
 
     previous = _normalize_derivatives_flow_snapshot(cached_snapshot) if cached_snapshot else _default_derivatives_flow_snapshot()
     snapshot = _default_derivatives_flow_snapshot()
@@ -6941,7 +6943,7 @@ def sync_position_panel(current_price=None):
             "nearest_liquidation_above": POSITION_PANEL_STATE.get("nearest_liquidation_above", {}),
             "nearest_liquidation_below": POSITION_PANEL_STATE.get("nearest_liquidation_below", {}),
             "liquidation_clusters": list(POSITION_PANEL_STATE.get("liquidation_clusters") or [])[:6],
-            "liquidation_stream_live": bool(POSITION_PANEL_STATE.get("liquidation_stream_live", False)),
+            "liquidation_stream_live": bool(LIQUIDATION_STREAM_CONNECTED),
         }
     )
     POSITION_PANEL_STATE.update(payload)
