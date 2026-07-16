@@ -1351,6 +1351,14 @@ def _news_relevance_reason(text: str) -> str:
     if not low:
         return ""
 
+    low_value_commentary = _news_has_any(low, [
+        "live levels", "price prediction", "technical analysis", "chart of the day",
+        "why is bitcoin up", "why is bitcoin down", "why is ethereum up",
+        "why is ethereum down", "what happened to bitcoin", "what happened to ethereum",
+    ])
+    if low_value_commentary:
+        return ""
+
     corporate_noise = _news_has_any(low, [
         "ipo", "price target", "per share", "insider sale", "insider sells", "form 4",
         "form 144", "class a shares", "quarterly earnings", "appoints", "named ceo",

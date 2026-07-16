@@ -14,6 +14,8 @@ class NewsRelevanceTests(unittest.TestCase):
             "Form 4 Clear Secure Inc For: 15 July",
             "Warren Buffett initiated Berkshire Hathaway's investment in Alphabet",
             "Whether chipmakers can keep gaining remains uncertain",
+            "Bitcoin stalls below $65,600 resistance: Live levels",
+            "Ethereum price prediction for this weekend",
         ]
         for headline in headlines:
             with self.subTest(headline=headline):
