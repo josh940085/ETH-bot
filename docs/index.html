@@ -1338,7 +1338,7 @@
 <div id="app" class="loading">載入倉位資料中...</div>
 
 <script>
-  const APP_VERSION = "20260717-21";
+  const APP_VERSION = "20260717-22";
   const PANEL_VIEWER_CACHE_KEY = "eth-bot-panel-viewer";
 
   function readViewerCache() {
@@ -1474,6 +1474,9 @@
   let BACKTEST_PANEL_SUMMARY = null;
   let KLINES_4H = [];
   let KLINES_4H_FETCH_TS = 0;
+  let LIVE_KLINE_PRICE = 0;
+  let LIVE_KLINE_PRICE_TS = 0;
+  let LIVE_KLINE_FETCH_TS = 0;
   let API_TOKEN_USAGE = null;
   let API_TOKEN_USAGE_FETCH_TS = 0;
   const MARKET_DATA_SOURCES = {};
@@ -1529,6 +1532,7 @@
   const PRICE_FETCH_TIMEOUT_MS = 1500;
   const KLINE_FETCH_TIMEOUT_MS = 1800;
   const KLINE_REFRESH_INTERVAL_MS = 60000;
+  const LIVE_KLINE_REFRESH_INTERVAL_MS = 3000;
   const TOKEN_USAGE_REFRESH_INTERVAL_MS = 60000;
   const PRICE_REFRESH_INTERVAL_MS = 1000;
   const PANEL_REFRESH_INTERVAL_MS = 1500;
@@ -2049,12 +2053,25 @@
     KLINES_4H_FETCH_TS = now;
   }
 
+  async function fetchRealtimeKlinePrice() {
+    const now = Date.now();
+    if (LIVE_KLINE_PRICE > 0 && now - LIVE_KLINE_FETCH_TS < LIVE_KLINE_REFRESH_INTERVAL_MS) return;
+    const parsed = await fetchPanelMarketKlines("1m", 2, KLINE_FETCH_TIMEOUT_MS);
+    if (!parsed.length) return;
+    const latest = parsed[parsed.length - 1];
+    if (!Number.isFinite(Number(latest.close)) || Number(latest.close) <= 0) return;
+    LIVE_KLINE_PRICE = Number(latest.close);
+    LIVE_KLINE_PRICE_TS = Number(latest.ts) > 0 ? Number(latest.ts) : now;
+    LIVE_KLINE_FETCH_TS = now;
+  }
+
   async function refreshExecutionPrice() {
     if (priceRefreshInFlight) return;
     priceRefreshInFlight = true;
     try {
       // UI 僅在主程式完成「標記價格 -> 開單策略 -> 實際執行結果」後刷新。
       await fetchPositionData();
+      await fetchRealtimeKlinePrice();
       currentExecutionPrice();
       render();
     } finally {
@@ -2070,7 +2087,7 @@
     }
     refreshInFlight = true;
     try {
-      await Promise.all([fetchPositionData(), fetchFourHourKlines(), fetchApiTokenUsage()]);
+      await Promise.all([fetchPositionData(), fetchFourHourKlines(), fetchRealtimeKlinePrice(), fetchApiTokenUsage()]);
       render();
     } finally {
       refreshInFlight = false;
@@ -2625,6 +2642,33 @@
     };
   }
 
+  function buildRealtimeFourHourRows() {
+    const rows = KLINES_4H.slice(-28).map((row) => ({ ...row }));
+    const live = Number(LIVE_KLINE_PRICE);
+    if (!rows.length || !Number.isFinite(live) || live <= 0) return rows;
+    const intervalMs = 4 * 60 * 60 * 1000;
+    const sourceTs = Number(LIVE_KLINE_PRICE_TS) > 0 ? Number(LIVE_KLINE_PRICE_TS) : Date.now();
+    const bucketTs = Math.floor(sourceTs / intervalMs) * intervalMs;
+    const last = rows[rows.length - 1];
+    if (Number(last.ts) === bucketTs) {
+      last.high = Math.max(Number(last.high), live);
+      last.low = Math.min(Number(last.low), live);
+      last.close = live;
+      last.realtime = true;
+    } else if (bucketTs > Number(last.ts)) {
+      rows.push({
+        ts: bucketTs,
+        open: Number(last.close),
+        high: Math.max(Number(last.close), live),
+        low: Math.min(Number(last.close), live),
+        close: live,
+        volume: 0,
+        realtime: true,
+      });
+    }
+    return rows.slice(-28);
+  }
+
   function renderFourHourKlineChart(live) {
     if (!KLINES_4H.length) {
       return `
@@ -2637,7 +2681,7 @@
     </div>`;
     }
 
-    const chartRows = KLINES_4H.slice(-28);
+    const chartRows = buildRealtimeFourHourRows();
     const levels = calcKlineSupportResistance(chartRows);
     const high = Math.max(...chartRows.map((row) => row.high), TP || 0, SL || 0, ENTRY || 0, live || 0, levels.resistance || 0);
     const low = Math.min(...chartRows.map((row) => row.low), ...(TP > 0 ? [TP] : []), ...(SL > 0 ? [SL] : []), ...(ENTRY > 0 ? [ENTRY] : []), ...(live > 0 ? [live] : []), ...(levels.support > 0 ? [levels.support] : []));
@@ -2679,7 +2723,7 @@
     <div class="mini-kline">
       <div class="mini-kline-head">
         <div class="mini-kline-title">4H K 線圖</div>
-        <div class="mini-kline-meta">${PAIR} ｜ ${escapeHtml(MARKET_DATA_SOURCES["4h"] || "非 Binance")} ｜ ${fmt(levels.resistance)} ｜ ${fmt(levels.support)}</div>
+        <div class="mini-kline-meta">${PAIR} ｜ ${escapeHtml(MARKET_DATA_SOURCES["4h"] || "非 Binance")} + ${escapeHtml(MARKET_DATA_SOURCES["1m"] || "非 Binance 即時")} ｜ 即時 ${LIVE_KLINE_PRICE > 0 ? fmt(LIVE_KLINE_PRICE) : "-"}</div>
       </div>
       <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="4H K 線圖">
         <style>
@@ -2709,7 +2753,7 @@
   }
 
   function buildMarketRegimeSnapshot() {
-    const rows = KLINES_4H.slice(-20);
+    const rows = buildRealtimeFourHourRows().slice(-20);
     if (rows.length < 2) {
       return { label: "資料同步中", tone: "range", changePct: 0, momentumPct: 0, volatilityPct: 0 };
     }
@@ -2724,6 +2768,30 @@
     if (changePct >= 1.2) return { label: "多頭趨勢", tone: "bull", changePct, momentumPct, volatilityPct };
     if (changePct <= -1.2) return { label: "空頭趨勢", tone: "bear", changePct, momentumPct, volatilityPct };
     return { label: "區間整理", tone: "range", changePct, momentumPct, volatilityPct };
+  }
+
+  function localizeStrategyRegime(value, fallback = "資料同步中") {
+    const labels = {
+      bull_trend_strong: "強勢多頭",
+      bull_trend: "多頭趨勢",
+      bear_trend_strong: "強勢空頭",
+      bear_trend: "空頭趨勢",
+      range: "區間整理",
+      range_base: "震盪築底",
+    };
+    return labels[String(value || "")] || String(value || fallback);
+  }
+
+  function localizeExecutionStatus(value) {
+    const labels = {
+      waiting: "等待開單條件",
+      pending_confirmation: "等待進場確認",
+      opened: "實際開單成功",
+      position_open: "實際持倉管理",
+      open_failed: "實際開單失敗",
+      local_tracking: "僅本地追蹤",
+    };
+    return labels[String(value || "")] || "等待開單條件";
   }
 
   function renderCommandDeck(live, totalAssetsUsdt) {
@@ -2770,7 +2838,7 @@
         <div class="command-list">
           <div class="command-list-row"><span>來源</span><strong>${confidenceSource}</strong></div>
           <div class="command-list-row"><span>爆倉風險</span><strong>${liquidationRisk}</strong></div>
-          <div class="command-list-row"><span>執行</span><strong>${escapeHtml(STRATEGY_EXECUTION_STATUS)}</strong></div>
+          <div class="command-list-row"><span>執行</span><strong>${escapeHtml(localizeExecutionStatus(STRATEGY_EXECUTION_STATUS))}</strong></div>
         </div>
       </div>
     </section>
@@ -2793,11 +2861,11 @@
 
     <section class="command-card command-regime">
       <div class="command-label">MARKET REGIME</div>
-      <div class="command-regime-value ${regime.tone}">${escapeHtml(STRATEGY_REGIME || regime.label)}</div>
+      <div class="command-regime-value ${regime.tone}">${escapeHtml(localizeStrategyRegime(STRATEGY_REGIME, regime.label))}</div>
       <div class="command-regime-grid">
-        <div class="command-regime-stat"><span>Trend</span><strong>${fmt_signed(regime.changePct)}%</strong></div>
-        <div class="command-regime-stat"><span>Momentum</span><strong>${fmt_signed(regime.momentumPct)}%</strong></div>
-        <div class="command-regime-stat"><span>Volatility</span><strong>${regime.volatilityPct.toFixed(2)}%</strong></div>
+        <div class="command-regime-stat"><span>趨勢</span><strong>${fmt_signed(regime.changePct)}%</strong></div>
+        <div class="command-regime-stat"><span>動能</span><strong>${fmt_signed(regime.momentumPct)}%</strong></div>
+        <div class="command-regime-stat"><span>波動</span><strong>${regime.volatilityPct.toFixed(2)}%</strong></div>
       </div>
     </section>
 

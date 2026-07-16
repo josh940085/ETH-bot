@@ -8,6 +8,13 @@ import panel_realtime_server
 
 
 class PanelMarketKlineSourceTests(unittest.TestCase):
+    def test_live_one_minute_cache_is_shorter_than_regular_kline_cache(self):
+        self.assertEqual(panel_realtime_server.MARKET_LIVE_DATA_TTL_SEC, 3.0)
+        self.assertLess(
+            panel_realtime_server.MARKET_LIVE_DATA_TTL_SEC,
+            panel_realtime_server.MARKET_DATA_TTL_SEC,
+        )
+
     def test_local_preview_can_read_public_market_data_without_viewer_token(self):
         request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
 

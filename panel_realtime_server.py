@@ -197,6 +197,7 @@ CLIENTS_LOCK = asyncio.Lock()
 MARKET_DATA_CACHE = {}
 MARKET_DATA_LOCK = asyncio.Lock()
 MARKET_DATA_TTL_SEC = max(3.0, _safe_float_env("POSITION_PANEL_MARKET_DATA_TTL_SEC", 8.0))
+MARKET_LIVE_DATA_TTL_SEC = 3.0
 MARKET_PRICE_TTL_SEC = max(0.5, _safe_float_env("POSITION_PANEL_MARKET_PRICE_TTL_SEC", 1.0))
 MARKET_PRICE_MAX_AGE_SEC = max(2.0, _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_AGE_SEC", 10.0))
 MARKET_PRICE_MAX_DEVIATION_RATE = max(
@@ -969,9 +970,10 @@ async def get_market_klines(request: Request):
 
     cache_key = f"{symbol}:{interval}:{limit}"
     now_ts = time.time()
+    cache_ttl_sec = MARKET_LIVE_DATA_TTL_SEC if interval == "1m" else MARKET_DATA_TTL_SEC
     async with MARKET_DATA_LOCK:
         cached = MARKET_DATA_CACHE.get(cache_key)
-        if cached and now_ts - float(cached.get("ts", 0.0)) < MARKET_DATA_TTL_SEC:
+        if cached and now_ts - float(cached.get("ts", 0.0)) < cache_ttl_sec:
             return JSONResponse(dict(cached.get("payload") or {}))
 
     try:
