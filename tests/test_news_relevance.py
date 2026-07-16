@@ -24,20 +24,38 @@ class NewsRelevanceTests(unittest.TestCase):
             with self.subTest(headline=headline):
                 self.assertEqual(eth._news_relevance_reason(headline), "")
 
-    def test_keeps_news_that_can_move_eth(self):
+    def test_keeps_news_that_can_move_global_financial_markets(self):
         expected = {
             "Bitcoin turns lower as soft U.S. inflation data is offset by Iran tensions": "crypto",
             "Ethereum ETF inflows hit a record high": "crypto",
             "US CPI rises less than expected": "macro",
             "Fed signals rates may stay higher as inflation persists": "macro",
-            "US stock futures fall as Treasury yields surge": "cross_asset",
-            "Asian shares slump as inflation reshapes rate expectations": "cross_asset",
-            "Oil rises as Iran threatens Hormuz disruption": "geopolitical",
+            "ECB cuts interest rates as European economy slows": "central_bank",
+            "Bank of Japan signals policy tightening as yen weakens": "central_bank",
+            "US stock futures fall as Treasury yields surge": "global_equities",
+            "Nikkei plunges as global risk-off selling accelerates": "global_equities",
+            "Euro falls as bond yields rise across Europe": "rates_fx",
+            "Gold surges to record high on safe-haven demand": "commodities",
+            "US announces new tariffs on China imports": "trade_policy",
+            "Nvidia earnings beat estimates and raises guidance": "mega_cap",
+            "Oil rises as Iran threatens Hormuz disruption": "commodities",
             "Russia-Ukraine ceasefire talks collapse amid escalation": "geopolitical",
+            "China military drill near Taiwan Strait raises blockade fears": "geopolitical",
         }
         for headline, reason in expected.items():
             with self.subTest(headline=headline):
                 self.assertEqual(eth._news_relevance_reason(headline), reason)
+
+    def test_global_scope_still_rejects_routine_company_noise(self):
+        headlines = [
+            "Apple appoints new regional sales chief",
+            "SmallCap Inc reports quarterly earnings",
+            "Tesla analyst raises price target to $500",
+            "Local retailer opens its twentieth store",
+        ]
+        for headline in headlines:
+            with self.subTest(headline=headline):
+                self.assertEqual(eth._news_relevance_reason(headline), "")
 
     def test_dedupe_ignores_source_and_exchange_suffix(self):
         first = "[Investing] Standard Nuclear prices IPO at $15 per share"

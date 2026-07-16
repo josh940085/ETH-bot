@@ -1362,12 +1362,7 @@ def _news_has_any(text: str, terms) -> bool:
 
 
 def _news_relevance_reason(text: str) -> str:
-    """Return the ETH-market relevance group, or an empty string for noise.
-
-    The filter deliberately requires context for broad words such as bank, Fed,
-    nuclear and war. A single company, executive, IPO or criminal headline must
-    not influence ETH merely because one of those words appears in the title.
-    """
+    """Return a global-financial-market relevance group, or empty for noise."""
     low = normalize_news_text(text).lower()
     if not low:
         return ""
@@ -1380,9 +1375,22 @@ def _news_relevance_reason(text: str) -> str:
     if low_value_commentary:
         return ""
 
+    major_company = _news_has_any(low, [
+        "nvidia", "apple", "microsoft", "amazon", "alphabet", "google", "meta platforms",
+        "tesla", "tsmc", "taiwan semiconductor", "broadcom", "samsung electronics",
+        "jpmorgan", "goldman sachs", "blackrock", "berkshire hathaway",
+    ])
+    major_company_catalyst = _news_has_any(low, [
+        "earnings", "revenue", "profit", "guidance", "forecast", "sales warning",
+        "misses estimates", "beats estimates", "chip export", "export ban", "antitrust",
+        "investigation", "outage", "default", "bankruptcy", "acquisition", "takeover",
+    ])
+    if major_company and major_company_catalyst:
+        return "mega_cap"
+
     corporate_noise = _news_has_any(low, [
         "ipo", "price target", "per share", "insider sale", "insider sells", "form 4",
-        "form 144", "class a shares", "quarterly earnings", "appoints", "named ceo",
+        "form 144", "class a shares", "appoints", "named ceo",
     ])
     personal_or_case_noise = _news_has_any(low, [
         "sentenced to prison", "sentences", "prison for", "advisor gets", "employee jailed",
@@ -1401,45 +1409,89 @@ def _news_relevance_reason(text: str) -> str:
     if direct_crypto:
         return "crypto"
 
-    us_macro = _news_has_any(low, [
-        "cpi", "pce", "nonfarm", "non-farm", "payrolls", "jobless claims", "jobs report",
-        "unemployment", "us gdp", "u.s. gdp", "retail sales", "consumer prices",
-        "producer prices", "fomc", "quantitative easing", "quantitative tightening",
-    ])
-    fed_context = _news_has_any(low, ["fed", "federal reserve", "powell"]) and _news_has_any(low, [
-        "interest rate", "rates", "rate hike", "rate cut", "inflation", "liquidity",
-        "balance sheet", "bond", "yield", "dollar", "policy", "economy",
+    macro_release = _news_has_any(low, [
+        "cpi", "pce", "inflation", "consumer prices", "producer prices", "nonfarm",
+        "non-farm", "payrolls", "jobless claims", "jobs report", "unemployment",
+        "gdp", "retail sales", "industrial production", "pmi", "consumer confidence",
+        "business confidence", "trade balance", "current account", "wage growth",
     ])
     systemic_risk = _news_has_any(low, [
         "bank collapse", "bank run", "banking crisis", "credit crisis", "liquidity crisis",
         "financial crisis", "sovereign default", "us default", "u.s. default", "recession",
-        "stagflation", "debt ceiling",
+        "stagflation", "debt ceiling", "credit downgrade", "emergency bailout",
     ])
-    if us_macro or fed_context or systemic_risk:
+    if macro_release or systemic_risk:
         return "macro"
 
-    cross_asset = _news_has_any(low, [
-        "s&p 500", "nasdaq", "wall st", "wall street", "us stock futures",
-        "u.s. stock futures", "stock market", "risk-off", "risk off", "dxy",
-        "dollar index", "treasury yields", "bond yields", "asian shares",
+    central_bank = _news_has_any(low, [
+        "fed", "federal reserve", "fomc", "powell", "ecb", "european central bank",
+        "bank of england", "boe", "bank of japan", "boj", "people's bank of china",
+        "pboc", "swiss national bank", "snb", "bank of canada", "reserve bank of australia",
+        "rba",
     ]) and _news_has_any(low, [
-        "rise", "rises", "rally", "higher", "gain", "gains", "fall", "falls", "slump",
-        "drop", "drops", "plunge", "lower", "selloff", "inflation", "rate", "yield",
-        "record high", "one-month low", "one-year high", "steady",
+        "interest rate", "rates", "rate hike", "rate cut", "inflation", "liquidity",
+        "balance sheet", "bond", "yield", "currency", "policy", "economy", "stimulus",
+        "quantitative easing", "quantitative tightening", "intervention",
     ])
-    if cross_asset:
-        return "cross_asset"
+    if central_bank:
+        return "central_bank"
+
+    market_move = _news_has_any(low, [
+        "rise", "rises", "rally", "higher", "gain", "gains", "fall", "falls", "slump",
+        "drop", "drops", "plunge", "plunges", "lower", "selloff", "sell-off", "surge",
+        "surges", "jump", "jumps", "slide", "slides", "tumble", "tumbles", "rebound",
+        "rebounds", "advance", "advances",
+        "record high", "record low", "one-month low", "one-year high", "volatile",
+    ])
+    global_equities = _news_has_any(low, [
+        "s&p 500", "nasdaq", "dow jones", "wall st", "wall street", "stock futures",
+        "stock market", "global stocks", "world stocks", "european shares", "asian shares",
+        "nikkei", "topix", "hang seng", "csi 300", "stoxx 600", "euro stoxx", "ftse",
+        "dax", "cac 40", "msci world", "emerging markets", "risk-off", "risk off",
+    ])
+    if global_equities and market_move:
+        return "global_equities"
+
+    rates_fx = _news_has_any(low, [
+        "treasury yields", "bond yields", "government bonds", "treasuries", "gilts", "bunds",
+        "dxy", "dollar index", "us dollar", "u.s. dollar", "euro", "yen", "yuan", "renminbi",
+        "pound sterling", "swiss franc", "foreign exchange", "forex",
+    ]) and (market_move or _news_has_any(low, ["intervention", "rate", "yield", "inflation"]))
+    if rates_fx:
+        return "rates_fx"
+
+    commodity_move = _news_has_any(low, [
+        "oil", "crude", "brent", "wti", "gold", "silver", "copper", "natural gas",
+        "iron ore", "commodity", "commodities",
+    ]) and (market_move or _news_has_any(low, [
+        "supply", "disruption", "sanction", "inventory", "opec", "inflation", "tariff",
+    ]))
+    if commodity_move:
+        return "commodities"
+
+    trade_policy = _news_has_any(low, [
+        "tariff", "tariffs", "trade war", "export control", "export controls", "sanction",
+        "sanctions", "capital controls",
+    ]) and _news_has_any(low, [
+        "united states", "u.s.", "us", "china", "european union", "japan", "russia", "india",
+        "canada", "mexico", "global", "world",
+    ])
+    if trade_policy:
+        return "trade_policy"
 
     oil_shock = _news_has_any(low, ["oil", "crude", "brent", "hormuz", "energy crisis"]) and _news_has_any(low, [
         "iran", "israel", "war", "strike", "sanction", "supply", "disruption", "crisis",
         "surge", "rise", "rises", "jump", "drop", "falls", "inflation",
     ])
     geopolitical_shock = (
-        _news_has_any(low, ["iran", "israel", "hormuz"]) and
+        _news_has_any(low, ["iran", "israel", "hormuz", "middle east"]) and
         _news_has_any(low, ["war", "strike", "missile", "attack", "ceasefire", "blockade", "sanction"])
     ) or (
         _news_has_any(low, ["russia", "ukraine"]) and
         _news_has_any(low, ["ceasefire", "invasion", "escalation", "nato", "sanction", "nuclear weapon"])
+    ) or (
+        _news_has_any(low, ["china", "taiwan", "taiwan strait"]) and
+        _news_has_any(low, ["blockade", "military drill", "invasion", "missile", "sanction", "export control"])
     )
     if oil_shock or geopolitical_shock:
         return "geopolitical"
@@ -1518,10 +1570,14 @@ def _register_news_push_if_new(text: str, now_ts=None) -> bool:
     return True
 
 
-def _is_crypto_relevant_news(text: str) -> bool:
-    """判斷新聞是否與 BTC/ETH、加密貨幣市場或可能影響幣價的宏觀事件有關。
-    只有相關新聞才會影響 news_bias 和進入 AI 訓練資料。"""
+def _is_market_relevant_news(text: str) -> bool:
+    """判斷新聞是否足以影響全球股票、債券、外匯、商品或加密市場。"""
     return bool(_news_relevance_reason(text))
+
+
+def _is_crypto_relevant_news(text: str) -> bool:
+    """Backward-compatible alias for older callers."""
+    return _is_market_relevant_news(text)
 
 
 def _sanitize_news_label(label):
@@ -1721,7 +1777,7 @@ def _extract_binance_host_posts(raw_text, host_name="蓝歌", limit=8):
                 if line == host_name and current:
                     chunks.append("\n".join(current))
                     current = []
-                elif _is_crypto_relevant_news(line) or re.search(
+                elif _is_market_relevant_news(line) or re.search(
                     r"[$#](ETH|BTC|SOL)|以太|比特|做多|做空|空单|多单",
                     line,
                     re.I,
@@ -2812,7 +2868,7 @@ def _load_learning_buffer_samples(max_per_label=40):
             not prepared
             or clean_label is None
             or prepared in seen_texts
-            or not _is_crypto_relevant_news(prepared)
+            or not _is_market_relevant_news(prepared)
         ):
             continue
 
@@ -3175,8 +3231,8 @@ def log_prediction_result(
 ):
     """記錄預測結果用於增量學習和精準度評估"""
     try:
-        # 只記錄與 BTC/ETH 相關的新聞，避免無關資訊污染訓練資料
-        if not _is_crypto_relevant_news(news_text):
+        # 只記錄可能影響全球金融市場的新聞，避免無關資訊污染訓練資料
+        if not _is_market_relevant_news(news_text):
             return
 
         prepared = _prepare_news_text_for_model(news_text)
@@ -3275,8 +3331,8 @@ def get_prediction_accuracy():
 def update_learning_buffer(news_text, true_label):
     """將新樣本添加到增量學習緩衝區"""
     try:
-        # 只學習與 BTC/ETH 相關的新聞
-        if not _is_crypto_relevant_news(news_text):
+        # 只學習可能影響全球金融市場的新聞
+        if not _is_market_relevant_news(news_text):
             return
 
         prepared = _prepare_news_text_for_model(news_text)
@@ -3499,7 +3555,7 @@ def build_panel_news_items(news_list, limit=5):
 
         if not title:
             continue
-        if not _is_crypto_relevant_news(title):
+        if not _is_market_relevant_news(title):
             continue
 
         key = _news_dedupe_key(title)
@@ -3810,7 +3866,7 @@ def refresh_rss_news_cache(force=False):
                 continue
             src = str(item.get("source", "News")).strip() or "News"
             text = normalize_news_text(item.get("text", ""))
-            if not text or not _is_crypto_relevant_news(text):
+            if not text or not _is_market_relevant_news(text):
                 continue
             key = _news_dedupe_key(text)
             if key in dedup_now:
@@ -3854,9 +3910,9 @@ def refresh_rss_news_cache(force=False):
                 event_risk += int(analysis.get("event_risk", 0))
                 news_list.append(f"[{src}] {text[:200]}")
 
-        # 若本輪沒有新快訊，回退為近期標題（僅保留加密相關），避免監控面板長期顯示「暫無資料」
+        # 若本輪沒有新快訊，回退為近期標題（僅保留市場相關），避免監控面板長期顯示「暫無資料」
         if not news_list and latest_news:
-            news_list = [n for n in latest_news if _is_crypto_relevant_news(n)]
+            news_list = [n for n in latest_news if _is_market_relevant_news(n)]
 
         if len(refresh_rss_news_cache.seen_news) > 4000:
             refresh_rss_news_cache.seen_news = set(list(refresh_rss_news_cache.seen_news)[-2000:])
@@ -4556,7 +4612,7 @@ def _sanitize_pending_news_eval_item(item):
 
     raw_news = normalize_news_text(item.get("news", item.get("text", "")))
     prepared = _prepare_news_text_for_model(raw_news)
-    if not raw_news or not prepared or not _is_crypto_relevant_news(raw_news):
+    if not raw_news or not prepared or not _is_market_relevant_news(raw_news):
         return None
 
     predicted_bias = _sanitize_news_label(item.get("predicted_bias"))
@@ -15179,7 +15235,7 @@ def run_bot():
                         if news_key:
                             run_bot.last_news_set.add(news_key)
                         raw_news = re.sub(r"^\[[^\]]+\]\s*", "", str(n)).strip()
-                        if not _is_crypto_relevant_news(raw_news):
+                        if not _is_market_relevant_news(raw_news):
                             continue
 
                         analysis = analyze_news_text(raw_news)
