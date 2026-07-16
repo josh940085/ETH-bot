@@ -4314,6 +4314,34 @@ def _normalize_derivatives_flow_snapshot(snapshot):
     return payload
 
 
+def _binance_futures_market_get(path, *, params, timeout, prefix):
+    """Read public Futures data through Binance's working official hosts."""
+    configured = str(
+        os.getenv(
+            "BINANCE_FUTURES_MARKET_DATA_BASE_URLS",
+            "https://www.binance.com,https://fapi.binance.com",
+        )
+        or ""
+    )
+    bases = [base.strip().rstrip("/") for base in configured.split(",") if base.strip()]
+    last_error = None
+    for base in bases:
+        try:
+            response = _binance_request_get(
+                f"{base}/{str(path).lstrip('/')}",
+                params=params,
+                timeout=timeout,
+                prefix=prefix,
+            )
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            last_error = e
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Binance Futures market data host is not configured")
+
+
 def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
     """Public Binance Futures flow snapshot; fail-soft so signal generation never blocks on it."""
     now_ts = time.time()
@@ -4349,13 +4377,12 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         return _normalize_derivatives_flow_snapshot(snapshot)
 
     try:
-        oi_resp = _binance_request_get(
-            "https://fapi.binance.com/fapi/v1/openInterest",
+        oi_resp = _binance_futures_market_get(
+            "/fapi/v1/openInterest",
             params={"symbol": symbol},
             timeout=5,
             prefix="Binance derivatives openInterest",
         )
-        oi_resp.raise_for_status()
         oi_data = oi_resp.json()
         current_oi = max(0.0, _safe_float((oi_data or {}).get("openInterest"), 0.0))
         previous_oi = _safe_float(previous.get("open_interest"), 0.0)
@@ -4363,13 +4390,12 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         if previous_oi > 0 and current_oi > 0:
             snapshot["open_interest_change"] = max(-1.0, min(1.0, (current_oi - previous_oi) / previous_oi))
 
-        premium_resp = _binance_request_get(
-            "https://fapi.binance.com/fapi/v1/premiumIndex",
+        premium_resp = _binance_futures_market_get(
+            "/fapi/v1/premiumIndex",
             params={"symbol": symbol},
             timeout=5,
             prefix="Binance derivatives premiumIndex",
         )
-        premium_resp.raise_for_status()
         premium_data = premium_resp.json()
         mark_price = max(0.0, _safe_float((premium_data or {}).get("markPrice"), 0.0))
         index_price = max(0.0, _safe_float((premium_data or {}).get("indexPrice"), 0.0))
@@ -4380,13 +4406,12 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
         snapshot["funding_rate_live"] = max(-0.05, min(0.05, _safe_float((premium_data or {}).get("lastFundingRate"), 0.0)))
         snapshot["funding_next_ts"] = _safe_int((premium_data or {}).get("nextFundingTime"), 0)
 
-        taker_resp = _binance_request_get(
-            "https://fapi.binance.com/futures/data/takerlongshortRatio",
+        taker_resp = _binance_futures_market_get(
+            "/futures/data/takerlongshortRatio",
             params={"symbol": symbol, "period": "5m", "limit": 2},
             timeout=5,
             prefix="Binance derivatives takerRatio",
         )
-        taker_resp.raise_for_status()
         taker_rows = taker_resp.json()
         latest_taker = taker_rows[-1] if isinstance(taker_rows, list) and taker_rows else {}
         long_short_ratio = max(0.0, _safe_float(latest_taker.get("buySellRatio"), 1.0))
