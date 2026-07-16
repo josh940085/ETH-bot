@@ -34,6 +34,8 @@ class LiquidationClusterTests(unittest.TestCase):
                 for key in eth.PREDICTED_LIQUIDATION_STATS:
                     eth.PREDICTED_LIQUIDATION_STATS[key] = 0.0
                 eth.PREDICTED_LIQUIDATION_LOADED = True
+            eth._score_predicted_liquidation_event({"ts": 40_000.0, "price": 1900.0, "qty": 10.0, "liquidation_side": "long"})
+            self.assertEqual(eth.PREDICTED_LIQUIDATION_STATS["evaluated_events"], 0.0)
             created = eth._record_predicted_liquidation_cohorts(1000.0, 1100.0, 2000.0, 0.65, 0.0001, now_ts=40_000.0)
             self.assertTrue(created)
             with eth.PREDICTED_LIQUIDATION_LOCK:

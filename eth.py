@@ -3855,6 +3855,8 @@ def _load_predicted_liquidation_state_once():
         raw = json.loads(PREDICTED_LIQUIDATION_STATE_PATH.read_text(encoding="utf-8"))
     except Exception:
         raw = {}
+    if not isinstance(raw, dict) or _safe_int(raw.get("schema_version"), 0) != 1:
+        raw = {}
     cutoff = time.time() - PREDICTED_LIQUIDATION_WINDOW_SEC
     with PREDICTED_LIQUIDATION_LOCK:
         for item in raw.get("cohorts", []) if isinstance(raw, dict) else []:
@@ -3873,7 +3875,7 @@ def _save_predicted_liquidation_state():
         cohorts = [dict(row) for row in PREDICTED_LIQUIDATION_COHORTS if row["ts"] >= cutoff]
         stats = dict(PREDICTED_LIQUIDATION_STATS)
     try:
-        _write_json_atomic(PREDICTED_LIQUIDATION_STATE_PATH, {"cohorts": cohorts[-2000:], "stats": stats})
+        _write_json_atomic(PREDICTED_LIQUIDATION_STATE_PATH, {"schema_version": 1, "cohorts": cohorts[-2000:], "stats": stats})
     except Exception as e:
         if time.time() - _safe_float(getattr(_save_predicted_liquidation_state, "_last_err_ts", 0.0), 0.0) > 300:
             print(f"⚠️ 儲存預測強平狀態失敗: {e}")
@@ -4002,10 +4004,15 @@ def _score_predicted_liquidation_event(event):
     if event is None:
         return
     snapshot = get_predicted_liquidation_snapshot(event["price"])
-    matching = [
+    candidates = [
         row for row in snapshot.get("predicted_liquidation_zones", [])
         if row.get("dominant_side") == event["liquidation_side"]
-        and abs(_safe_float(row.get("price"), 0.0) - event["price"]) / event["price"] <= 0.0075
+    ]
+    if not candidates:
+        return
+    matching = [
+        row for row in candidates
+        if abs(_safe_float(row.get("price"), 0.0) - event["price"]) / event["price"] <= 0.0075
     ]
     with PREDICTED_LIQUIDATION_LOCK:
         PREDICTED_LIQUIDATION_STATS["evaluated_events"] += 1
