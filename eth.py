@@ -3331,6 +3331,15 @@ def analyze_news_text(raw_text, log_result=True):
 
 
 # 新增: 標準化新聞訊息格式 + 顯示 AI 學習進度
+def _news_direction_icon(analysis):
+    bias = _safe_int((analysis or {}).get("bias"), 0) if isinstance(analysis, dict) else 0
+    if bias > 0:
+        return "🔴"
+    if bias < 0:
+        return "🟢"
+    return "🟡"
+
+
 def build_news_message(news_text, now_time=None, analysis=None):
     if now_time is None:
         now_time = datetime.datetime.now().strftime("%H:%M:%S")
@@ -3349,21 +3358,22 @@ def build_news_message(news_text, now_time=None, analysis=None):
     sentiment = analysis["sentiment"]
     impact = analysis["impact"]
     confidence = analysis["ai_confidence"]
+    direction_icon = _news_direction_icon(analysis)
     
     # ===== 顯示 AI 學習狀態 =====
     accuracy_info = get_prediction_accuracy()
     accuracy_str = f"準率: {accuracy_info['accuracy']}% ({accuracy_info['correct']}/{accuracy_info['total']})" if accuracy_info['total'] > 0 else "準率: 初始化中"
 
     return (
-        f"🟡 市場快訊（即時）\n"
+        f"{direction_icon} 新聞(中文): {zh_text}\n"
         f"⏰ {now_time}\n"
         f"━━━━━━━━━━━━━━\n"
+        f"市場快訊（即時）\n"
         f"來源: {source}\n"
         f"📊 解讀: {sentiment}\n"
         f"🎯 置信度: {confidence:.1%}\n"
         f"🧠 {accuracy_str}\n"
         f"🔥 影響: {impact}\n"
-        f"🌐 新聞(中文): {zh_text}\n"
         f"📝 原文: {raw_text}\n"
         f"━━━━━━━━━━━━━━"
     )
