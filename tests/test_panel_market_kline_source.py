@@ -140,6 +140,33 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cross-check failed"):
             panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
 
+    @patch("panel_realtime_server.time.time", return_value=2000.0)
+    def test_recent_valid_mark_price_can_cover_brief_refresh_failure(self, _time):
+        cached = {
+            "ts": 1998.0,
+            "payload": {
+                "validated": True,
+                "price": 1874.62,
+                "exchange_ts": 1999.0,
+            },
+        }
+
+        payload = panel_realtime_server._usable_cached_market_price(cached, 2000.0)
+
+        self.assertEqual(payload["price"], 1874.62)
+
+    def test_stale_mark_price_cannot_cover_refresh_failure(self):
+        cached = {
+            "ts": 1900.0,
+            "payload": {
+                "validated": True,
+                "price": 1874.62,
+                "exchange_ts": 1900.0,
+            },
+        }
+
+        self.assertIsNone(panel_realtime_server._usable_cached_market_price(cached, 2000.0))
+
 
 if __name__ == "__main__":
     unittest.main()

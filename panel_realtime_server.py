@@ -196,9 +196,15 @@ CLIENTS = set()
 CLIENTS_LOCK = asyncio.Lock()
 MARKET_DATA_CACHE = {}
 MARKET_DATA_LOCK = asyncio.Lock()
+MARKET_PRICE_REFRESH_LOCK = asyncio.Lock()
+MARKET_PRICE_FAILURE_UNTIL = {}
 MARKET_DATA_TTL_SEC = max(3.0, _safe_float_env("POSITION_PANEL_MARKET_DATA_TTL_SEC", 8.0))
 MARKET_LIVE_DATA_TTL_SEC = 3.0
 MARKET_PRICE_TTL_SEC = max(0.5, _safe_float_env("POSITION_PANEL_MARKET_PRICE_TTL_SEC", 1.0))
+MARKET_PRICE_ERROR_COOLDOWN_SEC = max(
+    0.5,
+    _safe_float_env("POSITION_PANEL_MARKET_PRICE_ERROR_COOLDOWN_SEC", 2.0),
+)
 MARKET_PRICE_MAX_AGE_SEC = max(2.0, _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_AGE_SEC", 10.0))
 MARKET_PRICE_MAX_DEVIATION_RATE = max(
     0.001,
@@ -386,6 +392,24 @@ def _fetch_binance_mark_price_sync(symbol: str) -> dict:
         "exchange_ts": exchange_ts_ms / 1000.0,
         "max_deviation_rate": max_deviation,
     }
+
+
+def _usable_cached_market_price(cached, now_ts: float):
+    if not isinstance(cached, dict):
+        return None
+    payload = cached.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        exchange_ts = float(payload.get("exchange_ts", 0.0) or 0.0)
+        price = float(payload.get("price", 0.0) or 0.0)
+    except Exception:
+        return None
+    if payload.get("validated") is not True or price <= 0 or exchange_ts <= 0:
+        return None
+    if max(0.0, float(now_ts) - exchange_ts) > MARKET_PRICE_MAX_AGE_SEC:
+        return None
+    return dict(payload)
 
 
 def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
@@ -954,7 +978,14 @@ async def local_position_snapshot():
     position_path = Path(__file__).resolve().parent / "docs" / "position.json"
     if not position_path.exists():
         raise HTTPException(status_code=404, detail="position snapshot not found")
-    return FileResponse(position_path, media_type="application/json")
+    # The bot replaces this snapshot frequently. Buffer one complete version so
+    # a concurrent replacement cannot make FileResponse's Content-Length differ
+    # from the bytes that uvicorn eventually sends.
+    try:
+        payload = position_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="position snapshot not found") from exc
+    return Response(content=payload, media_type="application/json", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/world-map.svg")
@@ -1045,26 +1076,51 @@ async def get_market_price(request: Request):
         if cached and now_ts - float(cached.get("ts", 0.0)) < MARKET_PRICE_TTL_SEC:
             return JSONResponse(dict(cached.get("payload") or {}))
 
-    try:
-        snapshot = await asyncio.to_thread(_fetch_binance_mark_price_sync, symbol)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"mark price unavailable: {exc}") from exc
+    # Collapse simultaneous browser/bot refreshes into one Binance request.
+    # Without this lock, a brief upstream failure causes every waiting client
+    # to retry independently and amplifies the outage into a local 502 storm.
+    async with MARKET_PRICE_REFRESH_LOCK:
+        now_ts = time.time()
+        async with MARKET_DATA_LOCK:
+            cached = MARKET_DATA_CACHE.get(cache_key)
+            if cached and now_ts - float(cached.get("ts", 0.0)) < MARKET_PRICE_TTL_SEC:
+                return JSONResponse(dict(cached.get("payload") or {}))
 
-    payload = {
-        "ok": True,
-        "symbol": symbol,
-        "source": "binance_mark_price",
-        "validated": True,
-        "price": snapshot["price"],
-        "index_price": snapshot["index_price"],
-        "last_price": snapshot["last_price"],
-        "exchange_ts": snapshot["exchange_ts"],
-        "max_deviation_rate": snapshot["max_deviation_rate"],
-        "ts": int(now_ts),
-    }
-    async with MARKET_DATA_LOCK:
-        MARKET_DATA_CACHE[cache_key] = {"ts": now_ts, "payload": payload}
-    return JSONResponse(payload)
+        failure_until = float(MARKET_PRICE_FAILURE_UNTIL.get(cache_key, 0.0) or 0.0)
+        if now_ts < failure_until:
+            fallback = _usable_cached_market_price(cached, now_ts)
+            if fallback is not None:
+                fallback["cached"] = True
+                return JSONResponse(fallback)
+            raise HTTPException(status_code=503, detail="mark price refresh cooling down")
+
+        try:
+            snapshot = await asyncio.to_thread(_fetch_binance_mark_price_sync, symbol)
+        except Exception as exc:
+            MARKET_PRICE_FAILURE_UNTIL[cache_key] = now_ts + MARKET_PRICE_ERROR_COOLDOWN_SEC
+            fallback = _usable_cached_market_price(cached, now_ts)
+            if fallback is not None:
+                fallback["cached"] = True
+                return JSONResponse(fallback)
+            raise HTTPException(status_code=502, detail=f"mark price unavailable: {exc}") from exc
+
+        MARKET_PRICE_FAILURE_UNTIL.pop(cache_key, None)
+
+        payload = {
+            "ok": True,
+            "symbol": symbol,
+            "source": "binance_mark_price",
+            "validated": True,
+            "price": snapshot["price"],
+            "index_price": snapshot["index_price"],
+            "last_price": snapshot["last_price"],
+            "exchange_ts": snapshot["exchange_ts"],
+            "max_deviation_rate": snapshot["max_deviation_rate"],
+            "ts": int(now_ts),
+        }
+        async with MARKET_DATA_LOCK:
+            MARKET_DATA_CACHE[cache_key] = {"ts": now_ts, "payload": payload}
+        return JSONResponse(payload)
 
 
 @app.get("/api/panel/state")

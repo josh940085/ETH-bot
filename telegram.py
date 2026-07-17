@@ -12,6 +12,7 @@ if NotOpenSSLWarning is not None:
 
 import json
 import os
+import re
 import time
 
 import requests
@@ -555,6 +556,26 @@ def _is_telegram_poll_timeout_error(err) -> bool:
 	return "Read timed out" in text or "read timeout" in text.lower()
 
 
+def _telegram_poll_retry_after(err) -> int:
+	response = getattr(err, "response", None)
+	if response is None:
+		return 0
+	try:
+		payload = response.json()
+		parameters = payload.get("parameters", {}) if isinstance(payload, dict) else {}
+		return max(0, int(parameters.get("retry_after", 0) or 0))
+	except Exception:
+		try:
+			return max(0, int(response.headers.get("Retry-After", 0) or 0))
+		except Exception:
+			return 0
+
+
+def _redact_telegram_error(err) -> str:
+	text = str(err or "")
+	return re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", text)
+
+
 def _note_telegram_poll_success():
 	global TELEGRAM_POLL_BACKOFF_SEC, TELEGRAM_POLL_LAST_ERROR_KEY, TELEGRAM_POLL_LAST_LOG_TS
 	TELEGRAM_POLL_BACKOFF_SEC = 1.0
@@ -566,9 +587,11 @@ def _handle_telegram_poll_error(err):
 	global TELEGRAM_POLL_BACKOFF_SEC, TELEGRAM_POLL_LAST_ERROR_KEY, TELEGRAM_POLL_LAST_LOG_TS
 
 	now_ts = time.time()
-	text = str(err or "")
+	text = _redact_telegram_error(err)
 	is_conflict = _is_telegram_poll_conflict_error(err)
 	is_timeout = _is_telegram_poll_timeout_error(err)
+	retry_after = _telegram_poll_retry_after(err)
+	is_rate_limit = retry_after > 0 or "429" in text or "too many requests" in text.lower()
 
 	if is_conflict:
 		backoff = max(15.0, TELEGRAM_POLL_BACKOFF_SEC)
@@ -578,6 +601,9 @@ def _handle_telegram_poll_error(err):
 		backoff = min(TELEGRAM_POLL_TIMEOUT_BACKOFF_MAX, max(1.0, TELEGRAM_POLL_BACKOFF_SEC))
 		next_backoff = max(backoff * 1.6, 2.0)
 		TELEGRAM_POLL_BACKOFF_SEC = min(TELEGRAM_POLL_TIMEOUT_BACKOFF_MAX, next_backoff)
+	elif is_rate_limit:
+		backoff = max(float(retry_after), TELEGRAM_POLL_BACKOFF_SEC, 2.0)
+		TELEGRAM_POLL_BACKOFF_SEC = min(TELEGRAM_POLL_BACKOFF_MAX, max(backoff * 2, 5.0))
 	else:
 		backoff = TELEGRAM_POLL_BACKOFF_SEC
 		TELEGRAM_POLL_BACKOFF_SEC = min(TELEGRAM_POLL_BACKOFF_MAX, backoff * 2)
@@ -590,6 +616,10 @@ def _handle_telegram_poll_error(err):
 		error_key = "telegram-read-timeout"
 		message = f"ℹ️ Telegram 連線逾時（{backoff:.0f}s 後重試）: {text}"
 		min_log_interval = max(backoff, 20.0)
+	elif is_rate_limit:
+		error_key = "telegram-429-rate-limit"
+		message = f"⚠️ Telegram 輪詢觸發 429，依 retry_after 等待 {backoff:.0f}s 後重試"
+		min_log_interval = max(backoff, 30.0)
 	else:
 		error_key = text
 		message = f"⚠️ 讀取 Telegram 更新失敗（{backoff:.0f}s 後重試）: {text}"
