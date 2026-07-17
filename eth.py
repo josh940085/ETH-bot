@@ -8965,10 +8965,10 @@ def _evaluate_pending_entry_confirmation(pending, direction, price, score, candl
         return False, "價格資料不足"
 
     max_age = max(60.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_AGE_SEC", 420), 420))
-    min_wait = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 45), 45))
-    max_chase = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_CHASE_RATE", 0.0018), 0.0018))
-    max_reversal = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_REVERSAL_RATE", 0.0025), 0.0025))
-    require_new_candle = str(os.getenv("TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M", "1") or "1").strip().lower() in {
+    min_wait = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 15), 15))
+    max_chase = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_CHASE_RATE", 0.003), 0.003))
+    max_reversal = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_REVERSAL_RATE", 0.0035), 0.0035))
+    require_new_candle = str(os.getenv("TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M", "0") or "0").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -15236,8 +15236,8 @@ def run_bot():
     print(
         "✅ 進場延遲確認: "
         f"{'啟用' if entry_confirm_enabled else '停用'} | "
-        f"wait={os.getenv('TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC', '45')}s | "
-        f"new_5m={os.getenv('TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M', '1')}"
+        f"wait={os.getenv('TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC', '15')}s | "
+        f"new_5m={os.getenv('TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M', '0')}"
     )
     # trade_open 移除，改用 active_trade 控制是否可開單
 
