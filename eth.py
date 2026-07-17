@@ -1367,12 +1367,71 @@ def _news_has_term(text: str, term: str) -> bool:
     needle = str(term or "").lower().strip()
     if not needle:
         return False
+    if re.search(r"[\u4e00-\u9fff]", needle):
+        # Chinese financial terms are commonly joined directly to numbers or
+        # neighboring characters (for example, 暴跌3% or 台股重挫).
+        return needle in haystack
     pattern = r"(?<![a-z0-9])" + re.escape(needle).replace(r"\ ", r"\s+") + r"(?![a-z0-9])"
     return re.search(pattern, haystack) is not None
 
 
 def _news_has_any(text: str, terms) -> bool:
     return any(_news_has_term(text, term) for term in terms)
+
+
+GLOBAL_EQUITY_INDEX_TERMS = [
+    # Global / North America / Latin America
+    "s&p 500", "nasdaq", "dow jones", "russell 2000", "tsx", "s&p/tsx",
+    "ipc mexico", "bmv ipc", "ibovespa", "bovespa", "merval", "ipsa", "colcap",
+    # Europe
+    "stoxx 600", "euro stoxx", "ftse 100", "ftse", "dax", "cac 40", "ibex 35",
+    "ftse mib", "aex", "smi", "omx", "obx", "psi 20", "atx", "bel 20",
+    "wig20", "bux", "px index", "moex", "bist 100", "athex", "iseq",
+    # Asia Pacific
+    "nikkei", "topix", "hang seng", "hsi", "csi 300", "shanghai composite",
+    "shenzhen component", "taiex", "twse", "kospi", "kosdaq", "nifty 50",
+    "sensex", "sti", "set index", "idx composite", "jakarta composite", "jci",
+    "klci", "fbm klci", "psei", "vn-index", "vn index", "asx 200", "nzx 50",
+    "kse 100", "dsex", "cse all share",
+    # Middle East / Africa
+    "tadawul", "tasi", "ta-35", "egx 30", "jse all share", "ftse/jse",
+    "nse all share", "ngx all share", "masi", "dfm general", "adx general", "qe index",
+    # Common Chinese market/index names
+    "美股", "加拿大股市", "墨西哥股市", "巴西股市", "阿根廷股市", "英股", "德股",
+    "法股", "義大利股市", "西班牙股市", "瑞士股市", "荷蘭股市", "歐股", "日股",
+    "韓股", "港股", "陸股", "中國股市", "a股", "印度股市", "新加坡股市", "泰股",
+    "印尼股市", "馬股", "菲股", "越股", "澳股", "紐西蘭股市", "台股", "臺股",
+    "台灣股市", "臺灣股市", "加權指數", "櫃買指數", "沙烏地股市", "以色列股市",
+    "南非股市", "埃及股市", "奈及利亞股市",
+]
+
+GLOBAL_EQUITY_COUNTRY_TERMS = [
+    "united states", "u.s.", "us", "canada", "mexico", "brazil", "argentina", "chile",
+    "colombia", "peru", "united kingdom", "uk", "britain", "germany", "france", "italy",
+    "spain", "portugal", "netherlands", "belgium", "switzerland", "austria", "ireland",
+    "sweden", "norway", "denmark", "finland", "poland", "czech republic", "hungary",
+    "greece", "romania", "russia", "turkey", "japan", "china", "hong kong", "taiwan",
+    "south korea", "korea", "india", "singapore", "thailand", "indonesia", "malaysia",
+    "philippines", "vietnam", "australia", "new zealand", "pakistan", "bangladesh",
+    "sri lanka", "saudi arabia", "israel", "united arab emirates", "uae", "qatar",
+    "kuwait", "egypt", "south africa", "nigeria", "morocco", "kenya",
+]
+
+
+def _is_global_equity_market_scope(text: str) -> bool:
+    """Recognize national stock markets and the main indices across regions."""
+    low = normalize_news_text(text).lower()
+    if _news_has_any(low, GLOBAL_EQUITY_INDEX_TERMS):
+        return True
+
+    market_noun = r"(?:stock\s+markets?|stocks?|shares?|equities|equity\s+markets?|indices|index)"
+    for country in GLOBAL_EQUITY_COUNTRY_TERMS:
+        country_pattern = re.escape(country).replace(r"\ ", r"\s+")
+        if re.search(rf"(?<![a-z0-9]){country_pattern}(?![a-z0-9]).{{0,24}}\b{market_noun}\b", low):
+            return True
+        if re.search(rf"\b{market_noun}\b.{{0,24}}(?<![a-z0-9]){country_pattern}(?![a-z0-9])", low):
+            return True
+    return False
 
 
 def _news_relevance_reason(text: str) -> str:
@@ -1462,11 +1521,8 @@ def _news_relevance_reason(text: str) -> str:
     global_equities = _news_has_any(low, [
         "s&p 500", "nasdaq", "dow jones", "wall st", "wall street", "stock futures",
         "stock market", "global stocks", "world stocks", "european shares", "asian shares",
-        "nikkei", "topix", "hang seng", "csi 300", "stoxx 600", "euro stoxx", "ftse",
-        "dax", "cac 40", "msci world", "emerging markets", "risk-off", "risk off",
-        "taiex", "twse", "taiwan stocks", "taiwan shares", "taiwan weighted",
-        "台股", "臺股", "台灣股市", "臺灣股市", "加權指數", "櫃買指數",
-    ])
+        "msci world", "emerging markets", "risk-off", "risk off",
+    ]) or _is_global_equity_market_scope(low)
     if global_equities and market_move:
         return "global_equities"
 
@@ -1517,18 +1573,14 @@ def _news_relevance_reason(text: str) -> str:
     return ""
 
 
-def _major_taiwan_market_move_override(text: str):
-    """Return a deterministic bias for an unusually large Taiwan index move.
+def _major_equity_market_move_override(text: str):
+    """Return a deterministic bias for an unusually large national-index move.
 
     The generic news model is primarily trained on English crypto/macro text and
-    can otherwise label Chinese TAIEX crash headlines as low-confidence neutral.
+    can otherwise label local-language market crash headlines as neutral.
     """
     low = normalize_news_text(text).lower()
-    taiwan_market = _news_has_any(low, [
-        "taiex", "twse", "taiwan stocks", "taiwan shares", "taiwan weighted",
-        "台股", "臺股", "台灣股市", "臺灣股市", "加權指數", "櫃買指數",
-    ])
-    if not taiwan_market:
+    if not _is_global_equity_market_scope(low):
         return 0, 0.0
 
     percent_moves = [
@@ -1539,7 +1591,13 @@ def _major_taiwan_market_move_override(text: str):
         _safe_float(value.replace(",", ""), 0.0)
         for value in re.findall(r"(?:跌|挫|漲|升|摜|plunge|drop|fall|rise|jump)[^\d]{0,12}([\d,]+(?:\.\d+)?)\s*(?:點|points?)", low)
     ]
-    large_magnitude = max(percent_moves or [0.0]) >= 2.0 or max(point_moves or [0.0]) >= 800.0
+    taiwan_market = _news_has_any(low, [
+        "taiex", "twse", "taiwan stocks", "taiwan shares", "taiwan weighted",
+        "台股", "臺股", "台灣股市", "臺灣股市", "加權指數", "櫃買指數",
+    ])
+    large_magnitude = max(percent_moves or [0.0]) >= 2.0 or (
+        taiwan_market and max(point_moves or [0.0]) >= 800.0
+    )
     strong_bear = _news_has_any(low, [
         "重挫", "大跌", "暴跌", "崩跌", "跌逾", "摜破", "plunge", "plunges",
         "plunged", "tumble", "tumbles", "slump", "slumps", "crash", "selloff", "sell-off",
@@ -3468,12 +3526,12 @@ def analyze_news_text(raw_text, log_result=True):
     final_bias = _refine_neutral_bias(text, ai_bias, ai_confidence)
     event_risk = 0
 
-    taiwan_move_bias, taiwan_move_confidence = _major_taiwan_market_move_override(raw_text)
-    if taiwan_move_bias:
-        final_bias = taiwan_move_bias
-        ai_confidence = max(ai_confidence, taiwan_move_confidence)
-        tags.append("major_taiwan_market_move")
-        fusion_note = "major_taiwan_market_move_override"
+    equity_move_bias, equity_move_confidence = _major_equity_market_move_override(raw_text)
+    if equity_move_bias:
+        final_bias = equity_move_bias
+        ai_confidence = max(ai_confidence, equity_move_confidence)
+        tags.append("major_global_equity_market_move")
+        fusion_note = "major_global_equity_market_move_override"
         event_risk = 1
 
     if ai_confidence < 0.4:
@@ -3770,7 +3828,7 @@ def _looks_like_macro_news_title(text):
         "bank", "banks", "digital franc", "institutional", "taiex", "twse",
         "台股", "臺股", "台灣股市", "臺灣股市", "加權指數", "櫃買指數",
         "重挫", "大跌", "暴跌", "崩跌", "跌逾", "摜破"
-    ]) or len(text.split()) >= 6
+    ]) or _is_global_equity_market_scope(text) or len(text.split()) >= 6
 
 
 def fetch_rss_news(feed_url, source_name):
@@ -15540,11 +15598,11 @@ def run_bot():
                             run_bot.last_news_set.add(startup_key)
                         startup_raw = re.sub(r"^\[[^\]]+\]\s*", "", str(startup_news)).strip()
                         if startup_raw:
-                            urgent_bias, _ = _major_taiwan_market_move_override(startup_raw)
+                            urgent_bias, _ = _major_equity_market_move_override(startup_raw)
                             if urgent_bias and len(urgent_startup_news) < 3:
                                 # Let the normal push path apply persistent dedupe.
                                 # This preserves startup flood protection while not
-                                # suppressing a current TAIEX crash/rally headline.
+                                # suppressing a current national-index crash/rally headline.
                                 urgent_startup_news.append(startup_news)
                             else:
                                 _register_news_push_if_new(startup_raw)

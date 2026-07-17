@@ -43,20 +43,53 @@ class NewsRelevanceTests(unittest.TestCase):
             "China military drill near Taiwan Strait raises blockade fears": "geopolitical",
             "台股盤中跌逾2000點 AI、權值股重挫": "global_equities",
             "TAIEX plunges 4% as chip stocks lead regional selloff": "global_equities",
+            "Brazil's Ibovespa tumbles 4% in broad market selloff": "global_equities",
+            "Germany's DAX plunges as European shares retreat": "global_equities",
+            "India Sensex plunges 3% as banks lead losses": "global_equities",
+            "Saudi Arabia stocks plunge 3% on oil-market fears": "global_equities",
+            "South Africa JSE All Share plunges 2.4%": "global_equities",
+            "澳股暴跌3% 資源股領跌": "global_equities",
+            "韓股大跌4% 外資賣壓沉重": "global_equities",
         }
         for headline, reason in expected.items():
             with self.subTest(headline=headline):
                 self.assertEqual(eth._news_relevance_reason(headline), reason)
 
-    def test_major_taiwan_selloff_overrides_low_confidence_model(self):
+    def test_major_national_selloffs_override_low_confidence_model(self):
         analysis = eth.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
         self.assertEqual(analysis["bias"], -2)
         self.assertGreaterEqual(analysis["ai_confidence"], 0.82)
-        self.assertEqual(analysis["fusion_method"], "major_taiwan_market_move_override")
+        self.assertEqual(analysis["fusion_method"], "major_global_equity_market_move_override")
+
+        for headline in [
+            "Japan's Nikkei plunges 3.2% as chip stocks slide",
+            "Brazil stocks tumble 4% after fiscal shock",
+            "印度股市暴跌3% 銀行股領跌",
+            "南非股市大跌2.5%",
+        ]:
+            with self.subTest(headline=headline):
+                analysis = eth.analyze_news_text(headline, log_result=False)
+                self.assertEqual(analysis["bias"], -2)
+                self.assertGreaterEqual(analysis["ai_confidence"], 0.82)
 
     def test_small_taiwan_opening_move_does_not_force_push(self):
-        bias, confidence = eth._major_taiwan_market_move_override("台股開盤跌390.9點")
+        bias, confidence = eth._major_equity_market_move_override("台股開盤跌390.9點")
         self.assertEqual((bias, confidence), (0, 0.0))
+
+    def test_small_country_market_move_does_not_force_strong_bias(self):
+        bias, confidence = eth._major_equity_market_move_override("Canadian stocks fall 0.3%")
+        self.assertEqual((bias, confidence), (0, 0.0))
+
+    def test_every_configured_country_and_index_is_in_global_scope(self):
+        for country in eth.GLOBAL_EQUITY_COUNTRY_TERMS:
+            headline = f"{country} stocks plunge 3%"
+            with self.subTest(country=country):
+                self.assertTrue(eth._is_global_equity_market_scope(headline))
+                self.assertEqual(eth._major_equity_market_move_override(headline)[0], -2)
+
+        for index_name in eth.GLOBAL_EQUITY_INDEX_TERMS:
+            with self.subTest(index=index_name):
+                self.assertTrue(eth._is_global_equity_market_scope(index_name))
 
     def test_news_message_preserves_taiwan_rss_source(self):
         analysis = eth.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
