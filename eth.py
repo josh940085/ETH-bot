@@ -1456,12 +1456,16 @@ def _news_relevance_reason(text: str) -> str:
         "surges", "jump", "jumps", "slide", "slides", "tumble", "tumbles", "rebound",
         "rebounds", "advance", "advances",
         "record high", "record low", "one-month low", "one-year high", "volatile",
+        "上漲", "大漲", "暴漲", "勁揚", "重挫", "大跌", "暴跌", "崩跌", "下跌",
+        "跌逾", "跌破", "摜破", "賣壓", "拋售",
     ])
     global_equities = _news_has_any(low, [
         "s&p 500", "nasdaq", "dow jones", "wall st", "wall street", "stock futures",
         "stock market", "global stocks", "world stocks", "european shares", "asian shares",
         "nikkei", "topix", "hang seng", "csi 300", "stoxx 600", "euro stoxx", "ftse",
         "dax", "cac 40", "msci world", "emerging markets", "risk-off", "risk off",
+        "taiex", "twse", "taiwan stocks", "taiwan shares", "taiwan weighted",
+        "台股", "臺股", "台灣股市", "臺灣股市", "加權指數", "櫃買指數",
     ])
     if global_equities and market_move:
         return "global_equities"
@@ -1511,6 +1515,44 @@ def _news_relevance_reason(text: str) -> str:
         return "geopolitical"
 
     return ""
+
+
+def _major_taiwan_market_move_override(text: str):
+    """Return a deterministic bias for an unusually large Taiwan index move.
+
+    The generic news model is primarily trained on English crypto/macro text and
+    can otherwise label Chinese TAIEX crash headlines as low-confidence neutral.
+    """
+    low = normalize_news_text(text).lower()
+    taiwan_market = _news_has_any(low, [
+        "taiex", "twse", "taiwan stocks", "taiwan shares", "taiwan weighted",
+        "台股", "臺股", "台灣股市", "臺灣股市", "加權指數", "櫃買指數",
+    ])
+    if not taiwan_market:
+        return 0, 0.0
+
+    percent_moves = [
+        _safe_float(value, 0.0)
+        for value in re.findall(r"(\d+(?:\.\d+)?)\s*%", low)
+    ]
+    point_moves = [
+        _safe_float(value.replace(",", ""), 0.0)
+        for value in re.findall(r"(?:跌|挫|漲|升|摜|plunge|drop|fall|rise|jump)[^\d]{0,12}([\d,]+(?:\.\d+)?)\s*(?:點|points?)", low)
+    ]
+    large_magnitude = max(percent_moves or [0.0]) >= 2.0 or max(point_moves or [0.0]) >= 800.0
+    strong_bear = _news_has_any(low, [
+        "重挫", "大跌", "暴跌", "崩跌", "跌逾", "摜破", "plunge", "plunges",
+        "plunged", "tumble", "tumbles", "slump", "slumps", "crash", "selloff", "sell-off",
+    ])
+    strong_bull = _news_has_any(low, [
+        "大漲", "暴漲", "勁揚", "漲逾", "surge", "surges", "soar", "soars",
+        "jump", "jumps", "rally", "rallies",
+    ])
+    if strong_bear or (large_magnitude and _news_has_any(low, ["跌", "挫", "摜", "drop", "fall", "lower"])):
+        return -2, 0.82
+    if strong_bull or (large_magnitude and _news_has_any(low, ["漲", "升", "rise", "gain", "higher"])):
+        return 2, 0.82
+    return 0, 0.0
 
 
 def _news_dedupe_key(text: str) -> str:
@@ -3426,6 +3468,14 @@ def analyze_news_text(raw_text, log_result=True):
     final_bias = _refine_neutral_bias(text, ai_bias, ai_confidence)
     event_risk = 0
 
+    taiwan_move_bias, taiwan_move_confidence = _major_taiwan_market_move_override(raw_text)
+    if taiwan_move_bias:
+        final_bias = taiwan_move_bias
+        ai_confidence = max(ai_confidence, taiwan_move_confidence)
+        tags.append("major_taiwan_market_move")
+        fusion_note = "major_taiwan_market_move_override"
+        event_risk = 1
+
     if ai_confidence < 0.4:
         tags.append("low_confidence")
     else:
@@ -3479,12 +3529,8 @@ def build_news_message(news_text, now_time=None, analysis=None):
     if now_time is None:
         now_time = datetime.datetime.now().strftime("%H:%M:%S")
 
-    source = "News"
-    if str(news_text).startswith("[CoinDesk]"):
-        source = "CoinDesk"
-    elif str(news_text).startswith("[Cointelegraph]"):
-        source = "Cointelegraph"
-
+    source_match = re.match(r"^\[([^\]]+)\]\s*", str(news_text))
+    source = source_match.group(1).strip() if source_match else "News"
     raw_text = re.sub(r"^\[[^\]]+\]\s*", "", str(news_text)).strip()
     zh_text = translate_news_to_zh(raw_text)
 
@@ -3721,7 +3767,9 @@ def _looks_like_macro_news_title(text):
         "market", "token", "listing", "delist", "hack", "exploit", "lawsuit",
         "approval", "approved", "debut", "launch", "listing", "surge", "drop",
         "plunge", "rally", "outflow", "inflow", "ceasefire", "war", "sanction",
-        "bank", "banks", "digital franc", "institutional"
+        "bank", "banks", "digital franc", "institutional", "taiex", "twse",
+        "台股", "臺股", "台灣股市", "臺灣股市", "加權指數", "櫃買指數",
+        "重挫", "大跌", "暴跌", "崩跌", "跌逾", "摜破"
     ]) or len(text.split()) >= 6
 
 
@@ -3780,6 +3828,10 @@ def fetch_rss_news(feed_url, source_name):
 def fetch_macro_rss_news():
     """聚合較穩定的 RSS / Atom 快訊來源。"""
     feeds = [
+        # 0. 台灣市場（中央社與自由財經官方 RSS）
+        ("https://feeds.feedburner.com/rsscna/finance", "中央社財經"),
+        ("https://news.ltn.com.tw/rss/business.xml", "自由財經"),
+
         # 1. Investing（新聞）- 替換失效鏈接
         ("https://www.investing.com/rss/news.rss", "Investing"),
         ("https://www.investing.com/rss/news_25.rss", "Investing Crypto"),
@@ -3802,7 +3854,7 @@ def fetch_macro_rss_news():
     if _is_truthy(os.getenv("RSS_ENABLE_FOREXLIVE", "0")):
         feeds.append(("https://www.forexlive.com/feed/", "ForexLive"))
 
-    aggregated = []
+    source_batches = []
     for feed_url, source_name in feeds:
         now_feed = time.time()
         cooldown_key = f"rss_cooldown_until_{source_name.lower()}"
@@ -3810,7 +3862,7 @@ def fetch_macro_rss_news():
         if cooldown_until > now_feed:
             continue
         try:
-            aggregated.extend(fetch_rss_news(feed_url, source_name))
+            source_batches.append(fetch_rss_news(feed_url, source_name))
             setattr(fetch_macro_rss_news, f"rss_fail_count_{source_name.lower()}", 0)
         except Exception as e:
             now_err = now_feed
@@ -3825,6 +3877,15 @@ def fetch_macro_rss_news():
             if now_err - last_err > max(300, _safe_int(os.getenv("RSS_ERROR_LOG_INTERVAL_SEC", 1800), 1800)):
                 print(f"⚠️ {source_name} RSS 暫時略過，已進入冷卻:", repr(e))
                 setattr(fetch_macro_rss_news, key, now_err)
+
+    # Round-robin the sources so the first high-volume feed cannot consume the
+    # global 50-item cap and starve Taiwan or crypto-specific feeds.
+    aggregated = []
+    max_batch_len = max((len(batch) for batch in source_batches), default=0)
+    for item_index in range(max_batch_len):
+        for batch in source_batches:
+            if item_index < len(batch):
+                aggregated.append(batch[item_index])
 
     dedup = []
     seen = set()
@@ -15472,14 +15533,22 @@ def run_bot():
                     print("\n" + snapshot_header)
                     # 啟動時 RSS 會回傳目前仍在 feed 裡的舊標題；只拿來建立
                     # 面板/分析快照並寫入持久化去重，不重新推送一輪。
+                    urgent_startup_news = []
                     for startup_news in news_list:
                         startup_key = _news_dedupe_key(startup_news)
                         if startup_key:
                             run_bot.last_news_set.add(startup_key)
                         startup_raw = re.sub(r"^\[[^\]]+\]\s*", "", str(startup_news)).strip()
                         if startup_raw:
-                            _register_news_push_if_new(startup_raw)
-                    new_news = []
+                            urgent_bias, _ = _major_taiwan_market_move_override(startup_raw)
+                            if urgent_bias and len(urgent_startup_news) < 3:
+                                # Let the normal push path apply persistent dedupe.
+                                # This preserves startup flood protection while not
+                                # suppressing a current TAIEX crash/rally headline.
+                                urgent_startup_news.append(startup_news)
+                            else:
+                                _register_news_push_if_new(startup_raw)
+                    new_news = urgent_startup_news
                     run_bot.startup_news_snapshot_sent = True
 
                 new_news = new_news[:15]

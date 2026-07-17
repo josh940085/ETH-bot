@@ -41,10 +41,31 @@ class NewsRelevanceTests(unittest.TestCase):
             "Oil rises as Iran threatens Hormuz disruption": "commodities",
             "Russia-Ukraine ceasefire talks collapse amid escalation": "geopolitical",
             "China military drill near Taiwan Strait raises blockade fears": "geopolitical",
+            "台股盤中跌逾2000點 AI、權值股重挫": "global_equities",
+            "TAIEX plunges 4% as chip stocks lead regional selloff": "global_equities",
         }
         for headline, reason in expected.items():
             with self.subTest(headline=headline):
                 self.assertEqual(eth._news_relevance_reason(headline), reason)
+
+    def test_major_taiwan_selloff_overrides_low_confidence_model(self):
+        analysis = eth.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
+        self.assertEqual(analysis["bias"], -2)
+        self.assertGreaterEqual(analysis["ai_confidence"], 0.82)
+        self.assertEqual(analysis["fusion_method"], "major_taiwan_market_move_override")
+
+    def test_small_taiwan_opening_move_does_not_force_push(self):
+        bias, confidence = eth._major_taiwan_market_move_override("台股開盤跌390.9點")
+        self.assertEqual((bias, confidence), (0, 0.0))
+
+    def test_news_message_preserves_taiwan_rss_source(self):
+        analysis = eth.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
+        message = eth.build_news_message(
+            "[中央社財經] 台股盤中跌逾2000點 AI、權值股重挫",
+            now_time="12:30:00",
+            analysis=analysis,
+        )
+        self.assertIn("來源: 中央社財經", message)
 
     def test_global_scope_still_rejects_routine_company_noise(self):
         headlines = [
