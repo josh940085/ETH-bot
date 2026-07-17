@@ -34,6 +34,37 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 reference_price=1871.40,
             )
 
+    def test_real_order_priority_is_enabled_by_default(self):
+        with patch.dict(eth.os.environ, {}, clear=True):
+            self.assertTrue(eth._real_order_priority_enabled())
+
+    def test_panel_marks_binance_as_authoritative_for_real_position(self):
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "long",
+                "entry": 1800.0,
+                "avg_entry": 1800.0,
+                "tp": 1830.0,
+                "sl": 1780.0,
+                "size": 0.03,
+                "position_qty": 0.01,
+                "open_time": 1990.0,
+            }
+        )
+        with (
+            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "_is_real_copy_enabled", return_value=True),
+            patch.object(eth, "_refresh_position_panel_account_state"),
+            patch.object(eth, "_write_json_atomic"),
+            patch.object(eth, "_queue_panel_realtime_publish"),
+        ):
+            eth.sync_position_panel(1810.0)
+
+        self.assertEqual(eth.POSITION_PANEL_STATE["execution_priority"], "real_order")
+        self.assertEqual(eth.POSITION_PANEL_STATE["execution_mode"], "real")
+        self.assertEqual(eth.POSITION_PANEL_STATE["position_source"], "binance")
+
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"

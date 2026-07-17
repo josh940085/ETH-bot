@@ -36,8 +36,41 @@ BACKTEST_LEARN_PATH = ai_data_path("backtest_ai_data.csv")
 MAINTENANCE_REPORT_PATH = data_path("maintenance_latest_report.json")
 HISTORICAL_BACKTEST_REPORT_PATH = data_path("historical_backtest_latest_report.json")
 MONTHLY_KLINE_DOWNLOAD_REPORT_PATH = data_path("monthly_kline_download_latest.json")
+POSITION_PANEL_PATH = data_path("docs/position.json")
 SUPERVISOR_LOCK_PATH = data_path(".program_supervisor.lock")
 SUPERVISOR_LOCK_FH = None
+
+
+def _real_execution_busy(env=None) -> bool:
+    env = env or os.environ
+    priority_enabled = str(env.get("REAL_ORDER_PRIORITY_ENABLED", "1") or "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    real_copy_enabled = str(env.get("BINANCE_REAL_COPY_ENABLED", "0") or "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if not (priority_enabled and real_copy_enabled):
+        return False
+    try:
+        payload = json.loads(POSITION_PANEL_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("open") and str(payload.get("position_source") or "binance") == "binance":
+        return True
+    return str(payload.get("strategy_execution_status") or "") in {"pending_confirmation", "submitting"}
+
+
+def _preempt_background_process_for_real_order(proc, label: str) -> bool:
+    if proc is None or proc.poll() is not None:
+        return False
+    if getattr(proc, "_real_order_preempt_sent", False):
+        return False
+    proc._real_order_preempt_sent = True
+    proc.terminate()
+    print(f"⏸️ 實單第一順位：停止背景{label}，先保留資源給實單管理")
+    return True
 
 
 def _run_git_command(args, timeout=60):
@@ -499,6 +532,12 @@ def run_once() -> int:
                 return SUPERVISOR_STOP_EXIT_CODE
             return code
 
+        real_execution_busy = _real_execution_busy(env)
+        if real_execution_busy:
+            _preempt_background_process_for_real_order(backtest_proc, "回測")
+            _preempt_background_process_for_real_order(historical_backtest_proc, "歷年回測")
+            _preempt_background_process_for_real_order(monthly_kline_proc, "K線下載")
+
         if backtest_proc is not None:
             backtest_code = backtest_proc.poll()
             if backtest_code is not None:
@@ -513,7 +552,7 @@ def run_once() -> int:
                     print(output)
                 next_backtest_ts = time.time() + backtest_settings["interval_sec"]
                 backtest_proc = None
-        elif backtest_settings["enabled"] and maintenance_proc is None and historical_backtest_proc is None and monthly_kline_proc is None and time.time() >= next_backtest_ts:
+        elif backtest_settings["enabled"] and not real_execution_busy and maintenance_proc is None and historical_backtest_proc is None and monthly_kline_proc is None and time.time() >= next_backtest_ts:
             backtest_proc = _start_backtest_process(env, backtest_settings)
             next_backtest_ts = time.time() + backtest_settings["interval_sec"]
 
@@ -536,6 +575,7 @@ def run_once() -> int:
                 maintenance_proc = None
         elif (
             maintenance_settings["enabled"]
+            and not real_execution_busy
             and backtest_proc is None
             and historical_backtest_proc is None
             and monthly_kline_proc is None
@@ -553,6 +593,7 @@ def run_once() -> int:
                 historical_backtest_proc = None
         elif (
             historical_backtest_settings["enabled"]
+            and not real_execution_busy
             and backtest_proc is None
             and maintenance_proc is None
             and monthly_kline_proc is None
@@ -581,6 +622,7 @@ def run_once() -> int:
                 monthly_kline_proc = None
         elif (
             monthly_kline_settings["enabled"]
+            and not real_execution_busy
             and backtest_proc is None
             and maintenance_proc is None
             and historical_backtest_proc is None

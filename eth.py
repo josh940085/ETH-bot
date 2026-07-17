@@ -4992,6 +4992,11 @@ def _is_real_copy_enabled() -> bool:
     return _is_truthy(os.getenv("BINANCE_REAL_COPY_ENABLED", "0"))
 
 
+def _real_order_priority_enabled() -> bool:
+    """Keep Binance execution authoritative and prevent local pseudo-positions."""
+    return _is_truthy(os.getenv("REAL_ORDER_PRIORITY_ENABLED", "1"))
+
+
 def _has_valid_tp_sl(trade) -> bool:
     if not isinstance(trade, dict):
         return False
@@ -7459,6 +7464,21 @@ def sync_position_panel(current_price=None):
 
     payload.update(
         {
+            "execution_priority": "real_order" if _real_order_priority_enabled() else "strategy_signal",
+            "execution_mode": (
+                "real"
+                if _get_follow_mode_enabled() and _is_real_copy_enabled()
+                else "real_required"
+                if _real_order_priority_enabled()
+                else "local_tracking"
+            ),
+            "position_source": (
+                "binance"
+                if active_trade.get("open") and _get_follow_mode_enabled() and _is_real_copy_enabled()
+                else "none"
+                if not active_trade.get("open")
+                else "local_tracking"
+            ),
             "strategy_price": round(_safe_float(POSITION_PANEL_STATE.get("strategy_price"), 0.0), 4),
             "strategy_price_ts": _safe_int(POSITION_PANEL_STATE.get("strategy_price_ts"), 0),
             "strategy_evaluated_ts": _safe_int(POSITION_PANEL_STATE.get("strategy_evaluated_ts"), 0),
@@ -15239,6 +15259,14 @@ def run_bot():
         f"wait={os.getenv('TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC', '15')}s | "
         f"new_5m={os.getenv('TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M', '0')}"
     )
+    print(
+        "✅ 執行順位: "
+        + (
+            "Binance 實單第一；成交確認後才通知與寫入學習"
+            if _real_order_priority_enabled()
+            else "允許本地追蹤模式"
+        )
+    )
     # trade_open 移除，改用 active_trade 控制是否可開單
 
     last_update_id = None
@@ -15392,6 +15420,27 @@ def run_bot():
             )
             POSITION_PANEL_STATE["binance_mark_price"] = price
             POSITION_PANEL_STATE["binance_mark_price_ts"] = _safe_int(mark_payload.get("exchange_ts"), int(time.time()))
+
+            # Binance is the position source of truth. Synchronize before any
+            # shadow/background analysis so manual fills and exchange-side
+            # closes are observed before local strategy state is used.
+            if (
+                _real_order_priority_enabled()
+                and _get_follow_mode_enabled()
+                and _is_real_copy_enabled()
+                and (time.time() - last_binance_sync_ts) >= 12
+            ):
+                try:
+                    ok, sync_msg = sync_active_trade_from_binance(send_notice=False)
+                    if ok:
+                        last_binance_sync_ts = time.time()
+                    elif time.time() - getattr(run_bot, "last_binance_priority_sync_error_ts", 0.0) >= 60:
+                        print(f"⚠️ 實單優先同步暫未完成: {sync_msg}")
+                        run_bot.last_binance_priority_sync_error_ts = time.time()
+                except Exception as sync_error:
+                    if time.time() - getattr(run_bot, "last_binance_priority_sync_error_ts", 0.0) >= 60:
+                        print(f"⚠️ 實單優先同步失敗: {sync_error}")
+                        run_bot.last_binance_priority_sync_error_ts = time.time()
             sr_analysis = analyze_multi_tf_sr(price)
 
             # ===== Macro（時事）=====
@@ -15514,10 +15563,11 @@ def run_bot():
                 "host_style_kline_order": timeframe_kline_view.get("order", ""),
                 "timeframe_conflict": bool(timeframe_kline_view.get("conflict", False)),
             }
-            _start_mlx_auto_analysis(
-                f"ETHUSDT:15m:{completed_15m}",
-                auto_market_context,
-            )
+            if not (_real_order_priority_enabled() and active_trade.get("open")):
+                _start_mlx_auto_analysis(
+                    f"ETHUSDT:15m:{completed_15m}",
+                    auto_market_context,
+                )
 
             _process_sl_followup_reviews(df_1m, price)
             _process_pending_news_evaluations(price)
@@ -15673,39 +15723,40 @@ def run_bot():
                     news_text += f"- {preview}\n"
 
             # ===== 真實交易管理（TP/SL） =====
-            evaluate_mlx_learning(shadow_price)
-            _process_binance_host_learning(
-                price,
-                {
-                    "price": price,
-                    "regime": regime,
-                    "htf": htf,
-                    "mid_trend": mid_trend,
-                    "breakout": breakout,
-                    "macro_bias": _compute_macro_bias(
-                        sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
-                    ),
-                    "news_bias": news_bias,
-                    "event_risk": event_risk,
-                    "symbol": "ETHUSDT",
-                },
-            )
-            _process_binance_host_live_learning(
-                price,
-                {
-                    "price": price,
-                    "regime": regime,
-                    "htf": htf,
-                    "mid_trend": mid_trend,
-                    "breakout": breakout,
-                    "macro_bias": _compute_macro_bias(
-                        sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
-                    ),
-                    "news_bias": news_bias,
-                    "event_risk": event_risk,
-                    "symbol": "ETHUSDT",
-                },
-            )
+            if not (_real_order_priority_enabled() and active_trade.get("open")):
+                evaluate_mlx_learning(shadow_price)
+                _process_binance_host_learning(
+                    price,
+                    {
+                        "price": price,
+                        "regime": regime,
+                        "htf": htf,
+                        "mid_trend": mid_trend,
+                        "breakout": breakout,
+                        "macro_bias": _compute_macro_bias(
+                            sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
+                        ),
+                        "news_bias": news_bias,
+                        "event_risk": event_risk,
+                        "symbol": "ETHUSDT",
+                    },
+                )
+                _process_binance_host_live_learning(
+                    price,
+                    {
+                        "price": price,
+                        "regime": regime,
+                        "htf": htf,
+                        "mid_trend": mid_trend,
+                        "breakout": breakout,
+                        "macro_bias": _compute_macro_bias(
+                            sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
+                        ),
+                        "news_bias": news_bias,
+                        "event_risk": event_risk,
+                        "symbol": "ETHUSDT",
+                    },
+                )
             if active_trade["open"]:
                 position_direction = str(active_trade.get("direction") or "")
                 td_position_warning = (
@@ -15726,15 +15777,6 @@ def run_bot():
                         print(warning)
                         _send_trade_notification(warning, priority=True)
                         run_bot.last_td_position_warning_key = td_warning_key
-
-                # 實單跟單時定期回同步 Binance，確保面板與開倉點位/持倉量一致。
-                if _get_follow_mode_enabled() and _is_real_copy_enabled() and (time.time() - last_binance_sync_ts) >= 12:
-                    try:
-                        ok, _ = sync_active_trade_from_binance(send_notice=False)
-                        if ok:
-                            last_binance_sync_ts = time.time()
-                    except Exception:
-                        pass
 
                 current = price
                 candle_high = float(df_1m["high"].iloc[-1]) if len(df_1m) > 0 else current
@@ -16558,23 +16600,31 @@ def run_bot():
                 _set_break_even_state(False)
                 # 注意：active_trade["open"] 尚未設為 True，等待跟單確認後再設定
 
-                print("📤 發送 Telegram")
-                send_telegram(msg, priority=True)
-                last_signal_cache = msg
-                last_trade_time = now_ts
-                last_trade_signal = final
-                last_entry_price = price
-                last_direction = final
-
-                if _get_follow_mode_enabled():
+                real_execution_ready = _get_follow_mode_enabled() and _is_real_copy_enabled()
+                if real_execution_ready:
+                    _update_panel_execution_snapshot(
+                        decision,
+                        price,
+                        "submitting",
+                        reason="Binance 實單送出中",
+                        actual_open=False,
+                    )
+                    sync_position_panel(price)
                     copy_ok, copy_msg = execute_copy_trade_open(
                         direction=direction,
                         size_ratio=active_trade.get("size", 0.0),
                         tp=active_trade.get("tp"),
                         sl=active_trade.get("sl"),
                     )
-                    send_private_telegram(copy_msg, priority=True)
                     if copy_ok:
+                        # Commit dedupe/cooldown state only after Binance has
+                        # acknowledged the real order. A transient order failure
+                        # must remain retryable and must not look like a fill.
+                        last_signal_cache = msg
+                        last_trade_time = now_ts
+                        last_trade_signal = final
+                        last_entry_price = price
+                        last_direction = final
                         learn_features = _build_directional_learning_features(features, direction)
                         active_trade["open"] = True
                         _mark_daily_trade_opened("daily_minimum" if daily_min_trade else "signal")
@@ -16613,6 +16663,8 @@ def run_bot():
                             "mlx_episode_id": _safe_int(mlx_episode_id, 0),
                         }
                         pending_training_sample = _save_pending_training_sample_state(pending_training_sample)
+                        print("📤 Binance 實單確認後發送 Telegram")
+                        send_telegram(msg + f"\n\n✅ 實單優先：{copy_msg}", priority=True)
                     else:
                         # 開單失敗，清除本地倉位狀態，避免面板顯示假倉位
                         pending_training_sample = None
@@ -16625,8 +16677,32 @@ def run_bot():
                             actual_open=False,
                         )
                         sync_position_panel(price)
+                        send_private_telegram(copy_msg, priority=True)
+                elif _real_order_priority_enabled():
+                    # Never turn a real-order signal into a local pseudo-position.
+                    # Keep it visible as blocked and wait for real execution to
+                    # become available.
+                    pending_training_sample = None
+                    _reset_active_trade_state()
+                    last_signal_cache = msg
+                    block_reason = "實單第一順位：跟單或 Binance 實單設定未啟用，禁止建立模擬倉位"
+                    _update_panel_execution_snapshot(
+                        decision,
+                        price,
+                        "real_order_required",
+                        reason=block_reason,
+                        actual_open=False,
+                    )
+                    sync_position_panel(price)
+                    send_private_telegram(f"⚠️ {block_reason}", priority=True)
                 else:
                     # 未開啟跟單，僅本地追蹤
+                    send_telegram(msg, priority=True)
+                    last_signal_cache = msg
+                    last_trade_time = now_ts
+                    last_trade_signal = final
+                    last_entry_price = price
+                    last_direction = final
                     learn_features = _build_directional_learning_features(features, direction)
                     mlx_episode_id = record_actual_trade_open(
                         direction=direction,
