@@ -1151,6 +1151,13 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "market_profile_indicator_family": str(decision.get("market_profile_indicator_family") or ""),
         "max_favorable_move_pct": 0.0,
         "max_adverse_move_pct": 0.0,
+        "peak_favorable_price": float(entry),
+        "peak_favorable_rate": 0.0,
+        "profit_lock_active": False,
+        "profit_lock_ts": 0.0,
+        "profit_lock_peak_rate": 0.0,
+        "profit_lock_activations": 0,
+        "entry_host_confidence": float(host_logic.get("confidence", 1.0)),
         "max_size": max_size,
         "min_size": min_size,
         "max_hold_sec": float(decision.get("max_hold_sec") or 0.0),
@@ -1194,6 +1201,12 @@ def _push_trade_state_to_eth(open_trade):
     eth.active_trade["break_even_active"] = bool(open_trade.get("break_even_active", False))
     eth.active_trade["break_even_target"] = float(open_trade.get("break_even_target", 0.0))
     eth.active_trade["break_even_ts"] = float(open_trade.get("break_even_ts", 0.0))
+    eth.active_trade["peak_favorable_price"] = float(open_trade.get("peak_favorable_price", open_trade["entry"]))
+    eth.active_trade["peak_favorable_rate"] = float(open_trade.get("peak_favorable_rate", 0.0))
+    eth.active_trade["profit_lock_active"] = bool(open_trade.get("profit_lock_active", False))
+    eth.active_trade["profit_lock_ts"] = float(open_trade.get("profit_lock_ts", 0.0))
+    eth.active_trade["profit_lock_peak_rate"] = float(open_trade.get("profit_lock_peak_rate", 0.0))
+    eth.active_trade["entry_host_confidence"] = float(open_trade.get("entry_host_confidence", 1.0))
 
 
 def _pull_trade_state_from_eth(open_trade):
@@ -1211,6 +1224,12 @@ def _pull_trade_state_from_eth(open_trade):
     open_trade["break_even_active"] = bool(eth.active_trade.get("break_even_active", open_trade["break_even_active"]))
     open_trade["break_even_target"] = float(eth.active_trade.get("break_even_target") or open_trade["break_even_target"])
     open_trade["break_even_ts"] = float(eth.active_trade.get("break_even_ts") or open_trade["break_even_ts"])
+    open_trade["peak_favorable_price"] = float(eth.active_trade.get("peak_favorable_price") or open_trade["peak_favorable_price"])
+    open_trade["peak_favorable_rate"] = float(eth.active_trade.get("peak_favorable_rate") or open_trade["peak_favorable_rate"])
+    open_trade["profit_lock_active"] = bool(eth.active_trade.get("profit_lock_active", open_trade["profit_lock_active"]))
+    open_trade["profit_lock_ts"] = float(eth.active_trade.get("profit_lock_ts") or open_trade["profit_lock_ts"])
+    open_trade["profit_lock_peak_rate"] = float(eth.active_trade.get("profit_lock_peak_rate") or open_trade["profit_lock_peak_rate"])
+    open_trade["entry_host_confidence"] = float(eth.active_trade.get("entry_host_confidence") or open_trade["entry_host_confidence"])
     return open_trade
 
 
@@ -1254,14 +1273,33 @@ def _update_trade_excursion(open_trade, bar_high, bar_low):
     return open_trade
 
 
-def _apply_trade_management(open_trade, current_price, atr, ts):
+def _apply_trade_management(open_trade, current_price, atr, ts, favorable_price=None):
     ts_sec = float(ts.timestamp())
     hold_hours = max(0.0, (ts_sec - float(open_trade["open_ts"])) / 3600.0)
     _push_trade_state_to_eth(open_trade)
 
+    profit_lock_before = bool(eth.active_trade.get("profit_lock_active", False))
+    sl_before = float(eth.active_trade.get("sl") or open_trade["sl"])
+    profit_locked = eth.maybe_lock_profit_after_reversal(
+        current_price,
+        favorable_price=favorable_price,
+        atr=atr,
+        now_ts=ts_sec,
+    )
+    if not profit_lock_before and bool(eth.active_trade.get("profit_lock_active", False)):
+        open_trade["profit_lock_activations"] += 1
+        _append_trade_event(
+            open_trade,
+            ts,
+            "mfe_profit_lock",
+            old_sl=round(sl_before, 4),
+            new_sl=round(float(eth.active_trade.get("sl") or sl_before), 4),
+            peak_rate_pct=round(float(eth.active_trade.get("profit_lock_peak_rate", 0.0)) * 100.0, 3),
+        )
+
     be_active_before = bool(eth.active_trade.get("break_even_active"))
     sl_before = float(eth.active_trade.get("sl") or open_trade["sl"])
-    be_triggered = eth.maybe_activate_auto_break_even(current_price, atr=atr, now_ts=ts_sec)
+    be_triggered = False if profit_locked else eth.maybe_activate_auto_break_even(current_price, atr=atr, now_ts=ts_sec)
     be_active_after = bool(eth.active_trade.get("break_even_active"))
     sl_after = float(eth.active_trade.get("sl") or sl_before)
     if not be_active_before and be_active_after:
@@ -1274,7 +1312,7 @@ def _apply_trade_management(open_trade, current_price, atr, ts):
             new_sl=round(sl_after, 4),
         )
 
-    if not be_triggered:
+    if not profit_locked and not be_triggered:
         size_before = float(eth.active_trade.get("size") or open_trade["size"])
         entry_before = float(eth.active_trade.get("avg_entry") or open_trade["avg_entry"])
         add_count_before = int(eth.active_trade.get("add_count") or open_trade["add_count"])
@@ -1467,6 +1505,7 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "equity": round(equity, 6),
         "exit_reason": exit_reason,
         "break_even_activations": int(open_trade["break_even_activations"]),
+        "profit_lock_activations": int(open_trade.get("profit_lock_activations", 0)),
         "tp_shrink_count": int(open_trade["tp_shrink_count"]),
         "scale_add_count": int(open_trade["add_count"]),
         "scale_reduce_count": int(open_trade["reduce_count"]),
@@ -1604,7 +1643,14 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                     losing_streak = 0 if trade_record["trade_return"] > 0 else (losing_streak + 1)
                     open_trade = None
                     continue
-                open_trade = _apply_trade_management(open_trade, current_price, atr_5m, ts)
+                favorable_price = bar_high if open_trade["direction"] == "long" else bar_low
+                open_trade = _apply_trade_management(
+                    open_trade,
+                    current_price,
+                    atr_5m,
+                    ts,
+                    favorable_price=favorable_price,
+                )
                 continue
 
             daily_min_due_now = _daily_min_due_for_backtest(ts, traded_dates)

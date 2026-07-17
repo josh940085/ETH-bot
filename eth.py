@@ -6101,6 +6101,24 @@ def sync_active_trade_from_binance(send_notice=False):
     active_trade["reduce_count"] = max(0, _safe_int(active_trade.get("reduce_count"), 0)) if preserve_local_state else 0
     active_trade["quick_reduce_count"] = max(0, _safe_int(active_trade.get("quick_reduce_count"), 0)) if preserve_local_state else 0
     active_trade["quick_reduce_ts"] = _safe_float(active_trade.get("quick_reduce_ts"), 0.0) if preserve_local_state else 0.0
+    active_trade["peak_favorable_price"] = (
+        _safe_float(active_trade.get("peak_favorable_price"), entry_price)
+        if preserve_local_state else entry_price
+    )
+    active_trade["peak_favorable_rate"] = (
+        max(0.0, _safe_float(active_trade.get("peak_favorable_rate"), 0.0))
+        if preserve_local_state else 0.0
+    )
+    active_trade["profit_lock_active"] = bool(active_trade.get("profit_lock_active", False)) if preserve_local_state else False
+    active_trade["profit_lock_ts"] = _safe_float(active_trade.get("profit_lock_ts"), 0.0) if preserve_local_state else 0.0
+    active_trade["profit_lock_peak_rate"] = (
+        max(0.0, _safe_float(active_trade.get("profit_lock_peak_rate"), 0.0))
+        if preserve_local_state else 0.0
+    )
+    active_trade["entry_host_confidence"] = (
+        max(0.0, _safe_float(active_trade.get("entry_host_confidence"), 1.0))
+        if preserve_local_state else 1.0
+    )
     active_trade["daily_min_size_enforce_ts"] = _safe_float(active_trade.get("daily_min_size_enforce_ts"), 0.0) if preserve_local_state else 0.0
     active_trade["last_adjust_ts"] = _safe_float(active_trade.get("last_adjust_ts"), 0.0) if preserve_local_state else 0.0
     active_trade["scale_add_paused"] = bool(active_trade.get("scale_add_paused", False)) if preserve_local_state else False
@@ -7349,6 +7367,12 @@ def sync_position_panel(current_price=None):
             "reduce_count": _safe_int(active_trade.get("reduce_count"), 0),
             "quick_reduce_count": _safe_int(active_trade.get("quick_reduce_count"), 0),
             "quick_reduce_ts": _safe_int(active_trade.get("quick_reduce_ts"), 0),
+            "peak_favorable_price": round(_safe_float(active_trade.get("peak_favorable_price"), 0.0), 4),
+            "peak_favorable_rate": round(_safe_float(active_trade.get("peak_favorable_rate"), 0.0), 6),
+            "profit_lock_active": bool(active_trade.get("profit_lock_active", False)),
+            "profit_lock_ts": _safe_int(active_trade.get("profit_lock_ts"), 0),
+            "profit_lock_peak_rate": round(_safe_float(active_trade.get("profit_lock_peak_rate"), 0.0), 6),
+            "entry_host_confidence": round(_safe_float(active_trade.get("entry_host_confidence"), 1.0), 4),
             "daily_min_size_enforce_ts": _safe_int(active_trade.get("daily_min_size_enforce_ts"), 0),
             "last_adjust_ts": _safe_int(active_trade.get("last_adjust_ts"), 0),
             "scale_add_paused": bool(active_trade.get("scale_add_paused", False)),
@@ -8108,6 +8132,113 @@ def maybe_activate_auto_break_even(current_price, atr=None, now_ts=None):
         f"進場: {entry:.2f} | TP: {tp:.2f}\n"
         f"SL: {old_sl:.2f} → {new_sl:.2f}\n"
         f"觸發條件: R={earned_r_multiple:.2f} | TP進度={profit_progress*100:.1f}% | 趨勢分數={trend_score:.2f}"
+        f"{sync_msg}",
+        priority=True,
+    )
+    return True
+
+
+def maybe_lock_profit_after_reversal(current_price, favorable_price=None, atr=None, now_ts=None):
+    """Lock part of a mature MFE only after a measurable reversal is confirmed."""
+    if not _is_truthy(os.getenv("MFE_PROFIT_LOCK_ENABLED", "1")) or not active_trade.get("open"):
+        return False
+    if bool(active_trade.get("profit_lock_active", False)):
+        return False
+
+    direction = str(active_trade.get("direction") or "")
+    entry = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
+    current = _safe_float(current_price, 0.0)
+    old_sl = _safe_float(active_trade.get("sl"), 0.0)
+    if direction not in {"long", "short"} or entry <= 0 or current <= 0 or old_sl <= 0:
+        return False
+    trade_source = str(active_trade.get("trade_source") or "")
+    daily_min_position = trade_source == "daily_minimum" or (not trade_source and _is_daily_min_position())
+    if daily_min_position and not _is_truthy(os.getenv("MFE_PROFIT_LOCK_DAILY_MIN_ENABLED", "0")):
+        return False
+
+    favorable = _safe_float(favorable_price, current)
+    favorable_rate = (
+        (favorable - entry) / entry
+        if direction == "long"
+        else (entry - favorable) / entry
+    )
+    previous_peak_rate = max(0.0, _safe_float(active_trade.get("peak_favorable_rate"), 0.0))
+    peak_rate = max(previous_peak_rate, favorable_rate)
+    if peak_rate > previous_peak_rate:
+        active_trade["peak_favorable_rate"] = peak_rate
+        active_trade["peak_favorable_price"] = favorable
+
+    now_ts = _safe_float(now_ts, 0.0) or time.time()
+    open_ts = _safe_float(active_trade.get("open_time"), 0.0)
+    min_hold_hours = max(1.0, _safe_float(os.getenv("MFE_PROFIT_LOCK_MIN_HOLD_HOURS", 3.0), 3.0))
+    if open_ts <= 0 or (now_ts - open_ts) < min_hold_hours * 3600.0:
+        return False
+
+    current_profit_rate = (
+        (current - entry) / entry
+        if direction == "long"
+        else (entry - current) / entry
+    )
+    min_peak_rate = max(0.006, _safe_float(os.getenv("MFE_PROFIT_LOCK_MIN_PEAK_RATE", 0.010), 0.010))
+    min_current_profit_rate = max(
+        _estimate_break_even_buffer_rate((now_ts - open_ts) / 3600.0) + 0.0008,
+        _safe_float(os.getenv("MFE_PROFIT_LOCK_MIN_CURRENT_RATE", 0.0035), 0.0035),
+    )
+    giveback_rate = max(0.0, peak_rate - current_profit_rate)
+    giveback_ratio = giveback_rate / max(peak_rate, 1e-9)
+    min_giveback_rate = max(0.0015, _safe_float(os.getenv("MFE_PROFIT_LOCK_MIN_GIVEBACK_RATE", 0.0030), 0.0030))
+    min_giveback_ratio = max(0.20, _safe_float(os.getenv("MFE_PROFIT_LOCK_MIN_GIVEBACK_RATIO", 0.30), 0.30))
+    strong_price_reversal_ratio = max(
+        min_giveback_ratio,
+        _safe_float(os.getenv("MFE_PROFIT_LOCK_STRONG_REVERSAL_RATIO", 0.30), 0.30),
+    )
+    host_confidence = max(0.0, _safe_float(active_trade.get("entry_host_confidence"), 1.0))
+    max_host_confidence = min(
+        0.95,
+        max(0.50, _safe_float(os.getenv("MFE_PROFIT_LOCK_MAX_HOST_CONFIDENCE", 0.80), 0.80)),
+    )
+    reversal_confirmed = giveback_ratio >= strong_price_reversal_ratio and host_confidence <= max_host_confidence
+    if (
+        peak_rate < min_peak_rate
+        or current_profit_rate < min_current_profit_rate
+        or giveback_rate < min_giveback_rate
+        or giveback_ratio < min_giveback_ratio
+        or not reversal_confirmed
+    ):
+        return False
+
+    retain_ratio = min(0.65, max(0.25, _safe_float(os.getenv("MFE_PROFIT_LOCK_RETAIN_RATIO", 0.35), 0.35)))
+    lock_rate = max(min_current_profit_rate, peak_rate * retain_ratio)
+    atr_value = max(0.0, _safe_float(atr, 0.0))
+    price_buffer = max(entry * 0.0008, atr_value * 0.20)
+    if direction == "long":
+        new_sl = min(entry * (1.0 + lock_rate), current - price_buffer)
+        if new_sl <= max(entry, old_sl) + 1e-9:
+            return False
+    else:
+        new_sl = max(entry * (1.0 - lock_rate), current + price_buffer)
+        if new_sl >= min(entry, old_sl) - 1e-9:
+            return False
+
+    new_sl = round(new_sl, 2)
+    active_trade["sl"] = new_sl
+    active_trade["profit_lock_active"] = True
+    active_trade["profit_lock_ts"] = now_ts
+    active_trade["profit_lock_peak_rate"] = peak_rate
+    _set_break_even_state(True, target=new_sl, ts=now_ts)
+    sync_position_panel(current)
+
+    sync_msg = ""
+    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+        try:
+            _, binance_msg = update_copy_trade_tp_sl(active_trade.get("tp"), new_sl)
+            sync_msg = f"\n{binance_msg}"
+        except Exception as exc:
+            sync_msg = f"\n⚠️ Binance 鎖盈 SL 同步失敗: {exc}"
+    send_telegram(
+        f"🔒 浮盈回吐鎖利\n方向: {direction} | 現價: {current:.2f}\n"
+        f"最高浮盈: {peak_rate*100:.2f}% | 回吐: {giveback_rate*100:.2f}%\n"
+        f"SL: {old_sl:.2f} → {new_sl:.2f} | 原 TP 維持: {_safe_float(active_trade.get('tp'), 0.0):.2f}"
         f"{sync_msg}",
         priority=True,
     )
@@ -9143,6 +9274,12 @@ active_trade = {
     "reduce_count": 0,
     "quick_reduce_count": 0,
     "quick_reduce_ts": 0.0,
+    "peak_favorable_price": 0.0,
+    "peak_favorable_rate": 0.0,
+    "profit_lock_active": False,
+    "profit_lock_ts": 0.0,
+    "profit_lock_peak_rate": 0.0,
+    "entry_host_confidence": 1.0,
     "daily_min_size_enforce_ts": 0.0,
     "last_adjust_ts": 0.0,
     "scale_add_paused": False,
@@ -9181,6 +9318,12 @@ def _reset_active_trade_state():
     active_trade["reduce_count"] = 0
     active_trade["quick_reduce_count"] = 0
     active_trade["quick_reduce_ts"] = 0.0
+    active_trade["peak_favorable_price"] = 0.0
+    active_trade["peak_favorable_rate"] = 0.0
+    active_trade["profit_lock_active"] = False
+    active_trade["profit_lock_ts"] = 0.0
+    active_trade["profit_lock_peak_rate"] = 0.0
+    active_trade["entry_host_confidence"] = 1.0
     active_trade["daily_min_size_enforce_ts"] = 0.0
     active_trade["last_adjust_ts"] = 0.0
     active_trade["scale_add_paused"] = False
@@ -9241,6 +9384,12 @@ def restore_active_trade_from_panel():
     active_trade["reduce_count"] = max(0, _safe_int(raw.get("reduce_count"), 0))
     active_trade["quick_reduce_count"] = max(0, _safe_int(raw.get("quick_reduce_count"), 0))
     active_trade["quick_reduce_ts"] = _safe_float(raw.get("quick_reduce_ts"), 0.0)
+    active_trade["peak_favorable_price"] = _safe_float(raw.get("peak_favorable_price"), entry)
+    active_trade["peak_favorable_rate"] = max(0.0, _safe_float(raw.get("peak_favorable_rate"), 0.0))
+    active_trade["profit_lock_active"] = bool(raw.get("profit_lock_active", False))
+    active_trade["profit_lock_ts"] = _safe_float(raw.get("profit_lock_ts"), 0.0)
+    active_trade["profit_lock_peak_rate"] = max(0.0, _safe_float(raw.get("profit_lock_peak_rate"), 0.0))
+    active_trade["entry_host_confidence"] = max(0.0, _safe_float(raw.get("entry_host_confidence"), 1.0))
     active_trade["daily_min_size_enforce_ts"] = _safe_float(raw.get("daily_min_size_enforce_ts"), 0.0)
     active_trade["last_adjust_ts"] = _safe_float(raw.get("last_adjust_ts"), 0.0)
     active_trade["scale_add_paused"] = bool(raw.get("scale_add_paused", False))
@@ -16017,8 +16166,9 @@ def run_bot():
                         current,
                     )
                 quick_reduced = maybe_take_quick_profit_reduce(current, atr=atr)
-                be_triggered = maybe_activate_auto_break_even(current, atr=atr)
-                if not quick_reduced and not be_triggered:
+                profit_locked = maybe_lock_profit_after_reversal(current, favorable_price=current, atr=atr)
+                be_triggered = False if profit_locked else maybe_activate_auto_break_even(current, atr=atr)
+                if not quick_reduced and not profit_locked and not be_triggered:
                     manage_position_scaling(current, atr=atr)
 
             # ===== 持倉超過4小時，只縮減止盈範圍 =====
@@ -16577,6 +16727,15 @@ def run_bot():
                 active_trade["reduce_count"] = 0
                 active_trade["quick_reduce_count"] = 0
                 active_trade["quick_reduce_ts"] = 0.0
+                active_trade["peak_favorable_price"] = float(entry)
+                active_trade["peak_favorable_rate"] = 0.0
+                active_trade["profit_lock_active"] = False
+                active_trade["profit_lock_ts"] = 0.0
+                active_trade["profit_lock_peak_rate"] = 0.0
+                active_trade["entry_host_confidence"] = _safe_float(
+                    (decision.get("host_opening_logic") or {}).get("confidence"),
+                    1.0,
+                )
                 active_trade["daily_min_size_enforce_ts"] = 0.0
                 active_trade["last_adjust_ts"] = 0.0
                 active_trade["scale_add_paused"] = False
