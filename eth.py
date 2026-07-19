@@ -9025,12 +9025,54 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
             and net_edge >= 0.003
             and 0 < risk_rate <= max_quality_risk
         )
-        if quality_trend_long:
+        repeated_support = _safe_int(decision.get("repeated_support_tests"), 0)
+        news_bias = _safe_float(decision.get("news_bias"), 0.0)
+        event_risk = _safe_int(decision.get("event_risk"), 0)
+        btc_change = _safe_float(decision.get("btc_change"), 0.0)
+        max_tested_short_risk = max(
+            max_risk,
+            _safe_float(
+                os.getenv("DAILY_MIN_ANCHOR_BULL_HIGH_VOL_TESTED_SHORT_MAX_RISK_RATE", 0.02),
+                0.02,
+            ),
+        )
+        max_tested_short_btc_change = min(
+            -0.001,
+            _safe_float(
+                os.getenv("DAILY_MIN_ANCHOR_BULL_HIGH_VOL_TESTED_SHORT_MAX_BTC_CHANGE", -0.012),
+                -0.012,
+            ),
+        )
+        quality_tested_breakdown_short = (
+            _is_truthy(os.getenv("DAILY_MIN_ANCHOR_BULL_HIGH_VOL_TESTED_SHORT_ENABLED", "1"))
+            and direction == "short"
+            and mid_trend == -1
+            and str(host_logic.get("direction") or "neutral") == "short"
+            and host_mode == "breakdown_after_support_tests"
+            and host_conf >= 0.70
+            and (support_hits >= 1 or repeated_support >= 2)
+            and score_value <= 0.28
+            and net_edge >= 0.003
+            and news_bias <= 0
+            and event_risk <= 0
+            and btc_change <= max_tested_short_btc_change
+            and max_risk < risk_rate <= max_tested_short_risk
+        )
+        if quality_trend_long or quality_tested_breakdown_short:
+            default_quality_max_size = 0.02 if quality_tested_breakdown_short else 0.03
+            quality_size_env = (
+                "DAILY_MIN_ANCHOR_BULL_HIGH_VOL_TESTED_SHORT_MAX_SIZE"
+                if quality_tested_breakdown_short
+                else "DAILY_MIN_ANCHOR_QUALITY_SIGNAL_MAX_SIZE"
+            )
             quality_max_size = max(
                 0.01,
                 min(
                     0.10,
-                    _safe_float(os.getenv("DAILY_MIN_ANCHOR_QUALITY_SIGNAL_MAX_SIZE", 0.03), 0.03),
+                    _safe_float(
+                        os.getenv(quality_size_env, default_quality_max_size),
+                        default_quality_max_size,
+                    ),
                 ),
             )
             decision["position_size"] = min(
@@ -12862,6 +12904,12 @@ def build_trade_signal_snapshot(
         "ai_long_prob": ai_long_prob,
         "ai_short_prob": ai_short_prob,
         "macro_bias": macro_bias,
+        "sp_change": sp_change,
+        "nq_change": nq_change,
+        "btc_change": btc_change,
+        "dxy_change": dxy_change,
+        "news_bias": news_bias,
+        "event_risk": event_risk,
         "fake_breakout": fake_breakout,
         "triangle": triangle,
         "fvg_low": fvg_low,
