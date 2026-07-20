@@ -7082,6 +7082,18 @@ def _build_daily_min_trade_plan(
         sl = entry + risk
         tp = entry - risk * 1.5
         final = "⏰ 每日保底做空"
+    reference_ts = _latest_frame_timestamp(df_5m)
+    previous_month_adr = {}
+    if _is_truthy(os.getenv("TRADE_PREV_MONTH_ADR_DAILY_MIN_ENABLED", "1")):
+        sl, tp, previous_month_adr = _apply_previous_month_adr_trade_plan(
+            final,
+            entry,
+            sl,
+            tp,
+            df_1d,
+            reference_ts=reference_ts,
+            min_rr=1.5,
+        )
     sign = 1 if direction == "long" else -1
     against_macro = macro_score * sign < -0.25
     local_confirmed = (_safe_int(breakout, 0) == sign) or bool(volume_spike)
@@ -7135,6 +7147,7 @@ def _build_daily_min_trade_plan(
         "macro_wait_recommended": bool(against_macro and not local_confirmed),
         "candlestick_turn_direction": turn_direction,
         "style_2024_profile": style_profile,
+        "previous_month_adr": previous_month_adr,
     }
 
 
@@ -9225,6 +9238,161 @@ def auto_fix_trade_plan(signal, entry, sl, tp, atr):
             tp = min_tp
 
     return signal, float(sl), float(tp)
+
+
+def _previous_month_average_daily_range(df_1d, reference_ts=None):
+    """Return the prior completed calendar month's average daily high-low range."""
+    if df_1d is None or len(df_1d) == 0 or "high" not in df_1d or "low" not in df_1d:
+        return {}
+
+    try:
+        resolved_reference = reference_ts
+        if resolved_reference is None or (
+            isinstance(resolved_reference, (int, float, np.integer, np.floating))
+            and _safe_float(resolved_reference, 0.0) < 946684800000
+        ):
+            if "time" in df_1d:
+                resolved_reference = _safe_float(df_1d["time"].iloc[-1], 0.0)
+            else:
+                resolved_reference = df_1d.index[-1]
+        if isinstance(resolved_reference, (int, float, np.integer, np.floating)):
+            ref = pd.to_datetime(resolved_reference, unit="ms", utc=True)
+        else:
+            ref = pd.Timestamp(resolved_reference)
+        if ref.tzinfo is None:
+            ref = ref.tz_localize("UTC")
+        else:
+            ref = ref.tz_convert("UTC")
+        current_month_start = ref.normalize().replace(day=1)
+        previous_month_end = current_month_start
+        previous_month_start = previous_month_end - pd.offsets.MonthBegin(1)
+
+        if isinstance(df_1d.index, pd.DatetimeIndex):
+            index = pd.to_datetime(df_1d.index, utc=True, errors="coerce")
+        elif "time" in df_1d:
+            index = pd.to_datetime(df_1d["time"], unit="ms", utc=True, errors="coerce")
+        else:
+            index = pd.to_datetime(df_1d.index, utc=True, errors="coerce")
+        high = pd.to_numeric(df_1d["high"], errors="coerce")
+        low = pd.to_numeric(df_1d["low"], errors="coerce")
+        mask = (index >= previous_month_start) & (index < previous_month_end)
+        ranges = (high[mask] - low[mask]).replace([np.inf, -np.inf], np.nan).dropna()
+        ranges = ranges[ranges > 0]
+        min_days = max(10, _safe_int(os.getenv("TRADE_PREV_MONTH_ADR_MIN_DAYS", 20), 20))
+        if len(ranges) < min_days:
+            return {}
+
+        adr = _safe_float(ranges.mean(), 0.0)
+        closes = pd.to_numeric(df_1d.loc[mask, "close"], errors="coerce").dropna() if "close" in df_1d else pd.Series(dtype=float)
+        reference_close = _safe_float(closes.mean(), 0.0)
+        if adr <= 0:
+            return {}
+        return {
+            "value": float(adr),
+            "rate": float(adr / max(reference_close, 1e-9)) if reference_close > 0 else 0.0,
+            "days": int(len(ranges)),
+            "month": previous_month_start.strftime("%Y-%m"),
+        }
+    except Exception:
+        return {}
+
+
+def _latest_frame_timestamp(frame):
+    if frame is None or len(frame) == 0:
+        return None
+    if "time" in frame:
+        ts_ms = _safe_float(frame["time"].iloc[-1], 0.0)
+        if ts_ms > 0:
+            return ts_ms
+    return frame.index[-1]
+
+
+def _apply_previous_month_adr_trade_plan(
+    signal,
+    entry,
+    sl,
+    tp,
+    df_1d,
+    *,
+    reference_ts=None,
+    min_rr=1.8,
+):
+    """Set TP/SL distances from the prior month's ADR without weakening RR safety."""
+    if not _is_truthy(os.getenv("TRADE_PREV_MONTH_ADR_ENABLED", "1")):
+        return float(sl), float(tp), {}
+
+    direction = get_signal_direction(signal)
+    entry = _safe_float(entry, 0.0)
+    if direction not in {"long", "short"} or entry <= 0:
+        return float(sl), float(tp), {}
+
+    adr_meta = _previous_month_average_daily_range(df_1d, reference_ts=reference_ts)
+    adr = _safe_float(adr_meta.get("value"), 0.0)
+    if adr <= 0:
+        return float(sl), float(tp), {}
+
+    stop_ratio = max(
+        0.05,
+        min(0.50, _safe_float(os.getenv("TRADE_PREV_MONTH_ADR_STOP_RATIO", 0.15), 0.15)),
+    )
+    target_ratio = max(
+        0.10,
+        min(0.90, _safe_float(os.getenv("TRADE_PREV_MONTH_ADR_TARGET_RATIO", 0.225), 0.225)),
+    )
+    min_rr = max(1.1, _safe_float(min_rr, 1.8))
+    max_stop_rate = max(
+        0.003,
+        min(0.05, _safe_float(os.getenv("TRADE_PREV_MONTH_ADR_MAX_STOP_RATE", 0.025), 0.025)),
+    )
+    mode = str(os.getenv("TRADE_PREV_MONTH_ADR_MODE", "bounded") or "bounded").strip().lower()
+    original_stop_distance = abs(entry - _safe_float(sl, entry))
+    original_target_distance = abs(_safe_float(tp, entry) - entry)
+    if mode == "exact":
+        stop_distance = min(adr * stop_ratio, entry * max_stop_rate)
+        stop_distance = max(stop_distance, entry * 0.001)
+        target_distance = max(adr * target_ratio, stop_distance * min_rr)
+    else:
+        stop_floor_ratio = max(
+            0.01,
+            min(0.20, _safe_float(os.getenv("TRADE_PREV_MONTH_ADR_STOP_FLOOR_RATIO", 0.05), 0.05)),
+        )
+        target_cap_ratio = max(
+            0.15,
+            min(0.90, _safe_float(os.getenv("TRADE_PREV_MONTH_ADR_TARGET_CAP_RATIO", 0.45), 0.45)),
+        )
+        stop_floor = min(adr * stop_floor_ratio, entry * max_stop_rate)
+        # A wider stop may never reduce the already-validated minimum RR.
+        stop_distance = max(
+            original_stop_distance,
+            min(stop_floor, original_target_distance / max(min_rr, 1e-9)),
+        )
+        target_cap = max(adr * target_cap_ratio, stop_distance * min_rr)
+        target_distance = min(original_target_distance, target_cap)
+        target_distance = max(target_distance, stop_distance * min_rr)
+
+    if direction == "long":
+        resolved_sl = entry - stop_distance
+        resolved_tp = entry + target_distance
+    else:
+        resolved_sl = entry + stop_distance
+        resolved_tp = entry - target_distance
+    if resolved_tp <= 0 or resolved_sl <= 0:
+        return float(sl), float(tp), {}
+
+    adr_meta.update(
+        {
+            "applied": True,
+            "stop_ratio": float(stop_ratio),
+            "target_ratio": float(target_ratio),
+            "stop_distance": float(stop_distance),
+            "target_distance": float(target_distance),
+            "planned_rr": float(target_distance / max(stop_distance, 1e-9)),
+            "mode": mode,
+            "original_stop_distance": float(original_stop_distance),
+            "original_target_distance": float(original_target_distance),
+        }
+    )
+    return float(resolved_sl), float(resolved_tp), adr_meta
 
 
 def get_macro_bias():
@@ -12702,6 +12870,21 @@ def build_trade_signal_snapshot(
 
     if not final.startswith("觀望"):
         final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
+    previous_month_adr = {}
+    if (
+        not final.startswith("觀望")
+        and _is_truthy(os.getenv("TRADE_PREV_MONTH_ADR_GENERAL_ENABLED", "0"))
+    ):
+        reference_ts = _latest_frame_timestamp(df_5m)
+        sl, tp, previous_month_adr = _apply_previous_month_adr_trade_plan(
+            final,
+            entry,
+            sl,
+            tp,
+            df_1d,
+            reference_ts=reference_ts,
+            min_rr=min_accept_rr,
+        )
 
     point_explain = ""
     if not final.startswith("觀望") and sl is not None and tp is not None and entry > 0:
@@ -12724,8 +12907,14 @@ def build_trade_signal_snapshot(
             - (1.0 - direction_win_prob) * risk_rate
             - total_trade_cost_rate_est
         )
+        point_method = "SL=近10根高低點/結構位，TP=風險×RR"
+        if previous_month_adr.get("applied"):
+            point_method = (
+                f"SL/TP=前月ADR邊界校正 | ADR={_safe_float(previous_month_adr.get('value'), 0.0):.2f}"
+                f"（{previous_month_adr.get('month')} / {previous_month_adr.get('days')}日）"
+            )
         point_explain = (
-            f"📐 點位計算: SL=近10根高低點/結構位，TP=風險×RR\n"
+            f"📐 點位計算: {point_method}\n"
             f"成本估算: 手續費{fee_round_trip_rate*100:.3f}% + 滑價{est_slippage_rate*100:.3f}% + 資金費{funding_cost_rate_est*100:.3f}% ≈ {total_trade_cost_rate_est*100:.3f}%\n"
             f"風險/報酬: risk={risk_rate*100:.3f}% | reward={reward_rate*100:.3f}% | RR={rr_at_entry:.2f} | AI期望值={net_edge_rate_est*100:.3f}%"
         )
@@ -12915,6 +13104,7 @@ def build_trade_signal_snapshot(
         "fvg_low": fvg_low,
         "fvg_high": fvg_high,
         "point_explain": point_explain,
+        "previous_month_adr": previous_month_adr,
         "htf": htf,
         "htf_strength": htf_strength,
         "mid_trend": mid_trend,
@@ -15464,6 +15654,13 @@ def run_bot():
             else "允許本地追蹤模式"
         )
     )
+    print(
+        "✅ 前月ADR TP/SL: "
+        f"{'啟用' if _is_truthy(os.getenv('TRADE_PREV_MONTH_ADR_ENABLED', '1')) else '停用'} | "
+        f"mode={os.getenv('TRADE_PREV_MONTH_ADR_MODE', 'bounded')} | "
+        f"daily={os.getenv('TRADE_PREV_MONTH_ADR_DAILY_MIN_ENABLED', '1')} | "
+        f"general={os.getenv('TRADE_PREV_MONTH_ADR_GENERAL_ENABLED', '0')}"
+    )
     # trade_open 移除，改用 active_trade 控制是否可開單
 
     last_update_id = None
@@ -16350,6 +16547,7 @@ def run_bot():
                 sl = daily_plan["sl"]
                 tp = daily_plan["tp"]
                 position_size = daily_plan["position_size"]
+                decision["previous_month_adr"] = dict(daily_plan.get("previous_month_adr") or {})
                 if final.startswith("觀望"):
                     daily_min_trade = False
 
@@ -16548,6 +16746,12 @@ def run_bot():
                 daily_note = "每日最低一單：22:30 後小倉位結構單"
                 if isinstance(daily_plan, dict) and daily_plan.get("against_macro"):
                     daily_note += "（逆宏觀已縮小倉位）"
+                daily_adr = daily_plan.get("previous_month_adr") if isinstance(daily_plan, dict) else {}
+                if isinstance(daily_adr, dict) and daily_adr.get("applied"):
+                    daily_note += (
+                        f"｜前月ADR {_safe_float(daily_adr.get('value'), 0.0):.2f}"
+                        f"（{daily_adr.get('month')}）已校正TP/SL邊界"
+                    )
                 reason.append(daily_note)
             elif td_setup_15m["up_9"]:
                 reason.append(f"15m上漲九轉 Setup {td_setup_15m['up_count']}（封鎖新多單）")

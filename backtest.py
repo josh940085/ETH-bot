@@ -986,6 +986,7 @@ def _apply_daily_min_backtest_plan(decision, frame_now, current_price):
             "host_logic_applied": True,
             "primary_indicator": "mlx_daily_minimum",
             "daily_min_style_2024": dict(plan.get("style_2024_profile") or {}),
+            "previous_month_adr": dict(plan.get("previous_month_adr") or {}),
         }
     )
     host_logic = daily_decision.get("host_opening_logic")
@@ -1099,6 +1100,7 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "avg_entry": float(entry),
         "tp": float(decision["tp"]),
         "sl": float(decision["sl"]),
+        "previous_month_adr": dict(decision.get("previous_month_adr") or {}),
         "size": size,
         "score": float(score),
         "regime": str(decision.get("regime", "")),
@@ -1472,6 +1474,10 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "entry_threshold": round(float(open_trade.get("entry_threshold", 0.0)), 4),
         "rr_at_entry": round(float(open_trade.get("rr_at_entry", 0.0)), 3),
         "risk_rate_pct": round(float(open_trade.get("risk_rate", 0.0)) * 100, 3),
+        "previous_month_adr": round(float((open_trade.get("previous_month_adr") or {}).get("value", 0.0)), 4),
+        "previous_month_adr_month": str((open_trade.get("previous_month_adr") or {}).get("month", "")),
+        "previous_month_adr_days": int((open_trade.get("previous_month_adr") or {}).get("days", 0)),
+        "previous_month_adr_applied": bool((open_trade.get("previous_month_adr") or {}).get("applied", False)),
         "reward_rate_pct": round(float(open_trade.get("reward_rate", 0.0)) * 100, 3),
         "net_edge_rate_est_pct": round(float(open_trade.get("net_edge_rate_est", 0.0)) * 100, 3),
         "total_trade_cost_rate_est_pct": round(float(open_trade.get("total_trade_cost_rate_est", 0.0)) * 100, 3),
