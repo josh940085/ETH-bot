@@ -3103,7 +3103,6 @@ def _assess_multitimeframe_bull_reclaim(
     )
     applied = (
         str(regime or "") in {"bull_trend", "bull_trend_strong"}
-        and str(profile.get("phase") or "range_base") != "bear"
         and _safe_int(htf, 0) == 1
         and _safe_int(mid_trend, 0) == 1
         and all(
@@ -9140,7 +9139,6 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     if (
         direction == "long"
         and bull_reclaim.get("applied")
-        and market_phase != "bear"
         and score_value >= 0.72
         and net_edge >= 0.0012
         and 0 < risk_rate <= 0.03
@@ -16811,7 +16809,16 @@ def run_bot():
                 market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
                 market_phase = str(market_profile.get("phase") or "range_base")
                 final_direction = get_signal_direction(final)
-                if market_phase == "bear" and final_direction == "long":
+                bull_reclaim = (
+                    decision.get("multitimeframe_bull_reclaim")
+                    if isinstance(decision.get("multitimeframe_bull_reclaim"), dict)
+                    else {}
+                )
+                if (
+                    market_phase == "bear"
+                    and final_direction == "long"
+                    and not bull_reclaim.get("applied")
+                ):
                     final = "觀望（熊市禁止非每日多單）"
                     position_size = 0.0
                 elif _daily_anchor_guard_should_wait(final, score, decision):

@@ -41,7 +41,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 "fifteen_min_resistance": 1925.04,
                 "one_hour_resistance": 1924.77,
             },
-            market_profile={"phase": "range_base"},
+            market_profile={"phase": "bear"},
             regime="bull_trend",
             htf=1,
             mid_trend=1,
@@ -235,7 +235,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
     def test_daily_anchor_keeps_bull_reclaim_small_but_does_not_wait(self):
         decision = {
-            "market_profile": {"phase": "range_base"},
+            "market_profile": {"phase": "bear"},
             "risk_rate": 0.01,
             "net_edge_rate_est": 0.003,
             "position_size": 0.15,
