@@ -5531,9 +5531,8 @@ def _calc_copy_trade_qty(size_ratio, leverage=None, eth_price=None) -> float:
         margin_used = balance * ratio * balance_usage_cap
         raw_qty = margin_used * lev * notional_safety / price
     else:
-        # 舊模式 fallback
-        base_qty = max(_safe_float(os.getenv("COPY_TRADE_ETH_QTY", 1.0), 1.0), COPY_TRADE_MIN_QTY)
-        raw_qty = base_qty * max(ratio, 0.1)
+        # 無法確認可用餘額時採交易所最低量，避免舊固定顆數放大低比例訊號。
+        raw_qty = COPY_TRADE_MIN_QTY
 
     # ETHUSDT 永續最小步進通常為 0.001，向下取整避免超出精度。
     return max(COPY_TRADE_MIN_QTY, math.floor(raw_qty * 1000.0) / 1000.0)
@@ -5560,8 +5559,7 @@ def _calc_copy_trade_qty_with_buffer(size_ratio, leverage=None, eth_price=None, 
         margin_used = balance * ratio * balance_usage_cap * buffer_ratio
         raw_qty = margin_used * lev * notional_safety / price
     else:
-        base_qty = max(_safe_float(os.getenv("COPY_TRADE_ETH_QTY", 1.0), 1.0), COPY_TRADE_MIN_QTY)
-        raw_qty = base_qty * max(ratio, 0.1) * buffer_ratio
+        raw_qty = COPY_TRADE_MIN_QTY * buffer_ratio
 
     rounded_qty = math.floor(max(raw_qty, 0.0) * 1000.0) / 1000.0
     if enforce_min:

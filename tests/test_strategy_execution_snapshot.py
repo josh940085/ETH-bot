@@ -261,6 +261,23 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         with patch.dict(eth.os.environ, {}, clear=True):
             self.assertTrue(eth._real_order_priority_enabled())
 
+    def test_copy_trade_fallback_preserves_small_signal_ratio(self):
+        with (
+            patch.object(eth, "_get_binance_available_balance", return_value=0.0),
+            patch.dict(eth.os.environ, {"COPY_TRADE_ETH_QTY": "1.0"}, clear=False),
+        ):
+            qty = eth._calc_copy_trade_qty(0.05, leverage=5, eth_price=1938.0)
+            buffered_qty = eth._calc_copy_trade_qty_with_buffer(
+                0.05,
+                leverage=5,
+                eth_price=1938.0,
+                extra_buffer_ratio=0.8,
+                enforce_min=False,
+            )
+
+        self.assertEqual(qty, eth.COPY_TRADE_MIN_QTY)
+        self.assertEqual(buffered_qty, 0.009)
+
     def test_panel_marks_binance_as_authoritative_for_real_position(self):
         eth.active_trade.update(
             {
