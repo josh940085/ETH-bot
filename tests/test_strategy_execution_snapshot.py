@@ -48,7 +48,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             breakout=0,
             sweep_high=False,
             macro_bias=1.5,
-            derivatives_pressure=0.0,
+            derivatives_pressure=-0.1443,
             event_risk=0,
             rsi_15m=69.09,
             ema50_deviation_15m=0.00977,
@@ -61,6 +61,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertTrue(result["applied"])
         self.assertEqual(result["reclaim_level"], 1925.04)
         self.assertLessEqual(result["max_position_size"], 0.05)
+        self.assertEqual(result["diagnostics"]["min_derivatives_pressure"], -0.15)
 
     def test_multitimeframe_bull_reclaim_allows_live_confirmed_breakout(self):
         result = eth._assess_multitimeframe_bull_reclaim(

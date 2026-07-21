@@ -3083,6 +3083,16 @@ def _assess_multitimeframe_bull_reclaim(
             _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MAX_SIZE", 0.05), 0.05),
         ),
     )
+    min_derivatives_pressure = max(
+        -0.30,
+        min(
+            0.0,
+            _safe_float(
+                os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MIN_DERIVATIVES_PRESSURE", -0.15),
+                -0.15,
+            ),
+        ),
+    )
     result.update(
         {
             "reclaim_level": round(reclaim_level, 4),
@@ -3118,7 +3128,7 @@ def _assess_multitimeframe_bull_reclaim(
         and _safe_int(breakout, 0) != -1
         and not bool(sweep_high)
         and _safe_float(macro_bias, 0.0) >= min_macro_bias
-        and _safe_float(derivatives_pressure, 0.0) >= -0.12
+        and _safe_float(derivatives_pressure, 0.0) >= min_derivatives_pressure
         and _safe_int(event_risk, 0) <= 1
         and _safe_float(rsi_15m, 100.0) <= effective_max_rsi
         and abs(_safe_float(ema50_deviation_15m, 1.0)) <= max_ema_deviation
@@ -3136,6 +3146,7 @@ def _assess_multitimeframe_bull_reclaim(
         "macro_bias": round(_safe_float(macro_bias, 0.0), 4),
         "min_macro_bias": round(min_macro_bias, 4),
         "derivatives_pressure": round(_safe_float(derivatives_pressure, 0.0), 4),
+        "min_derivatives_pressure": round(min_derivatives_pressure, 4),
         "event_risk": _safe_int(event_risk, 0),
         "rsi_15m": round(_safe_float(rsi_15m, 100.0), 2),
         "max_rsi": round(effective_max_rsi, 2),
