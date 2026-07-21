@@ -4,6 +4,7 @@ import datetime as dt
 import gzip
 import importlib.metadata
 import json
+import math
 import os
 import py_compile
 import re
@@ -42,6 +43,7 @@ CHECK_NAME_ZH = {
     "telegram_policy": "Telegram 設定",
     "telegram_watch_risk": "Telegram 發送風險",
     "model_health": "交易模型健康狀態",
+    "strategy_strictness": "策略嚴苛度",
     "smoke_backtest": "策略快速回測",
 }
 STATUS_ZH = {
@@ -1536,6 +1538,65 @@ def _check_smoke_backtest(days, warmup_bars):
     }
 
 
+def _check_strategy_strictness():
+    summary = _read_json(data_path("backtest_latest_summary.json")) or {}
+    coverage = summary.get("trade_day_coverage") if isinstance(summary.get("trade_day_coverage"), dict) else {}
+    trades = max(0, int(summary.get("trades", 0) or 0))
+    daily_min_trades = max(0, int(coverage.get("daily_min_trades", 0) or 0))
+    general_trades = max(0, trades - daily_min_trades)
+    calendar_days = max(0, int(coverage.get("calendar_days", 0) or 0))
+    trade_days = max(0, int(coverage.get("trade_days", 0) or 0))
+
+    # Very short or incomplete artifacts cannot reliably measure selectivity.
+    # Keep the daily inspection healthy but make the missing evidence explicit.
+    if calendar_days < 5:
+        return {
+            "status": "ok",
+            "detail": f"樣本不足，暫不判定；有效日={calendar_days}；交易={trades}筆",
+            "sample_sufficient": False,
+            "calendar_days": calendar_days,
+            "trade_days": trade_days,
+            "trades": trades,
+            "daily_min_trades": daily_min_trades,
+            "general_trades": general_trades,
+        }
+
+    min_coverage = min(
+        1.0,
+        max(0.50, float(os.getenv("MAINTENANCE_STRATEGY_MIN_TRADE_DAY_COVERAGE", "0.80") or "0.80")),
+    )
+    min_general_per_7d = min(
+        7.0,
+        max(0.0, float(os.getenv("MAINTENANCE_STRATEGY_MIN_GENERAL_TRADES_PER_7D", "1.0") or "1.0")),
+    )
+    coverage_ratio = min(1.0, trade_days / calendar_days)
+    required_general = int(math.ceil(calendar_days * min_general_per_7d / 7.0))
+
+    blockers = []
+    if coverage_ratio < min_coverage:
+        blockers.append(f"交易日覆蓋率 {coverage_ratio:.0%} < {min_coverage:.0%}")
+    if general_trades < required_general:
+        blockers.append(f"一般策略單 {general_trades}筆 < {required_general}筆/{calendar_days}日")
+    if blockers:
+        raise RuntimeError("策略可能過嚴：" + "；".join(blockers))
+
+    return {
+        "status": "ok",
+        "detail": (
+            f"交易日覆蓋率={coverage_ratio:.0%}；一般策略單={general_trades}筆；"
+            f"每日保底單={daily_min_trades}筆；門檻=至少{required_general}筆/{calendar_days}日"
+        ),
+        "sample_sufficient": True,
+        "calendar_days": calendar_days,
+        "trade_days": trade_days,
+        "trade_day_coverage": round(coverage_ratio, 4),
+        "trades": trades,
+        "daily_min_trades": daily_min_trades,
+        "general_trades": general_trades,
+        "required_general_trades": required_general,
+    }
+
+
 def _run_check(name, fn):
     started_at = _iso_now()
     result = {
@@ -1690,6 +1751,7 @@ def main():
         ("telegram_policy", _check_telegram_policy_and_repair),
         ("telegram_watch_risk", _check_telegram_watch_risk),
         ("model_health", _check_models_and_repair),
+        ("strategy_strictness", _check_strategy_strictness),
         ("runtime_storage", _check_runtime_storage_and_cleanup),
     ]
     if not args.skip_smoke_backtest:
