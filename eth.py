@@ -3127,6 +3127,24 @@ def _assess_multitimeframe_bull_reclaim(
     )
     result["applied"] = bool(applied)
     result["reason"] = "15m/1H/4H同向且站穩前壓" if applied else "quality_gate_not_met"
+    result["diagnostics"] = {
+        "market_phase": str(profile.get("phase") or "range_base"),
+        "price": round(_safe_float(price, 0.0), 4),
+        "required_price": round(reclaim_level * (1.0 + buffer_rate), 4),
+        "breakout": _safe_int(breakout, 0),
+        "sweep_high": bool(sweep_high),
+        "macro_bias": round(_safe_float(macro_bias, 0.0), 4),
+        "min_macro_bias": round(min_macro_bias, 4),
+        "derivatives_pressure": round(_safe_float(derivatives_pressure, 0.0), 4),
+        "event_risk": _safe_int(event_risk, 0),
+        "rsi_15m": round(_safe_float(rsi_15m, 100.0), 2),
+        "max_rsi": round(effective_max_rsi, 2),
+        "ema50_deviation_15m": round(_safe_float(ema50_deviation_15m, 1.0), 5),
+        "max_ema50_deviation": round(max_ema_deviation, 5),
+        "ai_long_prob": round(_safe_float(ai_long_prob, 0.0), 4),
+        "min_ai_long_prob": round(min_long_prob, 4),
+        "opposing_turn": bool(opposing_turn),
+    }
     return result
 
 
@@ -7700,6 +7718,7 @@ def sync_position_panel(current_price=None):
             "strategy_ai_long_prob": round(_safe_float(POSITION_PANEL_STATE.get("strategy_ai_long_prob"), 0.5), 4),
             "strategy_ai_short_prob": round(_safe_float(POSITION_PANEL_STATE.get("strategy_ai_short_prob"), 0.5), 4),
             "strategy_regime": str(POSITION_PANEL_STATE.get("strategy_regime") or ""),
+            "strategy_reclaim_gate": dict(POSITION_PANEL_STATE.get("strategy_reclaim_gate") or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -10070,6 +10089,7 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
             "strategy_ai_long_prob": round(ai_long_prob, 4),
             "strategy_ai_short_prob": round(ai_short_prob, 4),
             "strategy_regime": str(decision.get("regime") or POSITION_PANEL_STATE.get("strategy_regime") or ""),
+            "strategy_reclaim_gate": dict(decision.get("multitimeframe_bull_reclaim") or {}),
         }
     )
 
