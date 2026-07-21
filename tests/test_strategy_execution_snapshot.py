@@ -19,20 +19,12 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         eth.active_trade.update(self.active_trade)
 
     def test_validated_mark_price_is_used_for_strategy(self):
-        price = eth._validated_strategy_mark_price(
-            {"price": 1871.80},
-            1871.20,
-            reference_price=1871.40,
-        )
+        price = eth._validated_strategy_mark_price({"price": 1871.80})
         self.assertEqual(price, 1871.80)
 
-    def test_strategy_rejects_mark_price_outlier(self):
-        with self.assertRaisesRegex(RuntimeError, "交叉驗證失敗"):
-            eth._validated_strategy_mark_price(
-                {"price": 1900.0},
-                1871.20,
-                reference_price=1871.40,
-            )
+    def test_strategy_rejects_invalid_mark_price(self):
+        with self.assertRaisesRegex(RuntimeError, "標記價格無效"):
+            eth._validated_strategy_mark_price({"price": 0.0})
 
     def test_real_order_priority_is_enabled_by_default(self):
         with patch.dict(eth.os.environ, {}, clear=True):

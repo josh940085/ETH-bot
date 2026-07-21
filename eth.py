@@ -9807,29 +9807,6 @@ if LIVE_RUNTIME_ENABLED:
     threading.Thread(target=ws_liquidation_stream, name="binance-liquidation-stream", daemon=True).start()
 
 
-def _validated_market_price(kline_price, reference_price=None, now_ts=None):
-    """優先用即時成交價核對；不可用時至少核對 1m/5m 價格一致性。"""
-    now_ts = _safe_float(now_ts, time.time())
-    kline_price = max(0.0, _safe_float(kline_price, 0.0))
-    ws_price = max(0.0, _safe_float(WS_PRICE, 0.0))
-    ws_age = max(0.0, now_ts - _safe_float(WS_PRICE_TS, 0.0))
-    max_age = max(5.0, _safe_float(os.getenv("MARKET_PRICE_VALIDATION_MAX_AGE_SEC", 30), 30))
-    max_deviation = max(0.0005, _safe_float(os.getenv("MARKET_PRICE_VALIDATION_MAX_DEVIATION_RATE", 0.003), 0.003))
-    reference_price = max(0.0, _safe_float(reference_price, 0.0))
-    validation_price = ws_price if ws_price > 0 and ws_age <= max_age else reference_price
-    validation_source = "WebSocket" if validation_price == ws_price and ws_price > 0 else "TradingView-5m"
-    if kline_price <= 0 or validation_price <= 0:
-        raise RuntimeError("行情交叉驗證缺少可用參考價格")
-    deviation = abs(validation_price - kline_price) / max(validation_price, kline_price, 1e-9)
-    if deviation > max_deviation:
-        raise RuntimeError(
-            f"行情交叉驗證價差過大 TradingView-1m={kline_price:.2f} "
-            f"{validation_source}={validation_price:.2f} "
-            f"deviation={deviation*100:.3f}%"
-        )
-    return ws_price if ws_price > 0 and ws_age <= max_age else kline_price
-
-
 def _fetch_strategy_mark_price(symbol="ETHUSDT"):
     """Read the already cross-checked Mark Price from the local panel service."""
     symbol = str(symbol or "ETHUSDT").upper()
@@ -9860,23 +9837,12 @@ def _fetch_strategy_mark_price(symbol="ETHUSDT"):
     return payload
 
 
-def _validated_strategy_mark_price(mark_payload, kline_price, reference_price=None):
-    """Require the validated Mark Price to agree with independent market data."""
+def _validated_strategy_mark_price(mark_payload):
+    """Use the panel-validated Binance Mark Price as execution authority."""
     payload = mark_payload if isinstance(mark_payload, dict) else {}
     mark_price = max(0.0, _safe_float(payload.get("price"), 0.0))
-    kline_price = max(0.0, _safe_float(kline_price, 0.0))
-    reference_price = max(0.0, _safe_float(reference_price, 0.0))
-    max_deviation = max(0.0005, _safe_float(os.getenv("MARKET_PRICE_VALIDATION_MAX_DEVIATION_RATE", 0.003), 0.003))
-    comparisons = [value for value in (kline_price, reference_price) if value > 0]
-    if mark_price <= 0 or not comparisons:
-        raise RuntimeError("策略標記價格缺少交叉驗證參考")
-    for comparison in comparisons:
-        deviation = abs(mark_price - comparison) / max(mark_price, comparison, 1e-9)
-        if deviation > max_deviation:
-            raise RuntimeError(
-                f"策略標記價格交叉驗證失敗 mark={mark_price:.2f} reference={comparison:.2f} "
-                f"deviation={deviation*100:.3f}%"
-            )
+    if mark_price <= 0:
+        raise RuntimeError("策略標記價格無效")
     return mark_price
 
 
@@ -15806,20 +15772,12 @@ def run_bot():
             breakout = 0
             recent_high = df_5m["high"].iloc[-5:-1].max()
             recent_low = df_5m["low"].iloc[-5:-1].min()
-            validated_kline_price = _validated_market_price(
-                df_1m["close"].iloc[-1],
-                reference_price=df_5m["close"].iloc[-1],
-            )
             # Shadow analysis must stay independent from Binance.  The live
-            # strategy may validate against Binance WebSocket prices, but
-            # shadow entries and grading use the externally routed 1m candle.
+            # strategy executes from validated Binance Mark Price, while shadow
+            # entries and grading use the externally routed 1m candle.
             shadow_price = max(0.0, _safe_float(df_1m["close"].iloc[-1], 0.0))
             mark_payload = _fetch_strategy_mark_price(COPY_TRADE_SYMBOL)
-            price = _validated_strategy_mark_price(
-                mark_payload,
-                validated_kline_price,
-                reference_price=df_5m["close"].iloc[-1],
-            )
+            price = _validated_strategy_mark_price(mark_payload)
             POSITION_PANEL_STATE["binance_mark_price"] = price
             POSITION_PANEL_STATE["binance_mark_price_ts"] = _safe_int(mark_payload.get("exchange_ts"), int(time.time()))
 
