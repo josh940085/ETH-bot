@@ -12834,6 +12834,14 @@ def build_trade_signal_snapshot(
             else:
                 position_size = base * 0.3
 
+            position_size *= min(
+                1.50,
+                max(
+                    0.50,
+                    _safe_float(os.getenv("TRADE_POSITION_SIZE_MULTIPLIER", 1.20), 1.20),
+                ),
+            )
+
             if losing_streak >= 3:
                 position_size *= 0.5
 
