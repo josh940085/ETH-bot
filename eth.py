@@ -3012,7 +3012,7 @@ def _assess_multitimeframe_bull_reclaim(
     )
     max_rsi = max(
         65.0,
-        min(82.0, _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MAX_RSI", 70.0), 70.0)),
+        min(82.0, _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MAX_RSI", 75.0), 75.0)),
     )
     max_ema_deviation = max(
         0.005,
