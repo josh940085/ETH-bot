@@ -6551,6 +6551,39 @@ def _queue_panel_realtime_publish(payload):
     PANEL_REALTIME_PUBLISH_EVENT.set()
 
 
+def _dedupe_position_close_hits(hits, *, window_sec=None, limit=10):
+    """Collapse partial-fill/retry records that belong to one close event."""
+    if not isinstance(hits, list):
+        return []
+    window = max(
+        30.0,
+        _safe_float(
+            window_sec
+            if window_sec is not None
+            else os.getenv("POSITION_CLOSE_DEDUPE_SEC", 300),
+            300.0,
+        ),
+    )
+    deduped = []
+    for raw in hits:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        reason = str(item.get("reason") or "").upper()
+        ts = _safe_int(item.get("ts"), 0)
+        duplicate = any(
+            str(existing.get("reason") or "").upper() == reason
+            and abs(_safe_int(existing.get("ts"), 0) - ts) <= window
+            for existing in deduped
+        )
+        if duplicate:
+            continue
+        deduped.append(item)
+        if len(deduped) >= max(1, _safe_int(limit, 10)):
+            break
+    return deduped
+
+
 def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0):
     reason_text = str(reason or "").upper()
     if reason_text not in {"TP", "SL", "MANUAL", "MAX_HOLD"}:
@@ -6563,9 +6596,22 @@ def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0
     POSITION_PANEL_STATE["last_close_candle_high"] = round(_safe_float(candle_high, 0.0), 4)
     POSITION_PANEL_STATE["last_close_candle_low"] = round(_safe_float(candle_low, 0.0), 4)
 
-    hits = POSITION_PANEL_STATE.get("close_hits")
-    if not isinstance(hits, list):
-        hits = []
+    hits = _dedupe_position_close_hits(POSITION_PANEL_STATE.get("close_hits"))
+    dedupe_sec = max(30.0, _safe_float(os.getenv("POSITION_CLOSE_DEDUPE_SEC", 300), 300.0))
+    if (
+        hits
+        and str(hits[0].get("reason") or "").upper() == reason_text
+        and ts_now - _safe_int(hits[0].get("ts"), 0) <= dedupe_sec
+    ):
+        # Binance can fill one protective close in several pieces. Keep the
+        # latest/final fill price without turning those fills into many losses.
+        hits[0] = {
+            "reason": reason_text,
+            "price": round(_safe_float(current_price, 0.0), 4),
+            "ts": ts_now,
+        }
+        POSITION_PANEL_STATE["close_hits"] = hits[:10]
+        return False
     hits.insert(
         0,
         {
@@ -6575,6 +6621,7 @@ def record_position_close(reason, current_price, candle_high=0.0, candle_low=0.0
         },
     )
     POSITION_PANEL_STATE["close_hits"] = hits[:10]
+    return True
 
 
 def _build_sl_strategy_review(direction, entry, tp, sl, close_price, atr_ref, context, *, stop_atr, planned_rr, stop_overshoot, alignment_score):
@@ -7351,8 +7398,8 @@ def _build_daily_min_trade_plan(
 
 
 def _recent_tp_sl_stats(limit=5):
-    hits = POSITION_PANEL_STATE.get("close_hits")
-    if not isinstance(hits, list):
+    hits = _dedupe_position_close_hits(POSITION_PANEL_STATE.get("close_hits"))
+    if not hits:
         return {"total": 0, "tp": 0, "sl": 0}
 
     total = 0
@@ -7485,6 +7532,11 @@ def _recent_sl_guard_reason(final, score, net_edge_rate_est, risk_rate, macro_bi
 
 
 def sync_position_panel(current_price=None):
+    # Normalize historical partial-fill/retry duplicates before persisting or
+    # calculating the live recent TP/SL record.
+    POSITION_PANEL_STATE["close_hits"] = _dedupe_position_close_hits(
+        POSITION_PANEL_STATE.get("close_hits")
+    )
     _refresh_position_panel_account_state(force=False, log_on_error=False)
     entry_price = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
     last_price = _safe_float(current_price if current_price is not None else WS_PRICE, 0.0)
@@ -9383,7 +9435,40 @@ def _get_entry_confirm_candle_id(df_5m):
         return None
 
 
-def _evaluate_pending_entry_confirmation(pending, direction, price, score, candle_id, now_ts):
+def _entry_confirmation_requires_pullback(direction, decision):
+    """Require a retest for breakout/reclaim entries, not every signal."""
+    payload = decision if isinstance(decision, dict) else {}
+    final = str(payload.get("final") or "")
+    reclaim = (
+        payload.get("multitimeframe_bull_reclaim")
+        if isinstance(payload.get("multitimeframe_bull_reclaim"), dict)
+        else {}
+    )
+    breakout = _safe_int(payload.get("breakout"), 0)
+    regime = str(payload.get("regime") or "")
+    if direction == "long" and reclaim.get("applied"):
+        return True
+    if direction == "long" and breakout == 1 and regime in {"bull_trend", "bull_trend_strong"}:
+        return True
+    if direction == "short" and breakout == -1 and regime in {"bear_trend", "bear_trend_strong"}:
+        return True
+    if direction == "long" and "突破" in final:
+        return True
+    if direction == "short" and "跌破" in final:
+        return True
+    return False
+
+
+def _evaluate_pending_entry_confirmation(
+    pending,
+    direction,
+    price,
+    score,
+    candle_id,
+    now_ts,
+    *,
+    require_pullback=False,
+):
     if not pending:
         return False, "建立待確認訊號"
 
@@ -9414,6 +9499,49 @@ def _evaluate_pending_entry_confirmation(pending, direction, price, score, candl
         return False, "等待下一根 5m K 確認"
 
     move_rate = (price - pending_price) / pending_price
+    if require_pullback or pending.get("require_pullback"):
+        pending["require_pullback"] = True
+        min_pullback = max(
+            0.0003,
+            min(
+                0.003,
+                _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_PULLBACK_MIN_RATE", 0.0006), 0.0006),
+            ),
+        )
+        reclaim_tolerance = max(
+            0.0,
+            min(
+                min_pullback,
+                _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_RECLAIM_TOLERANCE_RATE", 0.0002), 0.0002),
+            ),
+        )
+        if direction == "long":
+            if not pending.get("pullback_seen") and move_rate <= -min_pullback:
+                pending["pullback_seen"] = True
+                pending["pullback_extreme_price"] = float(price)
+            elif pending.get("pullback_seen"):
+                pending["pullback_extreme_price"] = min(
+                    _safe_float(pending.get("pullback_extreme_price"), price),
+                    float(price),
+                )
+            if not pending.get("pullback_seen"):
+                return False, f"等待多單回踩至少 {min_pullback*100:.2f}%"
+            if price < pending_price * (1.0 - reclaim_tolerance):
+                return False, "等待多單回踩後重新站回突破位"
+        else:
+            if not pending.get("pullback_seen") and move_rate >= min_pullback:
+                pending["pullback_seen"] = True
+                pending["pullback_extreme_price"] = float(price)
+            elif pending.get("pullback_seen"):
+                pending["pullback_extreme_price"] = max(
+                    _safe_float(pending.get("pullback_extreme_price"), price),
+                    float(price),
+                )
+            if not pending.get("pullback_seen"):
+                return False, f"等待空單反彈至少 {min_pullback*100:.2f}%"
+            if price > pending_price * (1.0 + reclaim_tolerance):
+                return False, "等待空單反彈後重新跌破確認位"
+
     if direction == "long":
         if move_rate > max_chase:
             return False, f"多單已追高 {move_rate*100:.2f}%"
@@ -11582,6 +11710,42 @@ def _maybe_backfill_pending_training_sample(
     return pending_sample
 
 
+def _dedupe_sl_followup_reviews(reviews, *, window_sec=None):
+    """Keep one follow-up lesson for all fills/retries of the same SL."""
+    if not isinstance(reviews, list):
+        return []
+    window = max(
+        30.0,
+        _safe_float(
+            window_sec
+            if window_sec is not None
+            else os.getenv("POSITION_CLOSE_DEDUPE_SEC", 300),
+            300.0,
+        ),
+    )
+    deduped = []
+    for raw in reviews:
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        direction = _normalize_trade_direction(item.get("direction"))
+        close_ts = _safe_float(item.get("close_ts"), 0.0)
+        duplicate_index = next(
+            (
+                idx
+                for idx, existing in enumerate(deduped)
+                if _normalize_trade_direction(existing.get("direction")) == direction
+                and abs(_safe_float(existing.get("close_ts"), 0.0) - close_ts) <= window
+            ),
+            None,
+        )
+        if duplicate_index is not None:
+            deduped[duplicate_index] = item
+        else:
+            deduped.append(item)
+    return deduped[-200:]
+
+
 def _load_sl_followup_reviews():
     if not SL_FOLLOWUP_REVIEWS_PATH.exists():
         return []
@@ -11624,7 +11788,7 @@ def _load_sl_followup_reviews():
             }
         )
 
-    return reviews[-200:]
+    return _dedupe_sl_followup_reviews(reviews)[-200:]
 
 
 SL_FOLLOWUP_REVIEWS = _load_sl_followup_reviews()
@@ -11651,7 +11815,7 @@ def _queue_sl_followup_review(features, direction, close_price, close_ts, atr):
         return
 
     SL_FOLLOWUP_REVIEWS.append(sample)
-    SL_FOLLOWUP_REVIEWS = SL_FOLLOWUP_REVIEWS[-200:]
+    SL_FOLLOWUP_REVIEWS = _dedupe_sl_followup_reviews(SL_FOLLOWUP_REVIEWS)
     _save_sl_followup_reviews()
 
 
@@ -16116,6 +16280,11 @@ def run_bot():
 
             # ===== Macro（時事）=====
             sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk, news_list = get_macro_bias()
+            # Position management runs before the next signal snapshot. Compute
+            # this now so SL review never reads the later decision-only value.
+            macro_bias = _compute_macro_bias(
+                sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
+            )
             derivatives_flow = get_derivatives_flow_snapshot(COPY_TRADE_SYMBOL)
             POSITION_PANEL_STATE["liquidation_pressure"] = _safe_float(derivatives_flow.get("liquidation_pressure"), 0.0)
             POSITION_PANEL_STATE["liquidation_event_count"] = _safe_int(derivatives_flow.get("liquidation_event_count"), 0)
@@ -16197,9 +16366,7 @@ def run_bot():
                 "fifteen_min_range_pos": higher_tf_context.get("fifteen_min_range_pos"),
                 "regime": regime,
                 "breakout": breakout,
-                "macro": _compute_macro_bias(
-                    sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
-                ),
+                "macro": macro_bias,
                 "volume_spike": bool(
                     df_15m["volume"].iloc[-1]
                     > df_15m["vol_ma20"].iloc[-1] * 1.5
@@ -16404,9 +16571,7 @@ def run_bot():
                         "htf": htf,
                         "mid_trend": mid_trend,
                         "breakout": breakout,
-                        "macro_bias": _compute_macro_bias(
-                            sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
-                        ),
+                        "macro_bias": macro_bias,
                         "news_bias": news_bias,
                         "event_risk": event_risk,
                         "symbol": "ETHUSDT",
@@ -16420,9 +16585,7 @@ def run_bot():
                         "htf": htf,
                         "mid_trend": mid_trend,
                         "breakout": breakout,
-                        "macro_bias": _compute_macro_bias(
-                            sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk
-                        ),
+                        "macro_bias": macro_bias,
                         "news_bias": news_bias,
                         "event_risk": event_risk,
                         "symbol": "ETHUSDT",
@@ -17176,6 +17339,7 @@ def run_bot():
 
                 if entry_confirm_enabled and not daily_min_trade:
                     candle_id = _get_entry_confirm_candle_id(df_5m)
+                    require_pullback = _entry_confirmation_requires_pullback(direction, decision)
                     confirmed, confirm_msg = _evaluate_pending_entry_confirmation(
                         pending_entry_confirmation,
                         direction,
@@ -17183,6 +17347,7 @@ def run_bot():
                         score,
                         candle_id,
                         now_ts,
+                        require_pullback=require_pullback,
                     )
                     if not confirmed:
                         keep_waiting = (
@@ -17198,6 +17363,7 @@ def run_bot():
                                 "final": final,
                                 "ts": now_ts,
                                 "candle_id": candle_id,
+                                "require_pullback": require_pullback,
                             }
                         print(f"⏳ 進場延遲確認 | {direction} | {confirm_msg} | 價格 {price:.2f}")
                         _update_panel_execution_snapshot(
