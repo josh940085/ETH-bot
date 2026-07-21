@@ -3035,6 +3035,26 @@ def _assess_multitimeframe_bull_reclaim(
             _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MIN_15M_CHANGE_PCT", 4.0), 4.0),
         ),
     )
+    active_breakout = _safe_int(breakout, 0) == 1
+    breakout_max_rsi = max(
+        65.0,
+        min(
+            82.0,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_BREAKOUT_MAX_RSI", 75.0), 75.0),
+        ),
+    )
+    breakout_min_15m_change = max(
+        1.0,
+        min(
+            8.0,
+            _safe_float(
+                os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_BREAKOUT_MIN_15M_CHANGE_PCT", 3.5),
+                3.5,
+            ),
+        ),
+    )
+    effective_max_rsi = breakout_max_rsi if active_breakout else max_rsi
+    effective_min_15m_change = breakout_min_15m_change if active_breakout else min_15m_change
     min_1h_change = max(
         2.0,
         min(
@@ -3069,7 +3089,7 @@ def _assess_multitimeframe_bull_reclaim(
             "price_buffer_rate": round(buffer_rate, 6),
             "max_position_size": round(max_position_size, 4),
             "min_change_pct": {
-                "15m": round(min_15m_change, 4),
+                "15m": round(effective_min_15m_change, 4),
                 "1H": round(min_1h_change, 4),
                 "4H": round(min_4h_change, 4),
             },
@@ -3092,7 +3112,7 @@ def _assess_multitimeframe_bull_reclaim(
         )
         and _safe_int(context.get("daily_trend"), 0) == -1
         and _safe_int(context.get("weekly_trend"), 0) == -1
-        and _safe_float(context.get("fifteen_min_window_change_pct"), 0.0) >= min_15m_change
+        and _safe_float(context.get("fifteen_min_window_change_pct"), 0.0) >= effective_min_15m_change
         and _safe_float(context.get("one_hour_window_change_pct"), 0.0) >= min_1h_change
         and _safe_float(context.get("four_hour_window_change_pct"), 0.0) >= min_4h_change
         and _safe_float(price, 0.0) >= reclaim_level * (1.0 + buffer_rate)
@@ -3101,7 +3121,7 @@ def _assess_multitimeframe_bull_reclaim(
         and _safe_float(macro_bias, 0.0) >= min_macro_bias
         and _safe_float(derivatives_pressure, 0.0) >= -0.12
         and _safe_int(event_risk, 0) <= 1
-        and _safe_float(rsi_15m, 100.0) <= max_rsi
+        and _safe_float(rsi_15m, 100.0) <= effective_max_rsi
         and abs(_safe_float(ema50_deviation_15m, 1.0)) <= max_ema_deviation
         and _safe_float(ai_long_prob, 0.0) >= min_long_prob
         and not opposing_turn

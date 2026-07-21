@@ -62,6 +62,75 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(result["reclaim_level"], 1925.04)
         self.assertLessEqual(result["max_position_size"], 0.05)
 
+    def test_multitimeframe_bull_reclaim_allows_live_confirmed_breakout(self):
+        result = eth._assess_multitimeframe_bull_reclaim(
+            price=1936.0,
+            higher_timeframe={
+                "fifteen_min_trend": 1,
+                "one_hour_trend": 1,
+                "four_hour_trend": 1,
+                "fifteen_min_window_change_pct": 3.9611,
+                "one_hour_window_change_pct": 8.6726,
+                "four_hour_window_change_pct": 10.9183,
+                "daily_trend": -1,
+                "weekly_trend": -1,
+                "fifteen_min_resistance": 1928.816,
+                "one_hour_resistance": 1924.9924,
+            },
+            market_profile={"phase": "range_base"},
+            regime="bull_trend",
+            htf=1,
+            mid_trend=1,
+            breakout=1,
+            sweep_high=False,
+            macro_bias=1.5,
+            derivatives_pressure=0.0,
+            event_risk=0,
+            rsi_15m=72.7,
+            ema50_deviation_15m=0.00997,
+            ai_long_prob=0.8301,
+            candlestick_turn_direction="neutral",
+            candlestick_turn_count=1,
+            candlestick_turn_confidence=0.0,
+        )
+
+        self.assertTrue(result["applied"])
+        self.assertEqual(result["min_change_pct"]["15m"], 3.5)
+
+    def test_multitimeframe_bull_reclaim_does_not_relax_rsi_without_breakout(self):
+        result = eth._assess_multitimeframe_bull_reclaim(
+            price=1936.0,
+            higher_timeframe={
+                "fifteen_min_trend": 1,
+                "one_hour_trend": 1,
+                "four_hour_trend": 1,
+                "fifteen_min_window_change_pct": 3.9611,
+                "one_hour_window_change_pct": 8.6726,
+                "four_hour_window_change_pct": 10.9183,
+                "daily_trend": -1,
+                "weekly_trend": -1,
+                "fifteen_min_resistance": 1928.816,
+                "one_hour_resistance": 1924.9924,
+            },
+            market_profile={"phase": "range_base"},
+            regime="bull_trend",
+            htf=1,
+            mid_trend=1,
+            breakout=0,
+            sweep_high=False,
+            macro_bias=1.5,
+            derivatives_pressure=0.0,
+            event_risk=0,
+            rsi_15m=72.7,
+            ema50_deviation_15m=0.00997,
+            ai_long_prob=0.8301,
+            candlestick_turn_direction="neutral",
+            candlestick_turn_count=1,
+            candlestick_turn_confidence=0.0,
+        )
+
+        self.assertFalse(result["applied"])
+
     def test_multitimeframe_bull_reclaim_still_blocks_unreclaimed_pressure(self):
         result = eth._assess_multitimeframe_bull_reclaim(
             price=1924.90,
