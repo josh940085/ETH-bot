@@ -1057,6 +1057,7 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
     size = float(decision["position_size"])
     if size <= 0:
         size = 0.2
+    quality_signal = bool(decision.get("daily_anchor_quality_signal"))
     host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
     regime = str(decision.get("regime") or "range")
     counter_trend_probe = (
@@ -1073,10 +1074,13 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         str(host_logic.get("mode") or "") == "daily_minimum"
         or counter_trend_probe
         or opposing_turn_probe
+        or quality_signal
     ) else 0.1
     size = float(min(1.0, max(size, min_open_size)))
     max_size, min_size = eth._derive_scaling_bounds(size)
-    if "max_position_size" in decision:
+    if quality_signal:
+        max_size = size
+    elif "max_position_size" in decision:
         max_size = max(size, float(decision.get("max_position_size") or size))
     raw_features = decision.get("features") if isinstance(decision.get("features"), dict) else {}
     learn_features = eth._build_directional_learning_features(raw_features, direction)

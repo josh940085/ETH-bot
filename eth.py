@@ -2958,6 +2958,159 @@ def _classify_wait_state(final, *, repeated_support_tests, repeated_resistance_t
     return final_text
 
 
+def _assess_multitimeframe_bull_reclaim(
+    *,
+    price,
+    higher_timeframe,
+    market_profile,
+    regime,
+    htf,
+    mid_trend,
+    breakout,
+    sweep_high,
+    macro_bias,
+    derivatives_pressure,
+    event_risk,
+    rsi_15m,
+    ema50_deviation_15m,
+    ai_long_prob,
+    candlestick_turn_direction,
+    candlestick_turn_count,
+    candlestick_turn_confidence,
+):
+    """Recognize a sustained reclaim after the one-bar breakout flag has expired."""
+    result = {
+        "enabled": _is_truthy(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_ENABLED", "1")),
+        "applied": False,
+        "reclaim_level": 0.0,
+        "price_buffer_rate": 0.0,
+        "max_position_size": 0.0,
+        "reason": "",
+    }
+    if not result["enabled"]:
+        result["reason"] = "disabled"
+        return result
+
+    context = higher_timeframe if isinstance(higher_timeframe, dict) else {}
+    profile = market_profile if isinstance(market_profile, dict) else {}
+    resistance_levels = [
+        _safe_float(context.get("fifteen_min_resistance"), 0.0),
+        _safe_float(context.get("one_hour_resistance"), 0.0),
+    ]
+    resistance_levels = [level for level in resistance_levels if level > 0]
+    if not resistance_levels:
+        result["reason"] = "missing_resistance"
+        return result
+
+    reclaim_level = max(resistance_levels)
+    buffer_rate = max(
+        0.0002,
+        min(
+            0.003,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_BUFFER_RATE", 0.001), 0.001),
+        ),
+    )
+    max_rsi = max(
+        65.0,
+        min(82.0, _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MAX_RSI", 70.0), 70.0)),
+    )
+    max_ema_deviation = max(
+        0.005,
+        min(
+            0.04,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MAX_EMA_DEVIATION", 0.02), 0.02),
+        ),
+    )
+    min_long_prob = max(
+        0.50,
+        min(
+            0.75,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MIN_LONG_PROB", 0.65), 0.65),
+        ),
+    )
+    min_15m_change = max(
+        1.0,
+        min(
+            8.0,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MIN_15M_CHANGE_PCT", 4.0), 4.0),
+        ),
+    )
+    min_1h_change = max(
+        2.0,
+        min(
+            15.0,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MIN_1H_CHANGE_PCT", 8.0), 8.0),
+        ),
+    )
+    min_4h_change = max(
+        3.0,
+        min(
+            25.0,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MIN_4H_CHANGE_PCT", 10.0), 10.0),
+        ),
+    )
+    min_macro_bias = max(
+        0.30,
+        min(
+            2.0,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MIN_MACRO_BIAS", 1.0), 1.0),
+        ),
+    )
+    max_position_size = max(
+        0.01,
+        min(
+            0.05,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_MAX_SIZE", 0.05), 0.05),
+        ),
+    )
+    result.update(
+        {
+            "reclaim_level": round(reclaim_level, 4),
+            "price_buffer_rate": round(buffer_rate, 6),
+            "max_position_size": round(max_position_size, 4),
+            "min_change_pct": {
+                "15m": round(min_15m_change, 4),
+                "1H": round(min_1h_change, 4),
+                "4H": round(min_4h_change, 4),
+            },
+        }
+    )
+
+    opposing_turn = (
+        str(candlestick_turn_direction or "neutral") == "short"
+        and _safe_int(candlestick_turn_count, 0) >= 2
+        and _safe_float(candlestick_turn_confidence, 0.0) >= 0.60
+    )
+    applied = (
+        str(regime or "") in {"bull_trend", "bull_trend_strong"}
+        and str(profile.get("phase") or "range_base") != "bear"
+        and _safe_int(htf, 0) == 1
+        and _safe_int(mid_trend, 0) == 1
+        and all(
+            _safe_int(context.get(f"{prefix}_trend"), 0) == 1
+            for prefix in ("fifteen_min", "one_hour", "four_hour")
+        )
+        and _safe_int(context.get("daily_trend"), 0) == -1
+        and _safe_int(context.get("weekly_trend"), 0) == -1
+        and _safe_float(context.get("fifteen_min_window_change_pct"), 0.0) >= min_15m_change
+        and _safe_float(context.get("one_hour_window_change_pct"), 0.0) >= min_1h_change
+        and _safe_float(context.get("four_hour_window_change_pct"), 0.0) >= min_4h_change
+        and _safe_float(price, 0.0) >= reclaim_level * (1.0 + buffer_rate)
+        and _safe_int(breakout, 0) != -1
+        and not bool(sweep_high)
+        and _safe_float(macro_bias, 0.0) >= min_macro_bias
+        and _safe_float(derivatives_pressure, 0.0) >= -0.12
+        and _safe_int(event_risk, 0) <= 1
+        and _safe_float(rsi_15m, 100.0) <= max_rsi
+        and abs(_safe_float(ema50_deviation_15m, 1.0)) <= max_ema_deviation
+        and _safe_float(ai_long_prob, 0.0) >= min_long_prob
+        and not opposing_turn
+    )
+    result["applied"] = bool(applied)
+    result["reason"] = "15m/1H/4H同向且站穩前壓" if applied else "quality_gate_not_met"
+    return result
+
+
 def _load_learning_buffer_samples(max_per_label=40):
     try:
         with open(NEWS_LEARNING_BUFFER, "rb") as f:
@@ -8959,6 +9112,31 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     sweep_high = bool(decision.get("sweep_high"))
     score_value = _safe_float(score, 0.5)
 
+    bull_reclaim = (
+        decision.get("multitimeframe_bull_reclaim")
+        if isinstance(decision.get("multitimeframe_bull_reclaim"), dict)
+        else {}
+    )
+    if (
+        direction == "long"
+        and bull_reclaim.get("applied")
+        and market_phase != "bear"
+        and score_value >= 0.72
+        and net_edge >= 0.0012
+        and 0 < risk_rate <= 0.03
+    ):
+        quality_max_size = max(
+            0.01,
+            min(0.05, _safe_float(bull_reclaim.get("max_position_size"), 0.05)),
+        )
+        decision["position_size"] = min(
+            max(0.0, _safe_float(decision.get("position_size"), 0.0)),
+            quality_max_size,
+        )
+        decision["max_position_size"] = decision["position_size"]
+        decision["daily_anchor_quality_signal"] = True
+        return False
+
     if market_phase == "bull":
         return False
     if market_phase == "bear":
@@ -12667,6 +12845,57 @@ def build_trade_signal_snapshot(
     ema50_15m = max(1e-9, _safe_float(df_15m["ema50"].iloc[-1], price))
     ema50_deviation = (price - ema50_15m) / ema50_15m
 
+    multitimeframe_bull_reclaim = _assess_multitimeframe_bull_reclaim(
+        price=price,
+        higher_timeframe=higher_timeframe,
+        market_profile=market_profile,
+        regime=regime,
+        htf=htf,
+        mid_trend=mid_trend,
+        breakout=breakout,
+        sweep_high=sweep_high,
+        macro_bias=macro_bias,
+        derivatives_pressure=derivatives_pressure,
+        event_risk=event_risk,
+        rsi_15m=rsi_15m,
+        ema50_deviation_15m=ema50_deviation,
+        ai_long_prob=ai_long_prob,
+        candlestick_turn_direction=candlestick_turn_direction,
+        candlestick_turn_count=candlestick_turn_count,
+        candlestick_turn_confidence=candlestick_turn_confidence,
+    )
+    if multitimeframe_bull_reclaim.get("applied"):
+        reclaim_score_floor = max(
+            0.72,
+            min(
+                0.82,
+                _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_SCORE_FLOOR", 0.74), 0.74),
+            ),
+        )
+        reclaim_prob_floor = max(
+            0.62,
+            min(
+                0.75,
+                _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_PROB_FLOOR", 0.66), 0.66),
+            ),
+        )
+        score = max(score, reclaim_score_floor)
+        ai_prob = max(ai_prob, score)
+        ai_long_prob = max(ai_long_prob, reclaim_prob_floor)
+        learned_entry_logic = dict(learned_entry_logic)
+        learned_entry_logic["resistance_hold_unconfirmed"] = False
+        learned_entry_logic["sustained_resistance_reclaim_confirmed"] = True
+        learned_entry_logic["direction"] = "long"
+        learned_entry_logic["score"] = score
+        learned_entry_logic["confidence"] = max(
+            _safe_float(learned_entry_logic.get("confidence"), 0.0),
+            reclaim_prob_floor,
+        )
+        learned_entry_logic["reasons"] = (
+            [multitimeframe_bull_reclaim.get("reason")]
+            + list(learned_entry_logic.get("reasons") or [])
+        )[:8]
+
     pullback_long = bool(regime in ["bear_trend", "bear_trend_strong"] and mid_trend == 1 and (volume_spike or breakout == 1))
     pullback_short = bool(regime in ["bull_trend", "bull_trend_strong"] and mid_trend == -1 and (volume_spike or breakout == -1))
 
@@ -12842,6 +13071,25 @@ def build_trade_signal_snapshot(
 
             position_size = _cap_initial_position_size(position_size)
 
+    if multitimeframe_bull_reclaim.get("applied"):
+        final = "📈 多週期趨勢續強做多"
+        recent_low_pb = min(df_5m["low"].tail(6).min(), df_15m["low"].tail(6).min())
+        sl = recent_low_pb
+        risk = max(entry - sl, atr * 0.45, entry * 0.001)
+        tp = entry + risk * max(
+            2.0,
+            _safe_float(os.getenv("TRADE_MULTI_TF_BULL_RECLAIM_RR", 2.6), 2.6),
+        )
+        position_size = min(
+            _cap_initial_position_size(
+                max(
+                    0.01,
+                    _safe_float(multitimeframe_bull_reclaim.get("max_position_size"), 0.05),
+                )
+            ),
+            0.05,
+        )
+
     if not final.startswith("觀望"):
         final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
     previous_month_adr = {}
@@ -12927,9 +13175,18 @@ def build_trade_signal_snapshot(
             )
             if direction_win_prob < min_long_prob:
                 final = "觀望（多單歷史勝率偏低）"
-            elif long_setup < short_setup + min_long_setup_edge and not (support_confirm or breakout_confirm):
+            elif (
+                not multitimeframe_bull_reclaim.get("applied")
+                and long_setup < short_setup + min_long_setup_edge
+                and not (support_confirm or breakout_confirm)
+            ):
                 final = "觀望（多單缺少支撐承接或突破確認）"
-            elif resistance_hits >= 1 and not breakout_confirm and score < 0.72:
+            elif (
+                not multitimeframe_bull_reclaim.get("applied")
+                and resistance_hits >= 1
+                and not breakout_confirm
+                and score < 0.72
+            ):
                 final = "觀望（多單壓力未突破）"
         if not final.startswith("觀望"):
             if "做空" in final:
@@ -13005,7 +13262,10 @@ def build_trade_signal_snapshot(
                 range_pos=features.get("range_pos"),
                 timeframe_kline_view=timeframe_kline_view,
             )
-            if macro_indicator_alignment.get("hard_block"):
+            if (
+                macro_indicator_alignment.get("hard_block")
+                and not multitimeframe_bull_reclaim.get("applied")
+            ):
                 final = "觀望（MLX宏觀指標共振不足）"
                 position_size = 0.0
         if (
@@ -13016,7 +13276,9 @@ def build_trade_signal_snapshot(
             host_mode = str(host_opening_logic.get("mode") or "wait")
             direction_name = "long" if "做多" in final else "short"
             profile_ok = False
-            if (
+            if multitimeframe_bull_reclaim.get("applied") and direction_name == "long":
+                profile_ok = True
+            elif (
                 host_mode == "breakdown_after_support_tests"
                 and direction_name == "short"
                 and regime in {"bear_trend", "bear_trend_strong", "bull_trend"}
@@ -13137,6 +13399,8 @@ def build_trade_signal_snapshot(
         "host_logic_applied": bool(host_logic_applied),
         "macro_indicator_alignment": macro_indicator_alignment,
         "learned_entry_logic": learned_entry_logic,
+        "multitimeframe_bull_reclaim": multitimeframe_bull_reclaim,
+        "daily_anchor_quality_signal": bool(multitimeframe_bull_reclaim.get("applied")),
         "market_profile": market_profile,
         "market_profile_phase": market_profile.get("phase"),
         "market_profile_indicator_family": market_profile.get("indicator_family"),
