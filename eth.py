@@ -44,6 +44,18 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
+from openai_chat import (
+    build_openai_chat_payload as _build_openai_chat_payload,
+    extract_openai_chat_text as _extract_openai_chat_text,
+    openai_instruction_role as _openai_instruction_role,
+)
+from runtime_config import (
+    env_float as _safe_float_env,
+    env_int as _safe_int_env,
+    is_truthy as _is_truthy,
+    load_local_env,
+)
+from runtime_paths import REPO_DIR, ai_data_path, data_path, ensure_parent_dir
 from mlx_learning import (
     DB_PATH as MLX_LEARNING_DB_PATH,
     build_daily_strategy_report,
@@ -69,24 +81,15 @@ from mlx_learning import (
     update_actual_trade_outcome,
 )
 from telegram import (
-    REPO_DIR,
-    ai_data_path,
-    data_path,
-    ensure_parent_dir,
     fetch_telegram_commands as tg_fetch_telegram_commands,
     get_follow_mode_enabled as tg_get_follow_mode_enabled,
     get_notification_chat_ids as tg_get_notification_chat_ids,
-    inspect_telegram_delivery as tg_inspect_telegram_delivery,
     is_private_chat_id as tg_is_private_chat_id,
     note_telegram_delivery_event as tg_note_telegram_delivery_event,
-    normalize_chat_id as tg_normalize_chat_id,
-    read_telegram_state_locked as tg_read_telegram_state_locked,
     remove_notification_chat as tg_remove_notification_chat,
     remember_notification_chat as tg_remember_notification_chat,
     resolve_private_chat_id_for_controls as tg_resolve_private_chat_id_for_controls,
-    set_follow_mode_enabled as tg_set_follow_mode_enabled,
     toggle_follow_mode_enabled as tg_toggle_follow_mode_enabled,
-    update_telegram_state as tg_update_telegram_state,
 )
 
 LIVE_RUNTIME_ENABLED = str(os.getenv("ETH_BOT_DISABLE_LIVE", "0") or "0").strip().lower() not in {
@@ -148,28 +151,6 @@ BINANCE_KLINE_SOURCES = (
 
 
 # ===== Environment variables / secrets =====
-def _load_local_env():
-    """簡易讀取 .env（不依賴 python-dotenv）。"""
-    try:
-        env_path = REPO_DIR / ".env"
-        if not env_path.exists():
-            return
-
-        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-
-            if key:
-                os.environ[key] = value
-    except Exception as e:
-        print(f"⚠️ .env 載入失敗: {e}")
-
-
 def _get_required_env(name, default=None, mask=False, warn_if_missing=True):
     value = os.getenv(name, default)
     if value is None or str(value).strip() == "":
@@ -181,7 +162,7 @@ def _get_required_env(name, default=None, mask=False, warn_if_missing=True):
     return value
 
 
-_load_local_env()
+load_local_env(overwrite=True, names=(".env",))
 
 ALLOW_BINANCE_MARKET_DATA_FALLBACK = str(os.getenv("ALLOW_BINANCE_MARKET_DATA_FALLBACK", "0") or "0").strip().lower() in {
     "1",
@@ -277,20 +258,6 @@ def _normalize_mini_app_url(raw_url) -> str:
     return url
 
 
-def _safe_float_env(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, default))
-    except Exception:
-        return float(default)
-
-
-def _safe_int_env(name: str, default: int) -> int:
-    try:
-        return int(str(os.getenv(name, default)).strip())
-    except Exception:
-        return int(default)
-
-
 SHORT_TRADE_MAX_HOLD_SEC = max(3600.0, _safe_float_env("SHORT_TRADE_MAX_HOLD_SEC", 24 * 3600))
 MLX_AGENT_TIMEOUT_SEC = _safe_int_env("MLX_AGENT_TIMEOUT_SEC", 120)
 
@@ -329,52 +296,6 @@ def _safe_float_env_names(names, default: float) -> float:
         except Exception:
             continue
     return float(default)
-
-
-def _uses_reasoning_chat_model(model_name: str) -> bool:
-    model = str(model_name or "").strip().lower()
-    return model.startswith("gpt-5") or model.startswith(("o1", "o3", "o4"))
-
-
-def _openai_instruction_role(model_name: str) -> str:
-    return "developer" if _uses_reasoning_chat_model(model_name) else "system"
-
-
-def _build_openai_chat_payload(model_name: str, messages, temperature=None):
-    model = str(model_name or DEFAULT_OPENAI_CHAT_MODEL).strip() or DEFAULT_OPENAI_CHAT_MODEL
-    payload = {
-        "model": model,
-        "messages": messages,
-    }
-
-    if _uses_reasoning_chat_model(model):
-        if OPENAI_REASONING_EFFORT:
-            payload["reasoning_effort"] = OPENAI_REASONING_EFFORT
-    elif temperature is not None:
-        payload["temperature"] = temperature
-
-    return payload
-
-
-def _extract_openai_chat_text(response_json) -> str:
-    if not isinstance(response_json, dict):
-        return ""
-    choices = response_json.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return ""
-    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
-    if not isinstance(message, dict):
-        return ""
-    content = message.get("content", "")
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        return "".join(
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, dict)
-        ).strip()
-    return ""
 
 
 MINI_APP_URL = _normalize_mini_app_url(os.getenv("TELEGRAM_MINI_APP_URL", DEFAULT_MINI_APP_URL))
@@ -529,20 +450,10 @@ PANEL_REALTIME_LAST_ERROR_TS = 0.0
 PANEL_REALTIME_WORKER_STARTED = False
 
 
-def _parse_telegram_state(raw: str) -> dict:
-    try:
-        payload = json.loads(raw) if str(raw).strip() else {}
-        return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
 
 
-def _read_telegram_state_locked() -> dict:
-    return tg_read_telegram_state_locked()
 
 
-def _update_telegram_state(mutator):
-    return tg_update_telegram_state(mutator)
 
 
 def fetch_telegram_commands(last_update_id=None):
@@ -554,8 +465,6 @@ def fetch_telegram_commands(last_update_id=None):
     )
 
 
-def _normalize_chat_id(value):
-    return tg_normalize_chat_id(value)
 
 
 def _is_private_chat_id(chat_id) -> bool:
@@ -570,8 +479,6 @@ def _remove_notification_chat(chat_id):
     tg_remove_notification_chat(chat_id)
 
 
-def _inspect_telegram_delivery(status_code=None, body="", error=None):
-    return tg_inspect_telegram_delivery(status_code=status_code, body=body, error=error)
 
 
 def _note_telegram_delivery_event(chat_id=None, ok=False, status_code=None, body="", error=None, context=""):
@@ -602,8 +509,6 @@ def _get_follow_mode_enabled() -> bool:
     return tg_get_follow_mode_enabled()
 
 
-def _set_follow_mode_enabled(value: bool):
-    tg_set_follow_mode_enabled(value)
 
 
 def _toggle_follow_mode_enabled() -> bool:
@@ -3256,10 +3161,6 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
             print(f"⚠️ 衍生品資料讀取失敗: {e}")
             get_derivatives_flow_snapshot._last_err_ts = now_ts
         return fallback
-
-
-def _is_truthy(value) -> bool:
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _is_real_copy_enabled() -> bool:
@@ -13201,14 +13102,6 @@ def _tradingview_symbol(symbol):
     return f"BINANCE:{symbol}"
 
 
-def _tradingview_bar_count(interval, limit, start_time_ms=None, end_time_ms=None):
-    requested = max(1, min(10000, _safe_int(limit, 100)))
-    interval_ms = KLINE_INTERVAL_MS.get(str(interval), 60 * 1000)
-    if start_time_ms is not None:
-        end_ms = int(_safe_float(end_time_ms, time.time() * 1000))
-        span = max(0, end_ms - int(_safe_float(start_time_ms, 0.0)))
-        requested = max(requested, int(span // max(1, interval_ms)) + 8)
-    return max(1, min(10000, requested))
 
 
 def _tradingview_requested_bars(interval, limit, start_time_ms=None, end_time_ms=None):

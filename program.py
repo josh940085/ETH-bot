@@ -11,13 +11,11 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
+from runtime_config import load_local_env
+from runtime_paths import REPO_DIR, ai_data_path, data_path
 from telegram import (
-    REPO_DIR,
-    ai_data_path,
     configure_token,
     consume_restart_request,
-    data_path,
-    load_local_env,
     poll_telegram_commands,
 )
 
@@ -480,7 +478,7 @@ def _terminate_process(proc, timeout=10):
 
 
 def run_once() -> int:
-    load_local_env()
+    load_local_env(overwrite=True, names=(".env",))
     configure_token(os.getenv("TELEGRAM_TOKEN", ""))
     backtest_settings = _get_backtest_settings()
     maintenance_settings = _get_maintenance_settings()
@@ -652,7 +650,7 @@ def main():
     if not _acquire_supervisor_lock():
         raise SystemExit(0)
 
-    load_local_env()
+    load_local_env(overwrite=True, names=(".env",))
     configure_token(os.getenv("TELEGRAM_TOKEN", ""))
 
     while True:

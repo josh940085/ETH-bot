@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from telegram import REPO_DIR, data_path
+from runtime_paths import REPO_DIR, data_path
 
 
 BACKTEST_FILE = REPO_DIR / "backtest.py"

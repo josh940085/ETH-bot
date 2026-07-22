@@ -998,9 +998,6 @@ def build_trade_factor_tags(market, direction, structured_payload=None):
     return _build_factor_tags(market, direction, payload)
 
 
-def classify_trade_market_regime(market):
-    market = market if isinstance(market, dict) else {}
-    return _classify_market_regime(market)
 
 
 def _extract_shadow_orders(response):

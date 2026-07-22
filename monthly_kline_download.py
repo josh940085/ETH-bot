@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-import backtest
+from market_history import download_binance_history_zip, validate_binance_history_zip
 from runtime_paths import data_path
 
 
@@ -34,11 +34,11 @@ def download_previous_month(now=None, report_path=None):
     for symbol in symbols:
         for interval in intervals:
             try:
-                path = backtest._download_binance_history_zip(symbol, interval, year, month)
+                path = download_binance_history_zip(symbol, interval, year, month)
                 if path is None:
                     errors.append(f"{symbol}/{interval}: Binance 月檔尚未發布")
                     continue
-                if not backtest._validate_binance_history_zip(path, symbol, interval, year, month):
+                if not validate_binance_history_zip(path, symbol, interval, year, month):
                     errors.append(f"{symbol}/{interval}: 月檔完整性驗證失敗")
                     continue
                 files.append({

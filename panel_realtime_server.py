@@ -17,36 +17,17 @@ import requests
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from runtime_config import (
+    env_bool as _safe_bool_env,
+    env_float as _safe_float_env,
+    env_int as _safe_int_env,
+    load_local_env,
+    read_local_env_values as _read_local_env_values,
+)
+from runtime_paths import data_path
 
 
-def _read_local_env_values():
-    values = {}
-    for name in (".env", "token.env"):
-        path = Path(name)
-        if not path.exists():
-            continue
-        try:
-            for raw_line in path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key:
-                    values[key] = value
-        except Exception:
-            continue
-    return values
-
-
-def _load_local_env():
-    for key, value in _read_local_env_values().items():
-        if key not in os.environ:
-            os.environ[key] = value
-
-
-_load_local_env()
+load_local_env()
 
 TWELVE_API_USAGE_CACHE = {"ts": 0.0, "data": None, "error": ""}
 
@@ -64,27 +45,6 @@ def _load_origins():
     return origins
 
 
-def _safe_float_env(name: str, default: float) -> float:
-    try:
-        return float(os.getenv(name, default))
-    except Exception:
-        return float(default)
-
-
-def _safe_int_env(name: str, default: int) -> int:
-    try:
-        return int(str(os.getenv(name, default)).strip())
-    except Exception:
-        return int(default)
-
-
-def _safe_bool_env(name: str, default: bool = False) -> bool:
-    raw = str(os.getenv(name, "") or "").strip().lower()
-    if not raw:
-        return bool(default)
-    return raw not in {"0", "false", "no", "off"}
-
-
 def _runtime_env_value(name: str, default=""):
     local_values = _read_local_env_values()
     if name in local_values:
@@ -93,9 +53,7 @@ def _runtime_env_value(name: str, default=""):
 
 
 def _build_api_token_usage() -> dict:
-    repo_dir = Path(__file__).resolve().parent
-    data_dir = Path(os.getenv("BOT_DATA_DIR", repo_dir / ".runtime" / "data")).expanduser()
-    usage_path = data_dir / "api_token_usage.json"
+    usage_path = data_path("api_token_usage.json")
     persisted = {}
     try:
         persisted = json.loads(usage_path.read_text(encoding="utf-8"))

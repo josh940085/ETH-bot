@@ -11,6 +11,12 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
+from openai_chat import (
+    build_openai_chat_payload as _build_openai_chat_payload,
+    extract_openai_chat_text as _extract_openai_chat_text,
+    openai_instruction_role as _openai_instruction_role,
+)
+from runtime_config import is_truthy as _is_truthy
 from runtime_paths import data_path, ensure_parent_dir
 
 def _safe_float(value, default=0.0):
@@ -20,34 +26,6 @@ def _safe_float(value, default=0.0):
 def _safe_int(value, default=0):
     try: return int(value)
     except Exception: return int(default)
-
-def _is_truthy(value):
-    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
-
-def _uses_reasoning_chat_model(model_name):
-    return str(model_name or "").strip().lower().startswith(("gpt-5", "o1", "o3", "o4"))
-
-def _openai_instruction_role(model_name):
-    return "developer" if _uses_reasoning_chat_model(model_name) else "system"
-
-def _build_openai_chat_payload(model_name, messages, temperature=None):
-    model = str(model_name or DEFAULT_OPENAI_CHAT_MODEL).strip() or DEFAULT_OPENAI_CHAT_MODEL
-    payload = {"model": model, "messages": messages}
-    if _uses_reasoning_chat_model(model):
-        if OPENAI_REASONING_EFFORT: payload["reasoning_effort"] = OPENAI_REASONING_EFFORT
-    elif temperature is not None: payload["temperature"] = temperature
-    return payload
-
-def _extract_openai_chat_text(response_json):
-    if not isinstance(response_json, dict): return ""
-    choices = response_json.get("choices")
-    if not isinstance(choices, list) or not choices: return ""
-    message = choices[0].get("message") if isinstance(choices[0], dict) else {}
-    content = message.get("content", "") if isinstance(message, dict) else ""
-    if isinstance(content, str): return content.strip()
-    if isinstance(content, list):
-        return "".join(str(part.get("text", "")) for part in content if isinstance(part, dict)).strip()
-    return ""
 
 def _write_json_atomic(path, payload):
     try:
@@ -643,9 +621,6 @@ def _is_market_relevant_news(text: str) -> bool:
     return bool(_news_relevance_reason(text))
 
 
-def _is_crypto_relevant_news(text: str) -> bool:
-    """Backward-compatible alias for older callers."""
-    return _is_market_relevant_news(text)
 
 
 def _sanitize_news_label(label):
@@ -933,21 +908,6 @@ def load_news_model(force_retrain=False):
     news_vectorizer = None
     train_news_model()
 
-def predict_news_sentiment(text):
-    """預測新聞情緒（舊函數，保持兼容性）"""
-    global news_model, news_vectorizer
-    if news_model is None:
-        load_news_model()
-    if news_model is None:
-        return 0  # 預設中性
-
-    prepared = _prepare_news_text_for_model(text)
-    if not prepared:
-        return 0
-
-    X = news_vectorizer.transform([prepared])
-    prediction = news_model.predict(X)[0]
-    return int(prediction)
 
 
 def predict_news_sentiment_with_confidence(text):
@@ -1455,48 +1415,6 @@ def _looks_like_news_title(text):
     return has_signal_word or word_count >= 5
 
 
-def _extract_binance_titles_from_html(body):
-    """先抓 script JSON，再退回 regex，盡量避免因頁面改版而抓不到。"""
-    candidates = []
-
-    # 1) 優先解析 script 內嵌 JSON
-    script_patterns = [
-        r'<script[^>]*id="__APP_DATA"[^>]*>(.*?)</script>',
-        r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>',
-        r'window\.__APP_DATA__\s*=\s*(\{.*?\})\s*;</script>',
-        r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\})\s*;</script>',
-    ]
-
-    for pattern in script_patterns:
-        for raw in re.findall(pattern, body, flags=re.S):
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                parsed = json.loads(raw)
-                for s in _walk_strings(parsed):
-                    if _looks_like_news_title(s):
-                        candidates.append(s)
-            except Exception:
-                continue
-
-    # 2) regex 後備方案
-    title_patterns = [
-        r'"title":"([^"\\]{12,220}(?:\\.[^"\\]*)*)"',
-        r'"headline":"([^"\\]{12,220}(?:\\.[^"\\]*)*)"',
-        r'"subTitle":"([^"\\]{12,220}(?:\\.[^"\\]*)*)"',
-        r'>([^<>]{18,220})</a>',
-        r'>([^<>]{18,220})</h3>',
-        r'>([^<>]{18,220})</h2>',
-    ]
-
-    for pattern in title_patterns:
-        for raw in re.findall(pattern, body, flags=re.S):
-            text = normalize_news_text(raw)
-            if _looks_like_news_title(text):
-                candidates.append(text)
-
-    return candidates
 
 
 # === RSS/ATOM 快訊聚合 ===

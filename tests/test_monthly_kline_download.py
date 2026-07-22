@@ -10,14 +10,14 @@ from unittest import mock
 
 os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 
-import backtest
+import market_history
 import monthly_kline_download
 import program
 
 
 def _monthly_zip_bytes(year, month, interval_ms=300_000):
     start = dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
-    end = backtest._next_month(start)
+    end = market_history.next_month(start)
     start_ms = int(start.timestamp() * 1000)
     count = int((end - start).total_seconds() * 1000 // interval_ms)
     rows = ["open_time,open,high,low,close,volume,close_time"]
@@ -46,12 +46,12 @@ class MonthlyKlineDownloadTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             full = Path(tmp) / "full.zip"
             full.write_bytes(_monthly_zip_bytes(2026, 6))
-            self.assertTrue(backtest._validate_binance_history_zip(full, "ETHUSDT", "5m", 2026, 6))
+            self.assertTrue(market_history.validate_binance_history_zip(full, "ETHUSDT", "5m", 2026, 6))
 
             truncated = Path(tmp) / "truncated.zip"
             payload = _monthly_zip_bytes(2026, 6)
             truncated.write_bytes(payload[: len(payload) // 2])
-            self.assertFalse(backtest._validate_binance_history_zip(truncated, "ETHUSDT", "5m", 2026, 6))
+            self.assertFalse(market_history.validate_binance_history_zip(truncated, "ETHUSDT", "5m", 2026, 6))
 
     def test_completed_report_schedules_next_month_instead_of_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:

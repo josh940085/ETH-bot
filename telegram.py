@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback
 	fcntl = None
 
-from runtime_paths import REPO_DIR, ai_data_path, data_path, ensure_parent_dir
+from runtime_paths import data_path
 
 
 TELEGRAM_STATE_FILE = data_path(".telegram_state.json")
@@ -41,23 +41,6 @@ TELEGRAM_HEALTH_RETENTION_SEC = 7 * 86400
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "ETH-bot-telegram/1.0"})
-
-
-def load_local_env():
-	env_path = REPO_DIR / ".env"
-	if not env_path.exists():
-		return
-
-	for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-		line = raw_line.strip()
-		if not line or line.startswith("#") or "=" not in line:
-			continue
-
-		key, value = line.split("=", 1)
-		key = key.strip()
-		value = value.strip().strip('"').strip("'")
-		if key:
-			os.environ[key] = value
 
 
 def configure_token(token=None):
@@ -252,7 +235,7 @@ def get_notification_chat_ids():
 	return targets
 
 
-def _truncate_telegram_health_text(value, limit=220):
+def truncate_text(value, limit=220):
 	text = str(value or "").strip()
 	if len(text) <= limit:
 		return text
@@ -276,7 +259,7 @@ def _parse_telegram_error_payload(body):
 		description = ""
 
 	if not description:
-		description = _truncate_telegram_health_text(body)
+		description = truncate_text(body)
 
 	return {
 		"description": description,
@@ -295,7 +278,7 @@ def inspect_telegram_delivery(status_code=None, body="", error=None):
 	description = str(payload.get("description", "") or "").strip()
 	retry_after = int(payload.get("retry_after", 0) or 0)
 	if error is not None and not description:
-		description = _truncate_telegram_health_text(error)
+		description = truncate_text(error)
 
 	lower = description.lower()
 	category = "unknown_error"
@@ -344,7 +327,7 @@ def note_telegram_delivery_event(chat_id=None, ok=False, status_code=None, body=
 		"chat_id": chat_text or "",
 		"status_code": info.get("status_code"),
 		"category": str(info.get("category", "") or ""),
-		"description": _truncate_telegram_health_text(info.get("description", "")),
+		"description": truncate_text(info.get("description", "")),
 		"retry_after": int(info.get("retry_after", 0) or 0),
 		"context": str(context or "").strip(),
 	}

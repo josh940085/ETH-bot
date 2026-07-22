@@ -3,12 +3,10 @@ import argparse
 import bisect
 import datetime as dt
 import gzip
-import io
 import json
 import os
 import re
 import warnings
-import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -28,6 +26,8 @@ os.environ.setdefault("ETH_BOT_DISABLE_LIVE", "1")
 
 import eth
 import news
+from market_history import fetch_klines_from_binance_history
+from runtime_config import is_truthy
 from mlx_learning import build_trade_factor_tags
 
 
@@ -120,190 +120,26 @@ def _resolve_timerange(args):
     return start_dt, end_dt
 
 
-def _month_start(value):
-    return dt.datetime(value.year, value.month, 1, tzinfo=dt.timezone.utc)
 
 
-def _next_month(value):
-    if value.month == 12:
-        return dt.datetime(value.year + 1, 1, 1, tzinfo=dt.timezone.utc)
-    return dt.datetime(value.year, value.month + 1, 1, tzinfo=dt.timezone.utc)
 
 
-def _iter_months(start_dt, end_dt):
-    cursor = _month_start(start_dt)
-    while cursor < end_dt:
-        yield cursor.year, cursor.month
-        cursor = _next_month(cursor)
 
 
-def _iter_days(start_dt, end_dt):
-    cursor = dt.datetime(start_dt.year, start_dt.month, start_dt.day, tzinfo=dt.timezone.utc)
-    while cursor < end_dt:
-        yield cursor.year, cursor.month, cursor.day
-        cursor += dt.timedelta(days=1)
 
 
-def _binance_history_zip_url(symbol, interval, year, month, day=None):
-    symbol = str(symbol or "ETHUSDT").upper().strip()
-    interval = str(interval)
-    if day is not None:
-        return (
-            "https://data.binance.vision/data/futures/um/daily/klines/"
-            f"{symbol}/{interval}/{symbol}-{interval}-{year:04d}-{month:02d}-{day:02d}.zip"
-        )
-    return (
-        "https://data.binance.vision/data/futures/um/monthly/klines/"
-        f"{symbol}/{interval}/{symbol}-{interval}-{year:04d}-{month:02d}.zip"
-    )
 
 
-def _binance_history_cache_path(symbol, interval, year, month, day=None):
-    symbol = str(symbol or "ETHUSDT").upper().strip()
-    interval = str(interval)
-    folder = "daily" if day is not None else "monthly"
-    suffix = f"{year:04d}-{month:02d}-{day:02d}" if day is not None else f"{year:04d}-{month:02d}"
-    return Path(
-        eth.data_path(
-            "historical_klines",
-            "binance_futures_um",
-            folder,
-            symbol,
-            interval,
-            f"{symbol}-{interval}-{suffix}.zip",
-        )
-    )
 
 
-def _download_binance_history_zip(symbol, interval, year, month, day=None):
-    cache_path = _binance_history_cache_path(symbol, interval, year, month, day=day)
-    if cache_path.exists() and _validate_binance_history_zip(cache_path, symbol, interval, year, month, day=day):
-        return cache_path
-
-    url = _binance_history_zip_url(symbol, interval, year, month, day=day)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
-    response = eth.HTTP_SESSION.get(url, timeout=30)
-    if response.status_code == 404:
-        return None
-    response.raise_for_status()
-    tmp_path.write_bytes(response.content)
-    if not _validate_binance_history_zip(tmp_path, symbol, interval, year, month, day=day):
-        tmp_path.unlink(missing_ok=True)
-        raise RuntimeError(f"Binance historical kline archive validation failed: {url}")
-    tmp_path.replace(cache_path)
-    return cache_path
 
 
-def _read_binance_history_zip(path):
-    with zipfile.ZipFile(path) as archive:
-        csv_names = [name for name in archive.namelist() if name.endswith(".csv")]
-        if not csv_names:
-            return pd.DataFrame()
-        with archive.open(csv_names[0]) as fh:
-            return pd.read_csv(io.BytesIO(fh.read()))
 
 
-def _history_interval_ms(interval):
-    match = re.fullmatch(r"(\d+)([mhd])", str(interval or "").strip().lower())
-    if not match:
-        return 0
-    value = int(match.group(1))
-    unit_ms = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}[match.group(2)]
-    return value * unit_ms
 
 
-def _validate_binance_history_zip(path, symbol, interval, year, month, day=None):
-    path = Path(path)
-    if not path.exists() or path.stat().st_size <= 0:
-        return False
-    try:
-        with zipfile.ZipFile(path) as archive:
-            if archive.testzip() is not None:
-                return False
-        frame = _read_binance_history_zip(path)
-        required = {"open_time", "open", "high", "low", "close", "volume", "close_time"}
-        if frame.empty or not required.issubset(frame.columns):
-            return False
-        open_times = pd.to_numeric(frame["open_time"], errors="coerce").dropna()
-        if open_times.empty:
-            return False
-        # Binance archives may use microseconds; normalize only for validation.
-        if float(open_times.iloc[0]) > 100_000_000_000_000:
-            open_times = open_times / 1000.0
-        start_dt = dt.datetime(year, month, day or 1, tzinfo=dt.timezone.utc)
-        end_dt = start_dt + dt.timedelta(days=1) if day is not None else _next_month(start_dt)
-        start_ms = int(start_dt.timestamp() * 1000)
-        end_ms = int(end_dt.timestamp() * 1000)
-        interval_ms = _history_interval_ms(interval)
-        if abs(float(open_times.iloc[0]) - start_ms) > max(interval_ms, 60_000):
-            return False
-        if float(open_times.iloc[-1]) >= end_ms or float(open_times.iloc[-1]) < end_ms - max(interval_ms * 2, 120_000):
-            return False
-        if interval_ms > 0:
-            expected = max(1, (end_ms - start_ms) // interval_ms)
-            if len(open_times) < int(expected * 0.995):
-                return False
-        return True
-    except Exception:
-        return False
 
 
-def _fetch_klines_from_binance_history(symbol, interval, start_ms, end_ms):
-    if interval != "5m":
-        raise RuntimeError(f"Binance history source only supports base 5m backtests, got {interval}")
-    start_dt = dt.datetime.fromtimestamp(int(start_ms) / 1000, tz=dt.timezone.utc)
-    end_dt = dt.datetime.fromtimestamp(int(end_ms) / 1000, tz=dt.timezone.utc)
-    frames = []
-    missing = []
-    downloaded = 0
-    daily_loaded = 0
-    for year, month in _iter_months(start_dt, end_dt):
-        path = _download_binance_history_zip(symbol, interval, year, month)
-        if path is None:
-            month_start = dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
-            month_end = _next_month(month_start)
-            day_start = max(start_dt, month_start)
-            day_end = min(end_dt, month_end)
-            for day_year, day_month, day in _iter_days(day_start, day_end):
-                day_path = _download_binance_history_zip(symbol, interval, day_year, day_month, day=day)
-                if day_path is None:
-                    missing.append(f"{day_year:04d}-{day_month:02d}-{day:02d}")
-                    continue
-                daily_loaded += 1
-                frame = _read_binance_history_zip(day_path)
-                if not frame.empty:
-                    frames.append(frame)
-            continue
-        downloaded += 1
-        frame = _read_binance_history_zip(path)
-        if not frame.empty:
-            frames.append(frame)
-
-    if not frames:
-        raise RuntimeError(f"No Binance historical monthly klines found; missing={','.join(missing[:6])}")
-
-    raw = pd.concat(frames, ignore_index=True)
-    required = ["open_time", "open", "high", "low", "close", "volume", "close_time"]
-    if not set(required).issubset(set(raw.columns)):
-        raise RuntimeError(f"Binance historical CSV columns invalid: {list(raw.columns)}")
-    raw = raw[(raw["open_time"] >= int(start_ms)) & (raw["open_time"] <= int(end_ms))]
-    if raw.empty:
-        raise RuntimeError("Binance historical monthly files loaded but no rows matched requested range")
-    raw = raw.drop_duplicates(subset=["open_time"]).sort_values("open_time")
-    raw["close_time"] = pd.to_datetime(raw["close_time"], unit="ms", utc=True)
-    for col in ["open", "high", "low", "close", "volume"]:
-        raw[col] = raw[col].astype(float)
-    frame = raw.set_index("close_time")[["open", "high", "low", "close", "volume"]]
-    source_parts = []
-    if downloaded:
-        source_parts.append(f"{downloaded}m")
-    if daily_loaded:
-        source_parts.append(f"{daily_loaded}d")
-    frame.attrs["kline_source"] = f"binance_history_um:{'+'.join(source_parts) or 'cached'}"
-    if missing:
-        frame.attrs["kline_missing_months"] = missing
-    return frame
 
 
 def _fetch_klines_from_market_source(symbol, interval, start_ms, end_ms, limit=1500):
@@ -354,7 +190,7 @@ def fetch_futures_klines(symbol, interval, start_ms, end_ms, limit=1500, data_so
     errors = []
     if source in {"auto", "binance-history"}:
         try:
-            frame = _fetch_klines_from_binance_history(symbol, interval, start_ms, end_ms)
+            frame = fetch_klines_from_binance_history(symbol, interval, start_ms, end_ms)
             if not frame.empty:
                 if source == "auto":
                     last_close_ms = int(frame.index.max().timestamp() * 1000)
@@ -409,21 +245,6 @@ def resample_ohlcv(frame, rule):
     return agg
 
 
-def _safe_change(frame, ts, lookback):
-    if frame is None or frame.empty:
-        return 0.0
-    try:
-        current_slice = frame.loc[:ts]
-        previous_slice = frame.loc[: ts - lookback]
-    except Exception:
-        return 0.0
-    if current_slice.empty or previous_slice.empty:
-        return 0.0
-    current = float(current_slice["close"].iloc[-1])
-    previous = float(previous_slice["close"].iloc[-1])
-    if current <= 0 or previous <= 0:
-        return 0.0
-    return (current - previous) / previous
 
 
 def _build_change_index(frame):
@@ -527,7 +348,7 @@ def _fetch_optional_macro_frame(symbol, start_dt, end_dt, *, data_source="tradin
                 f"{requested_days:.0f}天超過外部5m資料上限{max_external_days:.0f}天"
             )
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        if yahoo_symbol and eth._is_truthy(os.getenv("BACKTEST_MACRO_YAHOO_FIRST", "1")):
+        if yahoo_symbol and is_truthy(os.getenv("BACKTEST_MACRO_YAHOO_FIRST", "1")):
             try:
                 return _fetch_yahoo_chart_frame(yahoo_symbol, start_dt, end_dt)
             except Exception as yahoo_exc:
@@ -554,12 +375,12 @@ def _iter_news_prediction_files():
 
 
 def _load_historical_news_events(start_dt, end_dt):
-    if not eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_ENABLED", "1")):
+    if not is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_ENABLED", "1")):
         return []
     events = []
     hourly_buckets = {}
-    aggregate_hourly = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_AGGREGATE_HOURLY", "1"))
-    scan_gzip = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_SCAN_GZIP", "1"))
+    aggregate_hourly = is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_AGGREGATE_HOURLY", "1"))
+    scan_gzip = is_truthy(os.getenv("BACKTEST_HISTORICAL_NEWS_SCAN_GZIP", "1"))
     start_scan = start_dt - dt.timedelta(hours=8)
     end_scan = end_dt + dt.timedelta(hours=1)
     for path in _iter_news_prediction_files():
@@ -652,7 +473,7 @@ def _load_historical_news_events(start_dt, end_dt):
 
 class HistoricalMacroContext:
     def __init__(self, start_dt, end_dt):
-        self.enabled = eth._is_truthy(os.getenv("BACKTEST_HISTORICAL_MACRO_ENABLED", "1"))
+        self.enabled = is_truthy(os.getenv("BACKTEST_HISTORICAL_MACRO_ENABLED", "1"))
         self.frames = {}
         self.change_indexes = {}
         self.news_events = _load_historical_news_events(start_dt, end_dt)
@@ -944,7 +765,7 @@ def _taipei_trade_date(ts):
 
 
 def _daily_min_due_for_backtest(ts, traded_dates):
-    if not eth._is_truthy(os.getenv("DAILY_MIN_TRADE_ENABLED", "1")):
+    if not is_truthy(os.getenv("DAILY_MIN_TRADE_ENABLED", "1")):
         return False
     due_hour = min(23, max(0, eth._safe_int(os.getenv("DAILY_MIN_TRADE_HOUR", 22), 22)))
     due_minute = min(59, max(0, eth._safe_int(os.getenv("DAILY_MIN_TRADE_MINUTE", 30), 30)))
@@ -1554,7 +1375,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
         "1w": 260,
         "1M": 120,
     }
-    fast_tail_frames = eth._is_truthy(os.getenv("BACKTEST_FAST_TAIL_FRAMES", "0"))
+    fast_tail_frames = is_truthy(os.getenv("BACKTEST_FAST_TAIL_FRAMES", "0"))
     decision_every_bars = max(1, eth._safe_int(os.getenv("BACKTEST_DECISION_EVERY_BARS", 3), 3))
     sr_cfg = [
         ("日線", "1d", 180, 1.1),
@@ -1632,7 +1453,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
 
             if (
                 open_trade is not None
-                and eth._is_truthy(os.getenv("BACKTEST_DAILY_MIN_ROLLOVER_ENABLED", "1"))
+                and is_truthy(os.getenv("BACKTEST_DAILY_MIN_ROLLOVER_ENABLED", "1"))
                 and _daily_min_due_for_backtest(ts, traded_dates)
             ):
                 equity, trade_record, learning_sample = _close_trade(open_trade, current_price, "DAILY_MIN_ROLLOVER", ts, equity)
@@ -1739,7 +1560,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
             market_phase = str(market_profile.get("phase") or "range_base")
             daily_anchor_guard = bool(
-                eth._is_truthy(os.getenv("BACKTEST_DAILY_MIN_ANCHOR_GUARD_ENABLED", "1"))
+                is_truthy(os.getenv("BACKTEST_DAILY_MIN_ANCHOR_GUARD_ENABLED", "1"))
                 and _taipei_trade_date(ts) not in traded_dates
                 and not daily_min_due_now
                 and eth._daily_anchor_guard_should_wait(final, score, decision)
@@ -1768,7 +1589,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 and not daily_min_forced
                 and market_phase != "bull"
                 and not (
-                    eth._is_truthy(os.getenv("BACKTEST_DAILY_MIN_DUE_ALLOW_QUALITY_SIGNAL", "1"))
+                    is_truthy(os.getenv("BACKTEST_DAILY_MIN_DUE_ALLOW_QUALITY_SIGNAL", "1"))
                     and not eth._daily_anchor_guard_should_wait(final, score, decision)
                 )
             ):
