@@ -1097,6 +1097,42 @@
       letter-spacing: 0.4px;
     }
 
+    .command-wait-panel {
+      margin-top: 10px;
+      padding-top: 9px;
+      border-top: 1px solid rgba(159,186,85,0.18);
+      display: grid;
+      gap: 7px;
+    }
+
+    .command-wait-title {
+      color: #c6cfb4;
+      font-size: 9px;
+      font-weight: 780;
+      letter-spacing: 0.55px;
+    }
+
+    .command-wait-item {
+      display: grid;
+      grid-template-columns: minmax(76px, 0.8fr) minmax(0, 1fr);
+      gap: 4px 8px;
+      align-items: start;
+      color: var(--tactical-muted);
+      font-size: 9px;
+      line-height: 1.4;
+    }
+
+    .command-wait-item strong {
+      color: var(--tactical-amber);
+      font-weight: 760;
+      overflow-wrap: anywhere;
+    }
+
+    .command-wait-detail {
+      grid-column: 1 / -1;
+      color: #7f8981;
+    }
+
     .command-confidence-layout {
       display: flex;
       align-items: center;
@@ -1496,6 +1532,7 @@
   let STRATEGY_SIGNAL = "wait";
   let STRATEGY_AI_PROB = null;
   let STRATEGY_REGIME = "";
+  let STRATEGY_WAIT_CONDITIONS = [];
   const TELEGRAM_WEBAPP = (window.Telegram && window.Telegram.WebApp) ? Telegram.WebApp : null;
   const TELEGRAM_INIT_DATA = TELEGRAM_WEBAPP ? String(TELEGRAM_WEBAPP.initData || "").trim() : "";
   const HAS_TELEGRAM_AUTH = TELEGRAM_INIT_DATA.length > 0;
@@ -1718,6 +1755,9 @@
     STRATEGY_SIGNAL = String(data.strategy_signal || "wait").toLowerCase();
     STRATEGY_AI_PROB = Number.isFinite(Number(data.strategy_ai_prob)) ? Number(data.strategy_ai_prob) : null;
     STRATEGY_REGIME = String(data.strategy_regime || "");
+    STRATEGY_WAIT_CONDITIONS = Array.isArray(data.strategy_wait_conditions)
+      ? data.strategy_wait_conditions.slice(0, 3)
+      : [];
     BINANCE_BREAK_EVEN_PRICE = Number.isFinite(Number(data.binance_break_even_price)) ? Number(data.binance_break_even_price) : BINANCE_BREAK_EVEN_PRICE;
     BINANCE_UNREALIZED_PNL_USDT = Number.isFinite(Number(data.binance_unrealized_pnl_usdt)) ? Number(data.binance_unrealized_pnl_usdt) : null;
     BINANCE_UNREALIZED_PNL_TS = Number.isFinite(Number(data.binance_unrealized_pnl_ts)) ? Number(data.binance_unrealized_pnl_ts) : BINANCE_UNREALIZED_PNL_TS;
@@ -2794,6 +2834,20 @@
     return labels[String(value || "")] || "等待開單條件";
   }
 
+  function renderStrategyWaitConditions() {
+    if (STRATEGY_ACTUAL_OPEN || !Array.isArray(STRATEGY_WAIT_CONDITIONS) || !STRATEGY_WAIT_CONDITIONS.length) {
+      return "";
+    }
+    const rows = STRATEGY_WAIT_CONDITIONS.map((condition) => {
+      const label = escapeHtml(String(condition && condition.label || "等待條件"));
+      const current = escapeHtml(String(condition && condition.current || "-"));
+      const target = escapeHtml(String(condition && condition.target || "-"));
+      const detail = escapeHtml(String(condition && condition.detail || ""));
+      return `<div class="command-wait-item"><span>${label}</span><strong>${current} → ${target}</strong>${detail ? `<span class="command-wait-detail">${detail}</span>` : ""}</div>`;
+    }).join("");
+    return `<div class="command-wait-panel" data-testid="strategy-wait-conditions"><div class="command-wait-title">開單尚缺條件</div>${rows}</div>`;
+  }
+
   function renderCommandDeck(live, totalAssetsUsdt) {
     const regime = buildMarketRegimeSnapshot();
     const marketPrice = Number(live) > 0 ? Number(live) : 0;
@@ -2847,6 +2901,7 @@
       <div class="command-label">LONG / SHORT SIGNAL</div>
       <div class="command-signal-value ${directionTone}">${directionLabel}</div>
       <div class="command-meta">${actualDirection ? `實際持倉 ${fmt_size(SIZE)}% ｜ ${LEV}x` : escapeHtml(STRATEGY_EXECUTION_REASON)}</div>
+      ${renderStrategyWaitConditions()}
     </section>
 
     <section class="command-card command-position">

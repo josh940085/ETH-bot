@@ -7780,6 +7780,7 @@ def sync_position_panel(current_price=None):
             "strategy_ai_short_prob": round(_safe_float(POSITION_PANEL_STATE.get("strategy_ai_short_prob"), 0.5), 4),
             "strategy_regime": str(POSITION_PANEL_STATE.get("strategy_regime") or ""),
             "strategy_reclaim_gate": dict(POSITION_PANEL_STATE.get("strategy_reclaim_gate") or {}),
+            "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -10198,6 +10199,83 @@ def _validated_strategy_mark_price(mark_payload):
     return mark_price
 
 
+def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
+    decision = decision if isinstance(decision, dict) else {}
+    reason_text = str(reason or decision.get("final") or "等待實際開單策略")
+    conditions = []
+
+    def add_condition(key, label, current, target, detail="", state="waiting"):
+        conditions.append(
+            {
+                "key": str(key),
+                "label": str(label),
+                "current": str(current),
+                "target": str(target),
+                "detail": str(detail),
+                "state": str(state),
+            }
+        )
+
+    if str(status or "waiting") == "pending_confirmation":
+        wait_sec = max(0, _safe_int(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 15), 15))
+        add_condition(
+            "entry_confirmation",
+            "進場確認",
+            "訊號已通過",
+            f"維持 {wait_sec} 秒",
+            "期間內方向不可失效，且成交前仍會驗證 Binance Mark Price",
+        )
+        return conditions
+
+    if "停損距離過近" in reason_text:
+        current_risk = max(0.0, _safe_float(decision.get("risk_rate"), 0.0))
+        min_risk = max(0.001, _safe_float(os.getenv("TRADE_MIN_ENTRY_RISK_RATE", 0.003), 0.003))
+        add_condition(
+            "stop_distance",
+            "停損距離",
+            f"{current_risk * 100:.3f}%",
+            f"至少 {min_risk * 100:.3f}%",
+            "等待結構停損離開短線雜訊範圍",
+        )
+    elif "RR不足" in reason_text:
+        current_rr = max(0.0, _safe_float(decision.get("rr_at_entry"), 0.0))
+        min_rr = max(1.1, _safe_float(os.getenv("TRADE_MIN_ACCEPT_RR", 1.8), 1.8))
+        add_condition("risk_reward", "風險報酬比", f"{current_rr:.2f}", f"至少 {min_rr:.2f}", "等待 TP/SL 結構提供足夠報酬空間")
+    elif "方向勝率不足" in reason_text:
+        direction_prob = max(
+            _safe_float(decision.get("ai_long_prob"), 0.0),
+            _safe_float(decision.get("ai_short_prob"), 0.0),
+        )
+        min_prob = max(0.05, min(0.75, _safe_float(os.getenv("TRADE_MIN_DIRECTION_WIN_PROB", 0.42), 0.42)))
+        add_condition("direction_probability", "方向勝率", f"{direction_prob * 100:.1f}%", f"至少 {min_prob * 100:.1f}%", "等待多空方向的模型勝率達標")
+    elif "期望值不足" in reason_text or "報酬不足覆蓋成本" in reason_text:
+        current_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
+        min_edge = max(0.0005, _safe_float(os.getenv("TRADE_MIN_EXPECTED_EDGE_RATE", 0.0012), 0.0012))
+        add_condition("expected_edge", "扣除成本後期望值", f"{current_edge * 100:+.3f}%", f"至少 +{min_edge * 100:.3f}%", "等待預期報酬足以覆蓋手續費、滑價與資金費")
+    elif "等待共振" in reason_text or "等支撐" in reason_text or "等壓力" in reason_text:
+        add_condition("signal_confluence", "方向共振", reason_text.replace("觀望（", "").rstrip("）"), "趨勢、動能與結構同向", "條件形成後才會建立待確認訊號")
+    elif "每日單錨定" in reason_text:
+        add_condition("daily_anchor", "每日單錨定", "一般訊號品質未達標", "品質訊號通過或 22:30 保底流程", "台北時間 22:30 前保留每日保底額度")
+    else:
+        add_condition("strategy_gate", "策略條件", reason_text.replace("觀望（", "").rstrip("）"), "下一輪策略評估通過", "等待新的已驗證行情快照")
+
+    reclaim = decision.get("multitimeframe_bull_reclaim")
+    reclaim = reclaim if isinstance(reclaim, dict) else {}
+    diagnostics = reclaim.get("diagnostics") if isinstance(reclaim.get("diagnostics"), dict) else {}
+    required_price = max(0.0, _safe_float(diagnostics.get("required_price"), 0.0))
+    if reclaim.get("enabled") and not reclaim.get("applied") and required_price > 0:
+        price = max(0.0, _safe_float(current_price, diagnostics.get("price")))
+        add_condition(
+            "bull_reclaim_price",
+            "多頭續強價",
+            f"{price:.2f}",
+            f"站上 {required_price:.2f}",
+            "此為小倉位多頭續強快速通道，不取代主要風控",
+        )
+
+    return conditions[:3]
+
+
 def _update_panel_execution_snapshot(decision, current_price, status, reason="", *, actual_open=False):
     """Publish one atomic price -> strategy -> execution result for the UI."""
     decision = decision if isinstance(decision, dict) else {}
@@ -10211,6 +10289,12 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
     )
     ai_short_prob = _safe_float(
         decision.get("ai_short_prob"), POSITION_PANEL_STATE.get("strategy_ai_short_prob", 0.5)
+    )
+    wait_conditions = [] if actual_open else _build_strategy_wait_conditions(
+        decision,
+        current_price,
+        status,
+        reason,
     )
     POSITION_PANEL_STATE.update(
         {
@@ -10227,6 +10311,7 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
             "strategy_ai_short_prob": round(ai_short_prob, 4),
             "strategy_regime": str(decision.get("regime") or POSITION_PANEL_STATE.get("strategy_regime") or ""),
             "strategy_reclaim_gate": dict(decision.get("multitimeframe_bull_reclaim") or {}),
+            "strategy_wait_conditions": wait_conditions,
         }
     )
 
