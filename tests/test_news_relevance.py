@@ -3,7 +3,7 @@ import unittest
 
 os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 
-import eth
+import news
 
 
 class NewsRelevanceTests(unittest.TestCase):
@@ -22,7 +22,7 @@ class NewsRelevanceTests(unittest.TestCase):
         ]
         for headline in headlines:
             with self.subTest(headline=headline):
-                self.assertEqual(eth._news_relevance_reason(headline), "")
+                self.assertEqual(news._news_relevance_reason(headline), "")
 
     def test_keeps_news_that_can_move_global_financial_markets(self):
         expected = {
@@ -53,10 +53,10 @@ class NewsRelevanceTests(unittest.TestCase):
         }
         for headline, reason in expected.items():
             with self.subTest(headline=headline):
-                self.assertEqual(eth._news_relevance_reason(headline), reason)
+                self.assertEqual(news._news_relevance_reason(headline), reason)
 
     def test_major_national_selloffs_override_low_confidence_model(self):
-        analysis = eth.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
+        analysis = news.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
         self.assertEqual(analysis["bias"], -2)
         self.assertGreaterEqual(analysis["ai_confidence"], 0.82)
         self.assertEqual(analysis["fusion_method"], "major_global_equity_market_move_override")
@@ -68,32 +68,32 @@ class NewsRelevanceTests(unittest.TestCase):
             "南非股市大跌2.5%",
         ]:
             with self.subTest(headline=headline):
-                analysis = eth.analyze_news_text(headline, log_result=False)
+                analysis = news.analyze_news_text(headline, log_result=False)
                 self.assertEqual(analysis["bias"], -2)
                 self.assertGreaterEqual(analysis["ai_confidence"], 0.82)
 
     def test_small_taiwan_opening_move_does_not_force_push(self):
-        bias, confidence = eth._major_equity_market_move_override("台股開盤跌390.9點")
+        bias, confidence = news._major_equity_market_move_override("台股開盤跌390.9點")
         self.assertEqual((bias, confidence), (0, 0.0))
 
     def test_small_country_market_move_does_not_force_strong_bias(self):
-        bias, confidence = eth._major_equity_market_move_override("Canadian stocks fall 0.3%")
+        bias, confidence = news._major_equity_market_move_override("Canadian stocks fall 0.3%")
         self.assertEqual((bias, confidence), (0, 0.0))
 
     def test_every_configured_country_and_index_is_in_global_scope(self):
-        for country in eth.GLOBAL_EQUITY_COUNTRY_TERMS:
+        for country in news.GLOBAL_EQUITY_COUNTRY_TERMS:
             headline = f"{country} stocks plunge 3%"
             with self.subTest(country=country):
-                self.assertTrue(eth._is_global_equity_market_scope(headline))
-                self.assertEqual(eth._major_equity_market_move_override(headline)[0], -2)
+                self.assertTrue(news._is_global_equity_market_scope(headline))
+                self.assertEqual(news._major_equity_market_move_override(headline)[0], -2)
 
-        for index_name in eth.GLOBAL_EQUITY_INDEX_TERMS:
+        for index_name in news.GLOBAL_EQUITY_INDEX_TERMS:
             with self.subTest(index=index_name):
-                self.assertTrue(eth._is_global_equity_market_scope(index_name))
+                self.assertTrue(news._is_global_equity_market_scope(index_name))
 
     def test_news_message_preserves_taiwan_rss_source(self):
-        analysis = eth.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
-        message = eth.build_news_message(
+        analysis = news.analyze_news_text("台股盤中跌逾2000點 AI、權值股重挫", log_result=False)
+        message = news.build_news_message(
             "[中央社財經] 台股盤中跌逾2000點 AI、權值股重挫",
             now_time="12:30:00",
             analysis=analysis,
@@ -109,12 +109,12 @@ class NewsRelevanceTests(unittest.TestCase):
         ]
         for headline in headlines:
             with self.subTest(headline=headline):
-                self.assertEqual(eth._news_relevance_reason(headline), "")
+                self.assertEqual(news._news_relevance_reason(headline), "")
 
     def test_dedupe_ignores_source_and_exchange_suffix(self):
         first = "[Investing] Standard Nuclear prices IPO at $15 per share"
         second = "[Investing Crypto] Standard Nuclear prices IPO at $15 per share on NYSE"
-        self.assertEqual(eth._news_dedupe_key(first), eth._news_dedupe_key(second))
+        self.assertEqual(news._news_dedupe_key(first), news._news_dedupe_key(second))
 
 
 if __name__ == "__main__":

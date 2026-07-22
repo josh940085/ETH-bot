@@ -1294,12 +1294,14 @@ import telegram
 import backtest
 import program
 import eth
+import news
 modules = [
     "runtime_paths",
     "telegram",
     "backtest",
     "program",
     "eth",
+    "news",
 ]
 skipped = []
 if importlib.util.find_spec("fastapi") and importlib.util.find_spec("uvicorn"):
@@ -1464,15 +1466,16 @@ import json
 import os
 os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 import eth
+import news
 eth.load_model()
 if eth.model is None:
     eth.retrain_model()
-eth.load_news_model()
+news.load_news_model()
 payload = {
     "batch_model_loaded": bool(eth.model is not None),
     "online_initialized": bool(getattr(eth, "online_initialized", False)),
     "online_sample_count": int(getattr(eth, "online_sample_count", 0)),
-    "news_model_loaded": bool(getattr(eth, "news_model", None) is not None),
+    "news_model_loaded": bool(getattr(news, "news_model", None) is not None),
 }
 print("REPORT_JSON=" + json.dumps(payload, ensure_ascii=False))
 raise SystemExit(0 if payload["batch_model_loaded"] and payload["news_model_loaded"] else 1)

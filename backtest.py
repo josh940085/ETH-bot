@@ -27,6 +27,7 @@ import pandas as pd
 os.environ.setdefault("ETH_BOT_DISABLE_LIVE", "1")
 
 import eth
+import news
 from mlx_learning import build_trade_factor_tags
 
 
@@ -544,7 +545,7 @@ def _categorize_news_text(text):
 
 
 def _iter_news_prediction_files():
-    base = Path(eth.NEWS_PERFORMANCE_LOG)
+    base = Path(news.NEWS_PERFORMANCE_LOG)
     candidates = [base]
     candidates.extend(sorted(base.parent.glob(base.name + ".*.gz")))
     for path in candidates:

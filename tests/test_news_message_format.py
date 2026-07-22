@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-import eth
+import news
 
 
 class NewsMessageFormatTests(unittest.TestCase):
@@ -13,10 +13,10 @@ class NewsMessageFormatTests(unittest.TestCase):
             "ai_confidence": 0.621,
         }
         with (
-            patch.object(eth, "translate_news_to_zh", return_value="測試中文新聞"),
-            patch.object(eth, "get_prediction_accuracy", return_value={"accuracy": 57.5, "correct": 23, "total": 40}),
+            patch.object(news, "translate_news_to_zh", return_value="測試中文新聞"),
+            patch.object(news, "get_prediction_accuracy", return_value={"accuracy": 57.5, "correct": 23, "total": 40}),
         ):
-            return eth.build_news_message("Test headline", now_time="23:34:59", analysis=analysis)
+            return news.build_news_message("Test headline", now_time="23:34:59", analysis=analysis)
 
     def test_bullish_news_uses_red_and_news_is_first_line(self):
         message = self._message(1)
