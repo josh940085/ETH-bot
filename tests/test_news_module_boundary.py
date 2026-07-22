@@ -25,6 +25,10 @@ class NewsModuleBoundaryTests(unittest.TestCase):
     def test_discord_delivery_is_delegated(self):
         self.assertIs(eth._post_discord_webhook, news._post_discord_webhook)
 
+    def test_host_learning_state_stays_in_trading_core(self):
+        self.assertEqual(eth.BINANCE_HOST_LEARNING_STATE_PATH.name, "binance_host_learning_state.json")
+        self.assertEqual(eth.BINANCE_HOST_LIVE_LEARNING_STATE_PATH.name, "binance_host_live_learning_state.json")
+
 
 if __name__ == "__main__":
     unittest.main()

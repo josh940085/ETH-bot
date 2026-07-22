@@ -96,9 +96,11 @@ LIVE_RUNTIME_ENABLED = str(os.getenv("ETH_BOT_DISABLE_LIVE", "0") or "0").strip(
     "on",
 }
 
-# ===== Macro / News Engine =====
+# ===== Macro / host-learning engine =====
 
 MACRO_CACHE = {"sp": 0, "nq": 0, "btc": 0, "dxy": 0, "news": 0, "event": 0, "news_list": [], "ts": 0}
+BINANCE_HOST_LEARNING_STATE_PATH = data_path("binance_host_learning_state.json")
+BINANCE_HOST_LIVE_LEARNING_STATE_PATH = data_path("binance_host_live_learning_state.json")
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
