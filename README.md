@@ -183,8 +183,8 @@ POSITION_PANEL_REALTIME_PORT=8787
 
 ## MLX AI agent（Apple Silicon）
 
-本機 supervisor 會在 `127.0.0.1:8080` 啟動 MLX LM 的 OpenAI-compatible API，
-Telegram `/ai` 指令會優先使用本機模型，失敗時才依設定回退 OpenAI。
+本機 supervisor 會在 `127.0.0.1:8080` 啟動 MLX LM 的本機相容 API，
+Telegram `/ai` 指令只會使用本機模型，不會呼叫任何付費 OpenAI 服務。
 每次分析會保存市場快照，預設 4 小時後依實際價格驗證方向，後續分析會檢索已驗證案例作為經驗。
 學習資料存放於 `.runtime/ai/mlx_agent_learning.sqlite3`，不會自行修改下單程式。
 
@@ -197,11 +197,6 @@ MLX_AGENT_BASE_URL=http://127.0.0.1:8080/v1
 MLX_AGENT_PORT=8080
 MLX_MODEL=Qwen/Qwen3-4B-MLX-4bit
 MLX_AGENT_TIMEOUT_SEC=120
-MLX_GPT_TEACHER_ENABLED=0
-MLX_GPT_TEACHER_MODEL=gpt-5-mini
-MLX_GPT_TEACHER_INTERVAL_SEC=86400
-MLX_GPT_TEACHER_BATCH_SIZE=8
-MLX_GPT_TEACHER_CONTEXT_LIMIT=3
 MLX_LEARNING_EVALUATION_HOURS=4
 MLX_LEARNING_MIN_MOVE_PCT=0.25
 MLX_PROMPT_CACHE_SIZE=2
@@ -213,10 +208,6 @@ MLX_REPLACEMENT_MIN_EVALUATED=100
 MLX_REPLACEMENT_MIN_ACCURACY_PCT=55
 STRATEGY_DAILY_REPORT_TIME=23:50
 ```
-
-啟用 `MLX_GPT_TEACHER_ENABLED=1` 後，需要有效的 `OPENAI_API_KEY`。系統每天最多一次把
-已有真實結果的 MLX 案例交給 GPT 校正，校正規則會獨立存放並注入後續 MLX 分析；不會納入
-勝率樣本，也不會觸發真實下單。一般 OpenAI 分析 fallback 仍由 `OPENAI_PAID_API_ENABLED` 獨立控制。
 
 Telegram 輸入 `/ai 學習狀態` 可查看累積分析、已驗證案例與準確率。
 Bot 每天預設於台北時間 `23:50` 發送策略勝率巡檢，包含近 24 小時、近 7 日與 MLX 分析驗證結果。

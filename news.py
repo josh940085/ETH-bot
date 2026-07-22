@@ -11,12 +11,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
-from openai_chat import (
-    build_openai_chat_payload as _build_openai_chat_payload,
-    extract_openai_chat_text as _extract_openai_chat_text,
-    openai_instruction_role as _openai_instruction_role,
-)
-from runtime_config import is_truthy as _is_truthy
 from runtime_paths import data_path, ensure_parent_dir
 
 def _safe_float(value, default=0.0):
@@ -76,11 +70,6 @@ NEWS_EVAL_HORIZON_SEC, NEWS_EVAL_MAX_OVERDUE_SEC = 1800, 3600
 NEWS_EVAL_MIN_MOVE_RATE, NEWS_EVAL_STRONG_MOVE_RATE = 0.0012, 0.0035
 NEWS_EVAL_QUEUE_MAX, NEWS_EVAL_PROCESS_INTERVAL_SEC, NEWS_RETRAIN_MIN_INTERVAL_SEC = 400, 15.0, 900.0
 TRANSLATION_CACHE, _CURRENT_MARKET_PRICE = {}, 0.0
-DEFAULT_OPENAI_CHAT_MODEL = "gpt-5-mini"
-OPENAI_TRANSLATION_MODEL = (os.getenv("OPENAI_TRANSLATION_MODEL", DEFAULT_OPENAI_CHAT_MODEL) or DEFAULT_OPENAI_CHAT_MODEL).strip()
-OPENAI_REASONING_EFFORT = (os.getenv("OPENAI_REASONING_EFFORT", "low") or "low").strip().lower()
-OPENAI_PAID_API_ENABLED = _is_truthy(os.getenv("OPENAI_PAID_API_ENABLED", "0"))
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 DISCORD_WEBHOOK, DISCORD_NEWS = os.getenv("DISCORD_WEBHOOK", ""), os.getenv("DISCORD_NEWS", "")
 DISCORD_AUTO_DELETE_HOURS = max(0.0, _safe_float(os.getenv("DISCORD_AUTO_DELETE_HOURS", 24.0), 24.0))
 DISCORD_AUTO_DELETE_SEC = int(DISCORD_AUTO_DELETE_HOURS * 3600)
@@ -726,37 +715,7 @@ def translate_news_to_zh(text):
         if src in TRANSLATION_CACHE:
             return TRANSLATION_CACHE[src]
 
-        # 保守截斷，避免超長文本增加延遲與成本
-        short_src = src[:220]
-
-        zh = ""
-        if OPENAI_PAID_API_ENABLED and OPENAI_API_KEY:
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = _build_openai_chat_payload(
-                OPENAI_TRANSLATION_MODEL,
-                [
-                    {
-                        "role": _openai_instruction_role(OPENAI_TRANSLATION_MODEL),
-                        "content": "你是專業翻譯員。請把輸入內容翻成繁體中文，只輸出翻譯結果，不要補充說明。"
-                    },
-                    {
-                        "role": "user",
-                        "content": short_src
-                    }
-                ],
-                temperature=0,
-            )
-
-            res = requests.post(url, headers=headers, json=payload, timeout=6)
-            data = res.json() if res is not None else {}
-            zh = _extract_openai_chat_text(data)
-
-        if not zh:
-            zh = _google_translate_to_zh(src)
+        zh = _google_translate_to_zh(src)
 
         if not re.search(r"[\u4e00-\u9fff]", zh):
             zh = _google_translate_to_zh(src)

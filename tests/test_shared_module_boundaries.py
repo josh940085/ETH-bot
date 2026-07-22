@@ -7,8 +7,7 @@ from unittest import mock
 os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 
 import eth
-import news
-import openai_chat
+import local_chat
 import runtime_config
 
 
@@ -29,18 +28,13 @@ class RuntimeConfigTests(unittest.TestCase):
                 self.assertEqual(os.environ["EXISTING"], "file")
 
 
-class OpenAIChatBoundaryTests(unittest.TestCase):
-    def test_news_and_trading_core_share_payload_helpers(self):
-        self.assertIs(eth._build_openai_chat_payload, openai_chat.build_openai_chat_payload)
-        self.assertIs(news._build_openai_chat_payload, openai_chat.build_openai_chat_payload)
+class LocalChatBoundaryTests(unittest.TestCase):
+    def test_trading_core_uses_local_response_parser(self):
+        self.assertIs(eth._extract_chat_text, local_chat.extract_chat_text)
 
-    def test_reasoning_and_standard_payloads_keep_supported_fields(self):
-        with mock.patch.dict(os.environ, {"OPENAI_REASONING_EFFORT": "low"}):
-            reasoning = openai_chat.build_openai_chat_payload("gpt-5-mini", [], temperature=0)
-        standard = openai_chat.build_openai_chat_payload("gpt-4o-mini", [], temperature=0)
-        self.assertEqual(reasoning["reasoning_effort"], "low")
-        self.assertNotIn("temperature", reasoning)
-        self.assertEqual(standard["temperature"], 0)
+    def test_local_response_parser_accepts_message_content(self):
+        payload = {"choices": [{"message": {"content": "  本機分析  "}}]}
+        self.assertEqual(local_chat.extract_chat_text(payload), "本機分析")
 
 
 if __name__ == "__main__":

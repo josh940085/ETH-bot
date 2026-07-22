@@ -1155,7 +1155,7 @@ import json
 import os
 os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 import market_history
-import openai_chat
+import local_chat
 import runtime_config
 import runtime_paths
 import telegram
@@ -1166,7 +1166,7 @@ import news
 modules = [
     "runtime_config",
     "runtime_paths",
-    "openai_chat",
+    "local_chat",
     "market_history",
     "telegram",
     "backtest",
