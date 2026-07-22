@@ -11,6 +11,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
+from runtime_config import is_truthy as _is_truthy
 from runtime_paths import data_path, ensure_parent_dir
 
 def _safe_float(value, default=0.0):
