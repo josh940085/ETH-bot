@@ -880,6 +880,7 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
     if size <= 0:
         size = 0.2
     quality_signal = bool(decision.get("daily_anchor_quality_signal"))
+    breakout_max_size = max(0.0, float(decision.get("breakout_max_position_size") or 0.0))
     host_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
     regime = str(decision.get("regime") or "range")
     counter_trend_probe = (
@@ -897,11 +898,14 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         or counter_trend_probe
         or opposing_turn_probe
         or quality_signal
+        or breakout_max_size > 0
     ) else 0.1
     size = float(min(1.0, max(size, min_open_size)))
     max_size, min_size = eth._derive_scaling_bounds(size)
     if quality_signal:
         max_size = size
+    elif breakout_max_size > 0:
+        max_size = min(breakout_max_size, max(size, breakout_max_size))
     elif "max_position_size" in decision:
         max_size = max(size, float(decision.get("max_position_size") or size))
     raw_features = decision.get("features") if isinstance(decision.get("features"), dict) else {}
@@ -959,6 +963,14 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "htf": int(decision.get("htf", 0)),
         "mid_trend": int(decision.get("mid_trend", 0)),
         "breakout": int(decision.get("breakout", 0)),
+        "breakout_attempt": int(decision.get("breakout_attempt", 0)),
+        "breakout_confirmed": bool(decision.get("breakout_confirmed", False)),
+        "breakout_quality_score": float(decision.get("breakout_quality_score", 0.0)),
+        "breakout_quality_required": float(decision.get("breakout_quality_required", 3.0)),
+        "support_break_level": float(decision.get("support_break_level", 0.0)),
+        "resistance_break_level": float(decision.get("resistance_break_level", 0.0)),
+        "breakout_size_multiplier": float(decision.get("breakout_size_multiplier", 1.0)),
+        "breakout_max_position_size": float(decision.get("breakout_max_position_size", 0.0)),
         "atr": float(decision.get("atr", 0.0)),
         "rsi_15m": float(decision.get("rsi_15m", 50.0)),
         "ema50_deviation_15m": float(decision.get("ema50_deviation_15m", 0.0)),
@@ -1311,6 +1323,14 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "funding_cost_rate_est_pct": round(float(open_trade.get("funding_cost_rate_est", 0.0)) * 100, 3),
         "support_hits": int(open_trade.get("support_hits", 0)),
         "resistance_hits": int(open_trade.get("resistance_hits", 0)),
+        "breakout_attempt": int(open_trade.get("breakout_attempt", 0)),
+        "breakout_confirmed": bool(open_trade.get("breakout_confirmed", False)),
+        "breakout_quality_score": round(float(open_trade.get("breakout_quality_score", 0.0)), 3),
+        "breakout_quality_required": round(float(open_trade.get("breakout_quality_required", 3.0)), 3),
+        "support_break_level": round(float(open_trade.get("support_break_level", 0.0)), 4),
+        "resistance_break_level": round(float(open_trade.get("resistance_break_level", 0.0)), 4),
+        "breakout_size_multiplier": round(float(open_trade.get("breakout_size_multiplier", 1.0)), 3),
+        "breakout_max_position_size": round(float(open_trade.get("breakout_max_position_size", 0.0)), 4),
         "candlestick_turn_direction": str((open_trade.get("candlestick_turning") or {}).get("direction") or ""),
         "candlestick_turn_count": int(open_trade.get("candlestick_turn_count", 0)),
         "candlestick_turn_confidence": round(float(open_trade.get("candlestick_turn_confidence", 0.0)), 4),

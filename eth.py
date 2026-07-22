@@ -2116,14 +2116,12 @@ def _score_mlx_learned_entry_logic(
     support_break_confirmed = (
         repeated_support_tests >= 2
         and breakout == -1
-        and (volume_spike or sell_pressure)
         and not sweep_low
     )
     support_hold_unconfirmed = repeated_support_tests >= 2 and not support_break_confirmed
     resistance_break_confirmed = (
         repeated_resistance_tests >= 2
         and breakout == 1
-        and (volume_spike or buy_pressure)
         and not sweep_high
     )
     resistance_hold_unconfirmed = repeated_resistance_tests >= 2 and not resistance_break_confirmed
@@ -2163,16 +2161,16 @@ def _score_mlx_learned_entry_logic(
             reasons.append("支撐連續測試但未確認跌破，偏多等承接")
 
     if breakout == 1:
-        if volume_spike and buy_pressure and not sweep_high:
+        if not sweep_high:
             long_setup += 1.2
-            reasons.append("突破有量且買盤確認")
+            reasons.append("壓力突破品質分數確認")
         else:
             short_setup += 0.6
             reasons.append("突破量能不足，防假突破")
     elif breakout == -1:
-        if volume_spike and sell_pressure and not sweep_low:
+        if not sweep_low:
             short_setup += 1.2
-            reasons.append("跌破有量且賣壓確認")
+            reasons.append("支撐跌破品質分數確認")
         else:
             long_setup += 0.6
             reasons.append("跌破量能不足，防假跌破")
@@ -7388,7 +7386,7 @@ def _evaluate_pending_entry_confirmation(
     }
 
     age = max(0.0, now_ts - _safe_float(pending.get("ts"), now_ts))
-    if age > max_age:
+    if age > max_age and not (require_pullback or pending.get("require_pullback")):
         return False, "待確認訊號逾時"
     if age < min_wait:
         return False, f"等待確認中 {age:.0f}/{min_wait:.0f}s"
@@ -7398,6 +7396,12 @@ def _evaluate_pending_entry_confirmation(
     move_rate = (price - pending_price) / pending_price
     if require_pullback or pending.get("require_pullback"):
         pending["require_pullback"] = True
+        max_age = max(
+            max_age,
+            _safe_float(os.getenv("TRADE_BREAKOUT_RETEST_MAX_AGE_SEC", 900), 900),
+        )
+        if age > max_age:
+            return False, "突破回踩確認逾時"
         min_pullback = max(
             0.0003,
             min(
@@ -7412,32 +7416,60 @@ def _evaluate_pending_entry_confirmation(
                 _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_RECLAIM_TOLERANCE_RATE", 0.0002), 0.0002),
             ),
         )
+        supplied_breakout_level = max(0.0, _safe_float(pending.get("breakout_level"), 0.0))
+        has_structural_level = supplied_breakout_level > 0
+        breakout_level = supplied_breakout_level or pending_price
+        if breakout_level <= 0:
+            breakout_level = pending_price
+        touch_tolerance = max(reclaim_tolerance, min_pullback)
         if direction == "long":
-            if not pending.get("pullback_seen") and move_rate <= -min_pullback:
+            touched_structure = (
+                price <= breakout_level * (1.0 + touch_tolerance)
+                if has_structural_level
+                else move_rate <= -min_pullback
+            )
+            if not pending.get("pullback_seen") and touched_structure:
                 pending["pullback_seen"] = True
                 pending["pullback_extreme_price"] = float(price)
+                return False, f"已回踩壓力轉支撐 {breakout_level:.2f}，等待重新站回並走強"
             elif pending.get("pullback_seen"):
                 pending["pullback_extreme_price"] = min(
                     _safe_float(pending.get("pullback_extreme_price"), price),
                     float(price),
                 )
             if not pending.get("pullback_seen"):
-                return False, f"等待多單回踩至少 {min_pullback*100:.2f}%"
-            if price < pending_price * (1.0 - reclaim_tolerance):
-                return False, "等待多單回踩後重新站回突破位"
+                return False, f"等待多單回踩突破位 {breakout_level:.2f}"
+            pullback_extreme = _safe_float(pending.get("pullback_extreme_price"), price)
+            if price < breakout_level * (1.0 - reclaim_tolerance):
+                return False, f"等待重新站回突破位 {breakout_level:.2f}"
+            if price < pullback_extreme * (1.0 + reclaim_tolerance):
+                return False, "回踩已出現，等待多方重新走強"
         else:
-            if not pending.get("pullback_seen") and move_rate >= min_pullback:
+            touched_structure = (
+                price >= breakout_level * (1.0 - touch_tolerance)
+                if has_structural_level
+                else move_rate >= min_pullback
+            )
+            if not pending.get("pullback_seen") and touched_structure:
                 pending["pullback_seen"] = True
                 pending["pullback_extreme_price"] = float(price)
+                return False, f"已反彈支撐轉壓力 {breakout_level:.2f}，等待重新跌破並轉弱"
             elif pending.get("pullback_seen"):
                 pending["pullback_extreme_price"] = max(
                     _safe_float(pending.get("pullback_extreme_price"), price),
                     float(price),
                 )
             if not pending.get("pullback_seen"):
-                return False, f"等待空單反彈至少 {min_pullback*100:.2f}%"
-            if price > pending_price * (1.0 + reclaim_tolerance):
-                return False, "等待空單反彈後重新跌破確認位"
+                return False, f"等待空單反彈跌破位 {breakout_level:.2f}"
+            pullback_extreme = _safe_float(pending.get("pullback_extreme_price"), price)
+            if price > breakout_level * (1.0 + reclaim_tolerance):
+                return False, f"等待重新跌破確認位 {breakout_level:.2f}"
+            if price > pullback_extreme * (1.0 - reclaim_tolerance):
+                return False, "反彈已出現，等待空方重新轉弱"
+
+        # Once the actual structure has been retested, chase/reversal limits are
+        # measured from that structure instead of the earlier signal snapshot.
+        move_rate = (price - breakout_level) / breakout_level
 
     if direction == "long":
         if move_rate > max_chase:
@@ -8112,6 +8144,28 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
             }
         )
 
+    breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
+    breakout_quality_score = _safe_float(decision.get("breakout_quality_score"), 0.0)
+    breakout_quality_required = _safe_float(decision.get("breakout_quality_required"), 3.0)
+    if breakout_attempt == 1:
+        breakout_level = _safe_float(decision.get("resistance_break_level"), 0.0)
+        add_condition(
+            "resistance_breakout",
+            "壓力突破品質",
+            f"{breakout_quality_score:.1f}/{breakout_quality_required:.1f} 分",
+            f"站穩 {breakout_level:.2f}",
+            "收盤、量能、買盤與趨勢採計分制；中等品質改用小倉位，不要求全部同時成立",
+        )
+    elif breakout_attempt == -1:
+        breakout_level = _safe_float(decision.get("support_break_level"), 0.0)
+        add_condition(
+            "support_breakdown",
+            "支撐跌破品質",
+            f"{breakout_quality_score:.1f}/{breakout_quality_required:.1f} 分",
+            f"跌破 {breakout_level:.2f}",
+            "收盤、量能、賣壓與趨勢採計分制；確認後仍會等待結構反彈測試",
+        )
+
     if str(status or "waiting") == "pending_confirmation":
         wait_sec = max(0, _safe_int(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 15), 15))
         add_condition(
@@ -8121,7 +8175,7 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
             f"維持 {wait_sec} 秒",
             "期間內方向不可失效，且成交前仍會驗證 Binance Mark Price",
         )
-        return conditions
+        return conditions[:3]
 
     if "停損距離過近" in reason_text:
         current_risk = max(0.0, _safe_float(decision.get("risk_rate"), 0.0))
@@ -8207,6 +8261,17 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
             "strategy_ai_short_prob": round(ai_short_prob, 4),
             "strategy_regime": str(decision.get("regime") or POSITION_PANEL_STATE.get("strategy_regime") or ""),
             "strategy_reclaim_gate": dict(decision.get("multitimeframe_bull_reclaim") or {}),
+            "strategy_breakout": {
+                "attempt": _safe_int(decision.get("breakout_attempt"), 0),
+                "confirmed": bool(decision.get("breakout_confirmed", False)),
+                "quality_score": _safe_float(decision.get("breakout_quality_score"), 0.0),
+                "required_score": _safe_float(decision.get("breakout_quality_required"), 3.0),
+                "support_level": _safe_float(decision.get("support_break_level"), 0.0),
+                "resistance_level": _safe_float(decision.get("resistance_break_level"), 0.0),
+                "buffer": _safe_float(decision.get("breakout_buffer"), 0.0),
+                "size_multiplier": _safe_float(decision.get("breakout_size_multiplier"), 1.0),
+                "max_position_size": _safe_float(decision.get("breakout_max_position_size"), 0.0),
+            },
             "strategy_wait_conditions": wait_conditions,
         }
     )
@@ -9000,14 +9065,14 @@ def _score_host_opening_logic(
         add("short", min(0.55, resistance_hits * 0.18), "多週期壓力靠近")
 
     if repeated_support_tests >= 2:
-        if breakout == -1 and (volume_spike or sell_pressure) and not sweep_low:
+        if breakout == -1 and not sweep_low:
             add("short", min(1.0, repeated_support_tests * 0.22), "支撐連測後放量跌破")
             long_score -= 0.45
         else:
             add("long", min(0.75, repeated_support_tests * 0.16), "支撐連測未破，偏等承接")
             short_score -= 0.35
     if repeated_resistance_tests >= 2:
-        if breakout == 1 and (volume_spike or buy_pressure) and not sweep_high:
+        if breakout == 1 and not sweep_high:
             add("long", min(1.0, repeated_resistance_tests * 0.22), "壓力連測後放量突破")
             short_score -= 0.45
         else:
@@ -9015,19 +9080,9 @@ def _score_host_opening_logic(
             long_score -= 0.35
 
     if breakout == 1:
-        if volume_spike or buy_pressure:
-            add("long", 0.55, "短線突破且有量/買盤確認")
-        else:
-            long_score -= 0.30
-            short_score += 0.20
-            short_reasons.append("突破量能不足，防假突破")
+        add("long", 0.55, "結構突破品質分數確認")
     elif breakout == -1:
-        if volume_spike or sell_pressure:
-            add("short", 0.55, "短線跌破且有量/賣壓確認")
-        else:
-            short_score -= 0.30
-            long_score += 0.20
-            long_reasons.append("跌破量能不足，防假跌破")
+        add("short", 0.55, "結構跌破品質分數確認")
 
     if sweep_low:
         add("long", 0.45, "掃低後收回，偏假跌破")
@@ -9140,14 +9195,19 @@ def analyze_repeated_level_tests(price, df_5m, df_15m, support, resistance, atr=
     resistance = _safe_float(resistance, 0.0)
     tolerance = max(0.0015, min(0.006, atr / max(price, 1e-9) * 0.65))
 
-    support_tests = 0
-    resistance_tests = 0
+    support_5m_tests = support_15m_tests = 0
+    resistance_5m_tests = resistance_15m_tests = 0
     if support > 0:
-        support_tests += _count_consecutive_level_tests(df_5m, support, "support", tolerance=tolerance)
-        support_tests += _count_consecutive_level_tests(df_15m, support, "support", tolerance=tolerance)
+        support_5m_tests = _count_consecutive_level_tests(df_5m, support, "support", tolerance=tolerance)
+        support_15m_tests = _count_consecutive_level_tests(df_15m, support, "support", tolerance=tolerance)
     if resistance > 0:
-        resistance_tests += _count_consecutive_level_tests(df_5m, resistance, "resistance", tolerance=tolerance)
-        resistance_tests += _count_consecutive_level_tests(df_15m, resistance, "resistance", tolerance=tolerance)
+        resistance_5m_tests = _count_consecutive_level_tests(df_5m, resistance, "resistance", tolerance=tolerance)
+        resistance_15m_tests = _count_consecutive_level_tests(df_15m, resistance, "resistance", tolerance=tolerance)
+
+    # A 15m touch contains the same 5m candles, so adding both counts inflates one
+    # market event. Keep the strongest timeframe count instead of double-counting.
+    support_tests = max(support_5m_tests, support_15m_tests)
+    resistance_tests = max(resistance_5m_tests, resistance_15m_tests)
 
     near_support = support > 0 and abs(price - support) / price <= tolerance * 1.5
     near_resistance = resistance > 0 and abs(resistance - price) / price <= tolerance * 1.5
@@ -9164,6 +9224,179 @@ def analyze_repeated_level_tests(price, df_5m, df_15m, support, resistance, atr=
         "near_support": near_support,
         "near_resistance": near_resistance,
         "tolerance_rate": tolerance,
+        "support_5m_tests": support_5m_tests,
+        "support_15m_tests": support_15m_tests,
+        "resistance_5m_tests": resistance_5m_tests,
+        "resistance_15m_tests": resistance_15m_tests,
+    }
+
+
+def _build_breakout_reference(
+    *,
+    price,
+    df_5m,
+    atr,
+    recent_support,
+    recent_resistance,
+    repeated_support_tests,
+    repeated_resistance_tests,
+    sr_analysis,
+):
+    """Build one structural level for attempts, close confirmation, and retests."""
+    price = max(0.0, _safe_float(price, 0.0))
+    if df_5m is None or len(df_5m) < 7 or price <= 0:
+        return {
+            "attempt": 0,
+            "support_level": max(0.0, _safe_float(recent_support, 0.0)),
+            "resistance_level": max(0.0, _safe_float(recent_resistance, 0.0)),
+            "close_confirmed": False,
+            "buffer": 0.0,
+            "completed_close": 0.0,
+            "sweep_high": False,
+            "sweep_low": False,
+        }
+
+    completed_close = _safe_float(df_5m["close"].iloc[-2], price)
+    micro_resistance = _safe_float(df_5m["high"].iloc[-6:-2].max(), 0.0)
+    micro_support = _safe_float(df_5m["low"].iloc[-6:-2].min(), 0.0)
+    resistance_level = (
+        _safe_float(recent_resistance, micro_resistance)
+        if _safe_int(repeated_resistance_tests, 0) >= 2
+        else micro_resistance
+    )
+    support_level = (
+        _safe_float(recent_support, micro_support)
+        if _safe_int(repeated_support_tests, 0) >= 2
+        else micro_support
+    )
+
+    sr = sr_analysis if isinstance(sr_analysis, dict) else {}
+    near_limit = max(price * 0.003, _safe_float(atr, 0.0) * 0.35)
+    nearest_resistance = _safe_float(sr.get("nearest_resistance"), 0.0)
+    nearest_support = _safe_float(sr.get("nearest_support"), 0.0)
+    if (
+        _safe_int(sr.get("resistance_hits"), 0) >= 2
+        and nearest_resistance > resistance_level
+        and nearest_resistance - resistance_level <= near_limit
+    ):
+        resistance_level = nearest_resistance
+    if (
+        _safe_int(sr.get("support_hits"), 0) >= 2
+        and 0 < nearest_support < support_level
+        and support_level - nearest_support <= near_limit
+    ):
+        support_level = nearest_support
+
+    buffer_rate = max(
+        0.0002,
+        min(0.0012, _safe_float(os.getenv("TRADE_BREAKOUT_BUFFER_RATE", "0.0003"), 0.0003)),
+    )
+    buffer = max(price * buffer_rate, _safe_float(atr, 0.0) * 0.08)
+    up_attempt = resistance_level > 0 and price > resistance_level
+    down_attempt = support_level > 0 and price < support_level
+    attempt = 0
+    if up_attempt and not down_attempt:
+        attempt = 1
+    elif down_attempt and not up_attempt:
+        attempt = -1
+
+    close_confirmed = bool(
+        (attempt == 1 and completed_close > resistance_level + buffer)
+        or (attempt == -1 and completed_close < support_level - buffer)
+    )
+    current_kline_close = _safe_float(df_5m["close"].iloc[-1], price)
+    sweep_high = bool(attempt == 1 and current_kline_close < resistance_level)
+    sweep_low = bool(attempt == -1 and current_kline_close > support_level)
+    return {
+        "attempt": attempt,
+        "support_level": round(max(0.0, support_level), 8),
+        "resistance_level": round(max(0.0, resistance_level), 8),
+        "close_confirmed": close_confirmed,
+        "buffer": round(max(0.0, buffer), 8),
+        "completed_close": completed_close,
+        "sweep_high": sweep_high,
+        "sweep_low": sweep_low,
+    }
+
+
+def _score_breakout_quality(
+    reference,
+    *,
+    regime,
+    htf,
+    mid_trend,
+    volume_ratio,
+    buy_pressure,
+    sell_pressure,
+    taker_buy_ratio,
+    macro_bias,
+    derivatives_pressure,
+):
+    """Score breakout evidence so moderate setups can use smaller size instead of a hard block."""
+    reference = reference if isinstance(reference, dict) else {}
+    direction = _safe_int(reference.get("attempt"), 0)
+    score = 0.0
+    reasons = []
+    if direction not in {-1, 1}:
+        return {
+            "direction": 0,
+            "score": 0.0,
+            "required_score": 3.0,
+            "confirmed": False,
+            "grade": "none",
+            "reasons": [],
+        }
+
+    score += 1.0
+    reasons.append("即時價格已穿越結構位")
+    if reference.get("close_confirmed"):
+        score += 2.0
+        reasons.append("完成5m收盤確認")
+    if _safe_float(volume_ratio, 0.0) >= 1.2:
+        score += 1.0
+        reasons.append("量能達均量1.2倍")
+    if _safe_float(volume_ratio, 0.0) >= 1.5:
+        score += 0.5
+        reasons.append("量能達均量1.5倍")
+    pressure_aligned = (direction == 1 and buy_pressure) or (direction == -1 and sell_pressure)
+    if pressure_aligned:
+        score += 0.5
+        reasons.append("15m實體方向同向")
+    flow_aligned = (
+        direction == 1 and _safe_float(taker_buy_ratio, 0.5) >= 0.52
+    ) or (
+        direction == -1 and _safe_float(taker_buy_ratio, 0.5) <= 0.48
+    )
+    if flow_aligned:
+        score += 0.75
+        reasons.append("主動買賣流同向")
+    aligned_trends = int(_safe_int(htf, 0) == direction) + int(_safe_int(mid_trend, 0) == direction)
+    if aligned_trends:
+        score += 0.5 * aligned_trends
+        reasons.append(f"趨勢同向{aligned_trends}/2")
+    if _safe_float(macro_bias, 0.0) * direction < -0.4:
+        score -= 0.5
+        reasons.append("宏觀明顯反向")
+    if _safe_float(derivatives_pressure, 0.0) * direction < -0.12:
+        score -= 0.5
+        reasons.append("衍生品流向反向")
+    swept = bool(reference.get("sweep_high") if direction == 1 else reference.get("sweep_low"))
+    if swept:
+        score -= 2.0
+        reasons.append("穿越後收回，疑似假突破")
+
+    required_score = 3.0
+    if direction == 1:
+        required_score = 4.0 if str(regime or "") == "range" else 3.5
+    confirmed = bool(score >= required_score and not swept)
+    grade = "strong" if score >= required_score + 1.0 else "qualified" if confirmed else "watch"
+    return {
+        "direction": direction,
+        "score": round(score, 3),
+        "required_score": required_score,
+        "confirmed": confirmed,
+        "grade": grade,
+        "reasons": reasons[:8],
     }
 
 
@@ -9181,6 +9414,8 @@ def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
     score = 0.0
     support_hits = 0
     resistance_hits = 0
+    support_levels = []
+    resistance_levels = []
 
     px = max(_safe_float(price, 0.0), 0.0)
     near_threshold = 0.007  # 0.7%
@@ -9201,6 +9436,9 @@ def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
 
         if support is None or resistance is None:
             continue
+
+        support_levels.append(float(support))
+        resistance_levels.append(float(resistance))
 
         dist_s = (px - support) / px if px > 0 else 999.0
         dist_r = (resistance - px) / px if px > 0 else 999.0
@@ -9224,6 +9462,10 @@ def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
         "bias": score,
         "support_hits": support_hits,
         "resistance_hits": resistance_hits,
+        "support_levels": [round(value, 4) for value in support_levels],
+        "resistance_levels": [round(value, 4) for value in resistance_levels],
+        "nearest_support": round(max((value for value in support_levels if value <= px), default=0.0), 4),
+        "nearest_resistance": round(min((value for value in resistance_levels if value >= px), default=0.0), 4),
         "lines": lines[:5],
     }
 
@@ -10501,6 +10743,16 @@ def build_trade_signal_snapshot(
             "htf_strength": 0.0,
             "mid_trend": 0,
             "breakout": 0,
+            "breakout_attempt": 0,
+            "breakout_confirmed": False,
+            "breakout_quality": {"direction": 0, "score": 0.0, "required_score": 3.0, "confirmed": False},
+            "breakout_quality_score": 0.0,
+            "breakout_quality_required": 3.0,
+            "breakout_size_multiplier": 1.0,
+            "breakout_max_position_size": 0.0,
+            "support_break_level": 0.0,
+            "resistance_break_level": 0.0,
+            "breakout_buffer": 0.0,
             "regime": "range",
             "atr": 0.0,
             "derivatives_pressure": 0.0,
@@ -10572,23 +10824,11 @@ def build_trade_signal_snapshot(
     fvg_low, fvg_high = calc_fvg(df_15m)
     atr = float(df_15m["high"].iloc[-1] - df_15m["low"].iloc[-1]) if len(df_15m) > 0 else 0.0
 
-    recent_high_5m = df_5m["high"].iloc[-5:-1].max()
-    recent_low_5m = df_5m["low"].iloc[-5:-1].min()
-    breakout = 0
-    if price > recent_high_5m:
-        breakout = 1
-    elif price < recent_low_5m:
-        breakout = -1
-
-    prev_high = df_5m["high"].iloc[-2]
-    prev_low = df_5m["low"].iloc[-2]
-    sweep_high = bool(price > recent_high_5m and df_5m["close"].iloc[-1] < prev_high)
-    sweep_low = bool(price < recent_low_5m and df_5m["close"].iloc[-1] > prev_low)
-
     macro_bias = _compute_macro_bias(sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk)
 
-    recent_high_15 = df_15m["high"].tail(20).max()
-    recent_low_15 = df_15m["low"].tail(20).min()
+    completed_15m = df_15m.iloc[:-1] if len(df_15m) > 20 else df_15m
+    recent_high_15 = completed_15m["high"].tail(20).max()
+    recent_low_15 = completed_15m["low"].tail(20).min()
     repeated_level_tests = analyze_repeated_level_tests(
         price,
         df_5m.tail(80),
@@ -10625,6 +10865,33 @@ def build_trade_signal_snapshot(
     liquidation_pressure = max(-1.0, min(1.0, _safe_float(derivatives_flow.get("liquidation_pressure"), 0.0)))
     liquidation_cluster_risk = max(0.0, min(1.0, _safe_float(derivatives_flow.get("liquidation_cluster_risk"), 0.0)))
     liquidation_cluster_count = max(0, _safe_int(derivatives_flow.get("liquidation_cluster_count"), 0))
+
+    breakout_reference = _build_breakout_reference(
+        price=price,
+        df_5m=df_5m,
+        atr=atr,
+        recent_support=recent_low_15,
+        recent_resistance=recent_high_15,
+        repeated_support_tests=repeated_support_tests,
+        repeated_resistance_tests=repeated_resistance_tests,
+        sr_analysis=sr_analysis,
+    )
+    breakout_quality = _score_breakout_quality(
+        breakout_reference,
+        regime=regime,
+        htf=htf,
+        mid_trend=mid_trend,
+        volume_ratio=volume_ratio,
+        buy_pressure=buy_pressure,
+        sell_pressure=sell_pressure,
+        taker_buy_ratio=taker_buy_ratio,
+        macro_bias=macro_bias,
+        derivatives_pressure=derivatives_pressure,
+    )
+    breakout_attempt = _safe_int(breakout_reference.get("attempt"), 0)
+    breakout = breakout_attempt if breakout_quality.get("confirmed") else 0
+    sweep_high = bool(breakout_reference.get("sweep_high"))
+    sweep_low = bool(breakout_reference.get("sweep_low"))
 
     features = {
         "htf": htf,
@@ -10714,12 +10981,12 @@ def build_trade_signal_snapshot(
     elif breakout == -score_direction:
         confluence -= 0.9
     if score_direction == 1 and repeated_resistance_tests >= 2:
-        if breakout == 1 and (volume_spike or buy_pressure) and not sweep_high:
+        if breakout == 1 and not sweep_high:
             confluence += min(1.2, repeated_resistance_tests * 0.25)
         else:
             confluence -= min(0.7, repeated_resistance_tests * 0.16)
     elif score_direction == -1 and repeated_support_tests >= 2:
-        if breakout == -1 and (volume_spike or sell_pressure) and not sweep_low:
+        if breakout == -1 and not sweep_low:
             confluence += min(1.2, repeated_support_tests * 0.25)
         else:
             confluence -= min(0.7, repeated_support_tests * 0.16)
@@ -11091,11 +11358,16 @@ def build_trade_signal_snapshot(
     pullback_long = bool(regime in ["bear_trend", "bear_trend_strong"] and mid_trend == 1 and (volume_spike or breakout == 1))
     pullback_short = bool(regime in ["bull_trend", "bull_trend_strong"] and mid_trend == -1 and (volume_spike or breakout == -1))
 
-    fake_breakout = False
-    if breakout != 0 and not volume_spike:
-        fake_breakout = True
-    if absorption or sweep_high or sweep_low:
-        fake_breakout = True
+    fake_breakout = bool(
+        breakout_attempt != 0
+        and (
+            absorption
+            or sweep_high
+            or sweep_low
+            or _safe_float(breakout_quality.get("score"), 0.0)
+            < _safe_float(breakout_quality.get("required_score"), 3.0) - 1.0
+        )
+    )
     if breakout == 1 and btc_change < 0:
         fake_breakout = True
     if breakout == -1 and btc_change > 0:
@@ -11356,7 +11628,7 @@ def build_trade_signal_snapshot(
             long_setup = _safe_float(learned_entry_logic.get("long_setup"), 0.0)
             short_setup = _safe_float(learned_entry_logic.get("short_setup"), 0.0)
             support_confirm = bool(learned_entry_logic.get("support_hold_unconfirmed")) or bool(sweep_low)
-            breakout_confirm = breakout == 1 and (volume_spike or buy_pressure) and not sweep_high
+            breakout_confirm = breakout == 1 and not sweep_high
             min_long_prob = max(
                 min_direction_win_prob,
                 _safe_float(os.getenv("TRADE_TIGHT_LONG_MIN_PROB", 0.48), 0.48),
@@ -11500,6 +11772,41 @@ def build_trade_signal_snapshot(
             if not profile_ok:
                 final = "觀望（MLX回測輪廓不佳）"
                 position_size = 0.0
+
+    breakout_size_multiplier = 1.0
+    breakout_max_position_size = 0.0
+    final_direction = get_signal_direction(final)
+    if (
+        not final.startswith("觀望")
+        and breakout in {-1, 1}
+        and final_direction == ("long" if breakout == 1 else "short")
+        and not multitimeframe_bull_reclaim.get("applied")
+    ):
+        quality_score = _safe_float(breakout_quality.get("score"), 0.0)
+        required_quality = _safe_float(breakout_quality.get("required_score"), 3.0)
+        if breakout == 1 and regime == "range":
+            breakout_size_multiplier = 0.75 if quality_score >= required_quality + 1.0 else 0.55
+        elif breakout == 1 and htf != 1:
+            breakout_size_multiplier = 0.70
+        elif breakout == -1 and regime == "range":
+            breakout_size_multiplier = 0.85
+        elif breakout == -1 and htf == 1:
+            breakout_size_multiplier = 0.80
+        position_size = _cap_initial_position_size(position_size * breakout_size_multiplier)
+        if breakout == 1:
+            default_cap = 0.02 if regime == "bull_trend_strong" else 0.015 if regime == "bull_trend" else 0.02
+            cap_name = "TRADE_BREAKOUT_LONG_MAX_SIZE"
+        else:
+            default_cap = 0.08 if regime in {"bear_trend", "bear_trend_strong"} else 0.04
+            if htf == 1:
+                default_cap = min(default_cap, 0.02)
+            cap_name = "TRADE_BREAKDOWN_SHORT_MAX_SIZE"
+        breakout_max_position_size = max(
+            0.01,
+            min(0.10, _safe_float(os.getenv(cap_name, default_cap), default_cap)),
+        )
+        position_size = min(position_size, breakout_max_position_size)
+
     final = _classify_wait_state(
         final,
         repeated_support_tests=repeated_support_tests,
@@ -11537,6 +11844,17 @@ def build_trade_signal_snapshot(
         "htf_strength": htf_strength,
         "mid_trend": mid_trend,
         "breakout": breakout,
+        "breakout_attempt": breakout_attempt,
+        "breakout_confirmed": bool(breakout_quality.get("confirmed")),
+        "breakout_quality": breakout_quality,
+        "breakout_quality_score": _safe_float(breakout_quality.get("score"), 0.0),
+        "breakout_quality_required": _safe_float(breakout_quality.get("required_score"), 3.0),
+        "breakout_size_multiplier": breakout_size_multiplier,
+        "breakout_max_position_size": breakout_max_position_size,
+        "support_break_level": _safe_float(breakout_reference.get("support_level"), 0.0),
+        "resistance_break_level": _safe_float(breakout_reference.get("resistance_level"), 0.0),
+        "breakout_buffer": _safe_float(breakout_reference.get("buffer"), 0.0),
+        "breakout_completed_close": _safe_float(breakout_reference.get("completed_close"), 0.0),
         "regime": regime,
         "atr": atr,
         "volume_spike": volume_spike,
@@ -14736,6 +15054,9 @@ def run_bot():
             htf_strength = decision["htf_strength"]
             mid_trend = decision["mid_trend"]
             breakout = decision["breakout"]
+            breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
+            breakout_quality_score = _safe_float(decision.get("breakout_quality_score"), 0.0)
+            breakout_quality_required = _safe_float(decision.get("breakout_quality_required"), 3.0)
             regime = decision["regime"]
             atr = decision["atr"]
             derivatives_pressure = _safe_float(decision.get("derivatives_pressure"), 0.0)
@@ -14868,9 +15189,21 @@ def run_bot():
 
             # Breakout（結構突破）
             if breakout == 1:
-                reason.append("突破高點（5m 結構突破）")
+                reason.append(
+                    f"突破壓力確認（品質{breakout_quality_score:.1f}/{breakout_quality_required:.1f}）"
+                )
             elif breakout == -1:
-                reason.append("跌破低點（5m 結構跌破）")
+                reason.append(
+                    f"跌破支撐確認（品質{breakout_quality_score:.1f}/{breakout_quality_required:.1f}）"
+                )
+            elif breakout_attempt == 1:
+                reason.append(
+                    f"嘗試突破壓力（品質{breakout_quality_score:.1f}/{breakout_quality_required:.1f}，尚待確認）"
+                )
+            elif breakout_attempt == -1:
+                reason.append(
+                    f"嘗試跌破支撐（品質{breakout_quality_score:.1f}/{breakout_quality_required:.1f}，尚待確認）"
+                )
 
             # Regime（市場結構）
             if regime == "bull_trend_strong":
@@ -15160,6 +15493,12 @@ def run_bot():
                             pending_entry_confirmation = {
                                 "direction": direction,
                                 "price": float(price),
+                                "breakout_level": _safe_float(
+                                    decision.get(
+                                        "resistance_break_level" if direction == "long" else "support_break_level"
+                                    ),
+                                    price,
+                                ),
                                 "score": float(score),
                                 "final": final,
                                 "ts": now_ts,
@@ -15216,11 +15555,17 @@ def run_bot():
                 base_size = _cap_initial_position_size(base_size)
                 planned_open_size = base_size
                 active_trade["size"] = float(min(1.0, max(base_size, 0.1)))
-                if daily_min_trade or bool(decision.get("daily_anchor_quality_signal")):
+                breakout_max_size = max(
+                    0.0,
+                    _safe_float(decision.get("breakout_max_position_size"), 0.0),
+                )
+                if daily_min_trade or bool(decision.get("daily_anchor_quality_signal")) or breakout_max_size > 0:
                     active_trade["size"] = float(max(base_size, 0.01))
                 max_size, min_size = _derive_scaling_bounds(active_trade["size"])
                 if bool(decision.get("daily_anchor_quality_signal")):
                     max_size = active_trade["size"]
+                elif breakout_max_size > 0:
+                    max_size = min(breakout_max_size, max(active_trade["size"], breakout_max_size))
                 if daily_min_trade and daily_plan.get("max_position_size") is not None:
                     max_size = max(
                         active_trade["size"],
