@@ -305,6 +305,26 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(eth.POSITION_PANEL_STATE["execution_mode"], "real")
         self.assertEqual(eth.POSITION_PANEL_STATE["position_source"], "binance")
 
+    def test_panel_snapshot_publishes_breakout_quality(self):
+        breakout = {
+            "attempt": 1,
+            "confirmed": False,
+            "quality_score": 2.5,
+            "required_score": 3.5,
+            "resistance_level": 1940.75,
+        }
+        eth.POSITION_PANEL_STATE["strategy_breakout"] = breakout
+
+        with (
+            patch.object(eth, "_refresh_position_panel_account_state"),
+            patch.object(eth, "_write_json_atomic") as write_snapshot,
+            patch.object(eth, "_queue_panel_realtime_publish"),
+        ):
+            eth.sync_position_panel(1938.0)
+
+        payload = write_snapshot.call_args.args[1]
+        self.assertEqual(payload["strategy_breakout"], breakout)
+
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"

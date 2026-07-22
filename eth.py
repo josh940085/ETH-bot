@@ -5674,6 +5674,7 @@ def sync_position_panel(current_price=None):
             "strategy_ai_short_prob": round(_safe_float(POSITION_PANEL_STATE.get("strategy_ai_short_prob"), 0.5), 4),
             "strategy_regime": str(POSITION_PANEL_STATE.get("strategy_regime") or ""),
             "strategy_reclaim_gate": dict(POSITION_PANEL_STATE.get("strategy_reclaim_gate") or {}),
+            "strategy_breakout": dict(POSITION_PANEL_STATE.get("strategy_breakout") or {}),
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
