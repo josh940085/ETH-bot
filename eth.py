@@ -7175,6 +7175,69 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
         return True
 
     if market_phase == "range_base" and risk_rate > 0:
+        repeated_support = _safe_int(decision.get("repeated_support_tests"), 0)
+        repeated_resistance = _safe_int(decision.get("repeated_resistance_tests"), 0)
+        news_bias = _safe_float(decision.get("news_bias"), 0.0)
+        event_risk = _safe_int(decision.get("event_risk"), 0)
+        max_tested_break_risk = max(
+            0.008,
+            _safe_float(
+                os.getenv("DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_MAX_RISK_RATE", 0.012),
+                0.012,
+            ),
+        )
+        tested_range_break = (
+            _is_truthy(os.getenv("DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_ENABLED", "1"))
+            and host_conf >= 0.64
+            and net_edge >= 0.002
+            and 0 < risk_rate <= max_tested_break_risk
+            and event_risk <= 0
+            and (
+                (
+                    direction == "long"
+                    and host_mode == "breakout_after_pressure_tests"
+                    and range_pos >= 0.65
+                    and score_value >= 0.68
+                    and not (htf == -1 and mid_trend == -1)
+                    and resistance_hits >= 2
+                    and news_bias >= 0
+                )
+                or (
+                    direction == "short"
+                    and host_mode == "breakdown_after_support_tests"
+                    and range_pos <= 0.35
+                    and score_value <= 0.32
+                    and not (htf == 1 and mid_trend == 1)
+                    and (support_hits >= 1 or repeated_support >= 2)
+                    and news_bias <= 0
+                )
+            )
+        )
+        if tested_range_break:
+            tested_break_max_size = max(
+                0.01,
+                min(
+                    0.03,
+                    _safe_float(
+                        os.getenv("DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_MAX_SIZE", 0.02),
+                        0.02,
+                    ),
+                ),
+            )
+            decision["position_size"] = min(
+                max(0.0, _safe_float(decision.get("position_size"), 0.0)),
+                tested_break_max_size,
+            )
+            decision["max_position_size"] = min(
+                max(
+                    decision["position_size"],
+                    _safe_float(decision.get("max_position_size"), decision["position_size"]),
+                ),
+                tested_break_max_size,
+            )
+            decision["daily_anchor_quality_signal"] = True
+            decision["general_entry_relaxation"] = "range_tested_break"
+            return False
         confirmed_range_edge = (
             (
                 direction == "long"

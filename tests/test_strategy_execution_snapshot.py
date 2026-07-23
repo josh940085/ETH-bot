@@ -257,6 +257,75 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(decision["max_position_size"], 0.05)
         self.assertTrue(decision["daily_anchor_quality_signal"])
 
+    def test_daily_anchor_allows_tested_range_break_with_small_size(self):
+        decision = {
+            "market_profile": {"phase": "range_base"},
+            "risk_rate": 0.011,
+            "net_edge_rate_est": 0.021,
+            "position_size": 0.15,
+            "max_position_size": 0.20,
+            "host_opening_logic": {
+                "mode": "breakout_after_pressure_tests",
+                "confidence": 0.88,
+                "range_pos": 0.82,
+            },
+            "htf": 1,
+            "mid_trend": 1,
+            "resistance_hits": 2,
+            "news_bias": 0,
+            "event_risk": 0,
+        }
+
+        with patch.dict(
+            eth.os.environ,
+            {"DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_ENABLED": "1"},
+            clear=False,
+        ):
+            should_wait = eth._daily_anchor_guard_should_wait(
+                "🚀 做多",
+                0.8959,
+                decision,
+            )
+
+        self.assertFalse(should_wait)
+        self.assertEqual(decision["position_size"], 0.02)
+        self.assertEqual(decision["max_position_size"], 0.02)
+        self.assertTrue(decision["daily_anchor_quality_signal"])
+        self.assertEqual(decision["general_entry_relaxation"], "range_tested_break")
+
+    def test_daily_anchor_keeps_event_risk_block_for_tested_range_break(self):
+        decision = {
+            "market_profile": {"phase": "range_base"},
+            "risk_rate": 0.011,
+            "net_edge_rate_est": 0.021,
+            "position_size": 0.15,
+            "max_position_size": 0.20,
+            "host_opening_logic": {
+                "mode": "breakout_after_pressure_tests",
+                "confidence": 0.88,
+                "range_pos": 0.82,
+            },
+            "htf": 1,
+            "mid_trend": 1,
+            "resistance_hits": 2,
+            "news_bias": 0,
+            "event_risk": 1,
+        }
+
+        with patch.dict(
+            eth.os.environ,
+            {"DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_ENABLED": "1"},
+            clear=False,
+        ):
+            should_wait = eth._daily_anchor_guard_should_wait(
+                "🚀 做多",
+                0.8959,
+                decision,
+            )
+
+        self.assertTrue(should_wait)
+        self.assertNotIn("general_entry_relaxation", decision)
+
     def test_real_order_priority_is_enabled_by_default(self):
         with patch.dict(eth.os.environ, {}, clear=True):
             self.assertTrue(eth._real_order_priority_enabled())
