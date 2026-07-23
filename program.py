@@ -270,6 +270,12 @@ def _get_maintenance_settings():
         "no",
         "off",
     }
+    package_auto_update = str(os.getenv("MAINTENANCE_PACKAGE_AUTO_UPDATE", "1") or "1").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
     return {
         "enabled": enabled,
         "startup_delay_sec": startup_delay_sec,
@@ -278,6 +284,7 @@ def _get_maintenance_settings():
         "smoke_backtest_days": smoke_backtest_days,
         "smoke_backtest_warmup_bars": smoke_backtest_warmup_bars,
         "notify": notify,
+        "package_auto_update": package_auto_update,
     }
 
 
@@ -429,6 +436,8 @@ def _start_maintenance_process(env, settings):
     ]
     if not settings["notify"]:
         cmd.append("--no-notify")
+    if settings.get("package_auto_update", True):
+        cmd.append("--update-packages")
 
     print(f"🛠️ 啟動每日巡檢: {' '.join(cmd)}")
     return subprocess.Popen(

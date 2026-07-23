@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from package_updates import check_and_update_packages
 from runtime_config import load_local_env
 from runtime_paths import REPO_DIR, data_path
 from telegram import configure_token, get_notification_chat_ids, send_message, truncate_text
@@ -30,6 +31,7 @@ REPORT_PREFIX = "REPORT_JSON="
 CHECK_NAME_ZH = {
     "conflict_markers": "程式衝突標記",
     "dependency_constraints": "套件依賴",
+    "package_versions": "套件版本更新",
     "runtime_memory": "記憶體使用與優化",
     "panel_tunnel_health": "面板連線與隧道",
     "n8n_health": "n8n 通知自動化",
@@ -502,6 +504,7 @@ def _parse_args():
         help="Warmup bars for maintenance smoke backtest",
     )
     parser.add_argument("--skip-smoke-backtest", action="store_true", help="Skip the maintenance smoke backtest")
+    parser.add_argument("--update-packages", action="store_true", help="Update safe compatible package versions")
     parser.add_argument("--no-notify", action="store_true", help="Do not send Telegram summary")
     return parser.parse_args()
 
@@ -1641,6 +1644,34 @@ def _send_report_notification(report):
     return True
 
 
+def _schedule_package_restarts(report):
+    package_check = next(
+        (item for item in report.get("checks", []) if item.get("name") == "package_versions"),
+        {},
+    )
+    if package_check.get("status") != "fixed":
+        return False
+    services = [str(item) for item in package_check.get("restart_services", []) if str(item).strip()]
+    if not services:
+        return False
+
+    log_path = data_path("..", "logs", "package-restart.log").resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("a", encoding="utf-8")
+    try:
+        subprocess.Popen(
+            [sys.executable, str(REPO_DIR / "package_restart.py"), *services],
+            cwd=str(REPO_DIR),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    finally:
+        log_handle.close()
+    return True
+
+
 def main():
     args = _parse_args()
     report = {
@@ -1653,6 +1684,10 @@ def main():
 
     checks = [
         ("conflict_markers", _check_conflict_markers),
+        (
+            "package_versions",
+            lambda: check_and_update_packages(apply_updates=args.update_packages),
+        ),
         ("dependency_constraints", _check_dependency_constraints),
         ("runtime_memory", _check_runtime_memory_and_optimize),
         ("panel_tunnel_health", _check_cloudflared_and_panel_tunnel),
@@ -1706,6 +1741,9 @@ def main():
     if not args.no_notify:
         report["notify_sent"] = _send_report_notification(report)
         _write_json_atomic(args.report_out, report)
+
+    report["package_restart_scheduled"] = _schedule_package_restarts(report)
+    _write_json_atomic(args.report_out, report)
 
     print(json.dumps(report, ensure_ascii=False, indent=2))
     raise SystemExit(1 if has_error else 0)

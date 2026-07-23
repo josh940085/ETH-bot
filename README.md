@@ -213,6 +213,7 @@ Telegram 輸入 `/ai 學習狀態` 可查看累積分析、已驗證案例與準
 Bot 每天預設於台北時間 `23:50` 發送策略勝率巡檢，包含近 24 小時、近 7 日與 MLX 分析驗證結果。
 每日系統巡檢也會記錄各服務記憶體與 MLX Metal footprint；只有超過上限或系統記憶體壓力過高時，才會重啟 MLX agent 釋放記憶體。
 每日巡檢會測試 MLX 的結構化輸出、推論延遲、已驗證樣本與準確率，並檢查近期交易日覆蓋率及扣除每日保底單後的一般策略單密度，避免策略條件過嚴卻被保底單掩蓋；未完成專用影子回測前不會直接取代交易模型。
+每日系統巡檢預設於台北時間 `04:30` 檢查並更新 Python、n8n 與 Homebrew 套件。Python 依 `requirements.txt` 的相依限制更新，n8n 僅自動更新相同主版本；更新後會跑完整測試與語法檢查。需要重啟時會等 Binance 實單、進場確認及送單狀態結束後才依序重啟受影響服務。可用 `MAINTENANCE_PACKAGE_AUTO_UPDATE=0` 關閉自動更新；版本與安全重啟結果分別保存在 `.runtime/data/package_updates_latest.json`、`.runtime/data/package_restart_latest.json`。
 每日 Telegram 巡檢報告使用繁體中文呈現，保留必要的服務名稱與技術數值。
 
 MLX 依賴只會在 Apple Silicon macOS 安裝；Linux／Intel 環境請在 supervisor 設定停用 `mlx-agent`。
