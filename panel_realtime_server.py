@@ -165,6 +165,13 @@ MARKET_PRICE_ERROR_COOLDOWN_SEC = max(
     _safe_float_env("POSITION_PANEL_MARKET_PRICE_ERROR_COOLDOWN_SEC", 2.0),
 )
 MARKET_PRICE_MAX_AGE_SEC = max(2.0, _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_AGE_SEC", 10.0))
+MARKET_PRICE_MAX_COOLDOWN_SEC = max(
+    2.0,
+    min(
+        MARKET_PRICE_MAX_AGE_SEC,
+        _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_COOLDOWN_SEC", 5.0),
+    ),
+)
 MARKET_PRICE_MAX_DEVIATION_RATE = max(
     0.001,
     min(0.05, _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_DEVIATION_RATE", 0.01)),
@@ -375,7 +382,7 @@ def _mark_market_price_failure(cache_key: str, now_ts: float) -> float:
     failure_count = int(MARKET_PRICE_FAILURE_COUNT.get(cache_key, 0) or 0) + 1
     MARKET_PRICE_FAILURE_COUNT[cache_key] = failure_count
     cooldown_sec = min(
-        30.0,
+        MARKET_PRICE_MAX_COOLDOWN_SEC,
         MARKET_PRICE_ERROR_COOLDOWN_SEC * (2 ** min(failure_count - 1, 6)),
     )
     MARKET_PRICE_FAILURE_UNTIL[cache_key] = float(now_ts) + cooldown_sec

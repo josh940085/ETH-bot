@@ -171,15 +171,34 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
         cache_key = "mark_price:TESTUSDT"
         panel_realtime_server._clear_market_price_failures(cache_key)
         try:
-            delays = [
-                panel_realtime_server._mark_market_price_failure(cache_key, 2000.0)
-                for _ in range(6)
-            ]
+            with patch.object(panel_realtime_server, "MARKET_PRICE_MAX_COOLDOWN_SEC", 30.0):
+                delays = [
+                    panel_realtime_server._mark_market_price_failure(cache_key, 2000.0)
+                    for _ in range(6)
+                ]
             self.assertEqual(delays[:4], [2.0, 4.0, 8.0, 16.0])
             self.assertEqual(delays[4:], [30.0, 30.0])
             self.assertEqual(
                 panel_realtime_server.MARKET_PRICE_FAILURE_UNTIL[cache_key],
                 2030.0,
+            )
+        finally:
+            panel_realtime_server._clear_market_price_failures(cache_key)
+
+    def test_mark_price_backoff_stays_inside_validated_cache_horizon(self):
+        cache_key = "mark_price:TESTUSDT"
+        panel_realtime_server._clear_market_price_failures(cache_key)
+        try:
+            with patch.object(panel_realtime_server, "MARKET_PRICE_MAX_COOLDOWN_SEC", 5.0):
+                delays = [
+                    panel_realtime_server._mark_market_price_failure(cache_key, 2000.0)
+                    for _ in range(6)
+                ]
+
+            self.assertEqual(delays, [2.0, 4.0, 5.0, 5.0, 5.0, 5.0])
+            self.assertEqual(
+                panel_realtime_server.MARKET_PRICE_FAILURE_UNTIL[cache_key],
+                2005.0,
             )
         finally:
             panel_realtime_server._clear_market_price_failures(cache_key)
