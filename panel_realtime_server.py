@@ -156,6 +156,7 @@ MARKET_DATA_CACHE = {}
 MARKET_DATA_LOCK = asyncio.Lock()
 MARKET_PRICE_REFRESH_LOCK = asyncio.Lock()
 MARKET_PRICE_FAILURE_UNTIL = {}
+MARKET_PRICE_FAILURE_COUNT = {}
 MARKET_DATA_TTL_SEC = max(3.0, _safe_float_env("POSITION_PANEL_MARKET_DATA_TTL_SEC", 8.0))
 MARKET_LIVE_DATA_TTL_SEC = 3.0
 MARKET_PRICE_TTL_SEC = max(0.5, _safe_float_env("POSITION_PANEL_MARKET_PRICE_TTL_SEC", 1.0))
@@ -368,6 +369,22 @@ def _usable_cached_market_price(cached, now_ts: float):
     if max(0.0, float(now_ts) - exchange_ts) > MARKET_PRICE_MAX_AGE_SEC:
         return None
     return dict(payload)
+
+
+def _mark_market_price_failure(cache_key: str, now_ts: float) -> float:
+    failure_count = int(MARKET_PRICE_FAILURE_COUNT.get(cache_key, 0) or 0) + 1
+    MARKET_PRICE_FAILURE_COUNT[cache_key] = failure_count
+    cooldown_sec = min(
+        30.0,
+        MARKET_PRICE_ERROR_COOLDOWN_SEC * (2 ** min(failure_count - 1, 6)),
+    )
+    MARKET_PRICE_FAILURE_UNTIL[cache_key] = float(now_ts) + cooldown_sec
+    return cooldown_sec
+
+
+def _clear_market_price_failures(cache_key: str):
+    MARKET_PRICE_FAILURE_UNTIL.pop(cache_key, None)
+    MARKET_PRICE_FAILURE_COUNT.pop(cache_key, None)
 
 
 def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
@@ -1055,14 +1072,14 @@ async def get_market_price(request: Request):
         try:
             snapshot = await asyncio.to_thread(_fetch_binance_mark_price_sync, symbol)
         except Exception as exc:
-            MARKET_PRICE_FAILURE_UNTIL[cache_key] = now_ts + MARKET_PRICE_ERROR_COOLDOWN_SEC
+            _mark_market_price_failure(cache_key, time.time())
             fallback = _usable_cached_market_price(cached, now_ts)
             if fallback is not None:
                 fallback["cached"] = True
                 return JSONResponse(fallback)
             raise HTTPException(status_code=502, detail=f"mark price unavailable: {exc}") from exc
 
-        MARKET_PRICE_FAILURE_UNTIL.pop(cache_key, None)
+        _clear_market_price_failures(cache_key)
 
         payload = {
             "ok": True,

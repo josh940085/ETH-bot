@@ -167,6 +167,32 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
 
         self.assertIsNone(panel_realtime_server._usable_cached_market_price(cached, 2000.0))
 
+    def test_mark_price_failures_use_bounded_exponential_backoff(self):
+        cache_key = "mark_price:TESTUSDT"
+        panel_realtime_server._clear_market_price_failures(cache_key)
+        try:
+            delays = [
+                panel_realtime_server._mark_market_price_failure(cache_key, 2000.0)
+                for _ in range(6)
+            ]
+            self.assertEqual(delays[:4], [2.0, 4.0, 8.0, 16.0])
+            self.assertEqual(delays[4:], [30.0, 30.0])
+            self.assertEqual(
+                panel_realtime_server.MARKET_PRICE_FAILURE_UNTIL[cache_key],
+                2030.0,
+            )
+        finally:
+            panel_realtime_server._clear_market_price_failures(cache_key)
+
+    def test_success_clears_mark_price_failure_backoff(self):
+        cache_key = "mark_price:TESTUSDT"
+        panel_realtime_server._mark_market_price_failure(cache_key, 2000.0)
+
+        panel_realtime_server._clear_market_price_failures(cache_key)
+
+        self.assertNotIn(cache_key, panel_realtime_server.MARKET_PRICE_FAILURE_UNTIL)
+        self.assertNotIn(cache_key, panel_realtime_server.MARKET_PRICE_FAILURE_COUNT)
+
 
 if __name__ == "__main__":
     unittest.main()

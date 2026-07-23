@@ -15797,6 +15797,12 @@ def run_bot():
                 if now_ts - last_ts >= 300:
                     print("⚠️ TradingView 暫時不可用，已改用快取/等待下一輪:", err_text)
                     run_bot.last_tradingview_error_log_ts = now_ts
+            elif "api/market/price" in err_text or "策略標記價格" in err_text:
+                now_ts = time.time()
+                last_ts = _safe_float(getattr(run_bot, "last_mark_price_error_log_ts", 0.0), 0.0)
+                if now_ts - last_ts >= 60:
+                    print("⚠️ Binance 標記價格暫時不可用，禁止開單並等待安全恢復:", err_text)
+                    run_bot.last_mark_price_error_log_ts = now_ts
             else:
                 print("error:", err_text)
             time.sleep(3)
