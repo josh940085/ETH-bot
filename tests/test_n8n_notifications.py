@@ -42,6 +42,39 @@ class N8nNotificationTests(unittest.TestCase):
         self.assertTrue(body["wait_for_response"])
         self.assertEqual(body["secret"], "test-secret")
 
+    def test_timeout_does_not_enable_direct_fallback(self):
+        session = Mock()
+        session.post.side_effect = n8n_client.requests.exceptions.ReadTimeout("response timed out")
+        with patch.dict(
+            os.environ,
+            {
+                "ETH_BOT_DISABLE_LIVE": "0",
+                "N8N_NOTIFICATIONS_ENABLED": "1",
+            },
+        ), patch.object(n8n_client, "_get_webhook_secret", return_value="test-secret"):
+            result = n8n_client.post_n8n_notification(
+                "telegram", {"chat_id": "1", "text": "test"}, session=session
+            )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertIn("status unknown", result.reason)
+
+    def test_connection_error_still_enables_direct_fallback(self):
+        session = Mock()
+        session.post.side_effect = n8n_client.requests.exceptions.ConnectionError("refused")
+        with patch.dict(
+            os.environ,
+            {
+                "ETH_BOT_DISABLE_LIVE": "0",
+                "N8N_NOTIFICATIONS_ENABLED": "1",
+            },
+        ), patch.object(n8n_client, "_get_webhook_secret", return_value="test-secret"):
+            result = n8n_client.post_n8n_notification(
+                "telegram", {"chat_id": "1", "text": "test"}, session=session
+            )
+
+        self.assertIsNone(result)
+
     def test_discord_uses_direct_fallback_when_n8n_is_unavailable(self):
         direct_response = Mock(status_code=200)
         direct_response.raise_for_status.return_value = None

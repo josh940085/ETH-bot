@@ -28,7 +28,12 @@ def _get_webhook_secret() -> str:
 
 
 def post_n8n_notification(destination, payload, *, wait_for_response=False, timeout=5, session=None):
-    """Ask n8n to deliver one notification; callers retain direct-send fallback."""
+    """Ask n8n to deliver one notification; callers retain direct-send fallback.
+
+    A read timeout is delivery-ambiguous: n8n may already have sent the message.
+    Return a successful sentinel in that case so callers do not send the same
+    notification directly as a fallback.
+    """
     global _LAST_ERROR_LOG_TS
 
     if not n8n_notifications_enabled():
@@ -64,6 +69,16 @@ def post_n8n_notification(destination, payload, *, wait_for_response=False, time
         if 200 <= int(response.status_code) < 300:
             return response
         raise RuntimeError(f"HTTP {response.status_code}")
+    except requests.exceptions.Timeout as exc:
+        now_ts = time.time()
+        if now_ts - _LAST_ERROR_LOG_TS >= 60:
+            print(f"⚠️ n8n 回覆逾時，為避免重複通知不啟用直送備援: {exc}")
+            _LAST_ERROR_LOG_TS = now_ts
+        ambiguous_response = requests.Response()
+        ambiguous_response.status_code = 200
+        ambiguous_response.reason = "n8n delivery status unknown after timeout"
+        ambiguous_response._content = b""
+        return ambiguous_response
     except Exception as exc:
         now_ts = time.time()
         if now_ts - _LAST_ERROR_LOG_TS >= 60:

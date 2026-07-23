@@ -330,6 +330,37 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         with patch.dict(eth.os.environ, {}, clear=True):
             self.assertTrue(eth._real_order_priority_enabled())
 
+    def test_real_position_close_waits_for_binance_confirmation(self):
+        with (
+            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "_is_real_copy_enabled", return_value=True),
+            patch.dict(eth.os.environ, {"REAL_ORDER_PRIORITY_ENABLED": "1"}, clear=False),
+        ):
+            self.assertTrue(eth._binance_close_confirmation_required())
+
+    def test_local_tp_sl_hit_detection_is_direction_aware(self):
+        long_trade = {
+            "direction": "long",
+            "entry": 1800.0,
+            "tp": 1830.0,
+            "sl": 1780.0,
+        }
+        short_trade = {
+            "direction": "short",
+            "entry": 1900.0,
+            "tp": 1875.0,
+            "sl": 1925.0,
+        }
+
+        self.assertEqual(
+            eth._local_tp_sl_hits(long_trade, 1825.0, 1831.0, 1810.0),
+            (True, False),
+        )
+        self.assertEqual(
+            eth._local_tp_sl_hits(short_trade, 1880.0, 1890.0, 1874.0),
+            (True, False),
+        )
+
     def test_copy_trade_fallback_preserves_small_signal_ratio(self):
         with (
             patch.object(eth, "_get_binance_available_balance", return_value=0.0),

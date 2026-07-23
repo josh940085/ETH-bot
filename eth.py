@@ -3161,6 +3161,33 @@ def _has_valid_tp_sl(trade) -> bool:
     return False
 
 
+def _binance_close_confirmation_required() -> bool:
+    """Real positions stay open locally until Binance confirms they are closed."""
+    return (
+        _real_order_priority_enabled()
+        and _get_follow_mode_enabled()
+        and _is_real_copy_enabled()
+    )
+
+
+def _local_tp_sl_hits(trade, current_price, candle_high, candle_low):
+    if not _has_valid_tp_sl(trade):
+        return False, False
+
+    direction = str(trade.get("direction") or "")
+    current_price = _safe_float(current_price, 0.0)
+    candle_high = _safe_float(candle_high, current_price)
+    candle_low = _safe_float(candle_low, current_price)
+    tp = _safe_float(trade.get("tp"), 0.0)
+    sl = _safe_float(trade.get("sl"), 0.0)
+
+    if direction == "long":
+        return current_price >= tp or candle_high >= tp, current_price <= sl or candle_low <= sl
+    if direction == "short":
+        return current_price <= tp or candle_low <= tp, current_price >= sl or candle_high >= sl
+    return False, False
+
+
 def _get_binance_available_balance() -> float:
     """查詢 Binance 合約帳戶可用餘額（USDT）。失敗時回傳 0.0。"""
     snapshot = _get_binance_account_snapshot(log_on_error=True)
@@ -14855,11 +14882,44 @@ def run_bot():
                         run_bot.last_max_hold_error_ts = time.time()
                     continue
                 has_valid_tp_sl = _has_valid_tp_sl(active_trade)
+                tp_hit, sl_hit = _local_tp_sl_hits(
+                    active_trade,
+                    current,
+                    candle_high,
+                    candle_low,
+                )
+
+                # Binance protective orders are authoritative for real positions.
+                # A local candle hit is only a hint: wait until positionRisk confirms
+                # the exchange-side close before resetting state or notifying.
+                if has_valid_tp_sl and (sl_hit or tp_hit) and _binance_close_confirmation_required():
+                    local_hit_reason = "SL" if sl_hit else "TP"
+                    try:
+                        ok, sync_msg = sync_active_trade_from_binance(send_notice=False)
+                        if ok:
+                            last_binance_sync_ts = time.time()
+                        if not active_trade.get("open"):
+                            pending_training_sample = _load_pending_training_sample_state()
+                        elif time.time() - getattr(run_bot, "last_binance_close_wait_ts", 0.0) >= 30:
+                            print(
+                                f"⏳ {local_hit_reason} 價格已觸發，"
+                                "等待 Binance 確認實際平倉後再通知"
+                            )
+                            run_bot.last_binance_close_wait_ts = time.time()
+                        elif not ok and time.time() - getattr(
+                            run_bot, "last_binance_priority_sync_error_ts", 0.0
+                        ) >= 60:
+                            print(f"⚠️ Binance 平倉確認暫未完成: {sync_msg}")
+                            run_bot.last_binance_priority_sync_error_ts = time.time()
+                    except Exception as sync_error:
+                        if time.time() - getattr(
+                            run_bot, "last_binance_priority_sync_error_ts", 0.0
+                        ) >= 60:
+                            print(f"⚠️ Binance 平倉確認失敗: {sync_error}")
+                            run_bot.last_binance_priority_sync_error_ts = time.time()
+                    continue
 
                 if active_trade["direction"] == "long":
-                    tp_hit = has_valid_tp_sl and ((current >= active_trade["tp"]) or (candle_high >= active_trade["tp"]))
-                    sl_hit = has_valid_tp_sl and ((current <= active_trade["sl"]) or (candle_low <= active_trade["sl"]))
-
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
                         performance["loss"] += 1
@@ -14947,9 +15007,6 @@ def run_bot():
                         )
 
                 elif active_trade["direction"] == "short":
-                    tp_hit = has_valid_tp_sl and ((current <= active_trade["tp"]) or (candle_low <= active_trade["tp"]))
-                    sl_hit = has_valid_tp_sl and ((current >= active_trade["sl"]) or (candle_high >= active_trade["sl"]))
-
                     # 同根K同時觸發時採保守：先算SL，避免回測偏樂觀
                     if sl_hit:
                         performance["loss"] += 1
