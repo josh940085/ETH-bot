@@ -3789,7 +3789,7 @@ def _cancel_existing_binance_protection_orders(close_side, position_side, dual_s
 
 def _submit_binance_protection_order(close_side, position_side, dual_side, qty, order_type, trigger_price):
     if _safe_float(trigger_price, 0.0) <= 0:
-        return
+        raise ValueError(f"{order_type} 缺少有效觸發價")
 
     trigger_px = round(_safe_float(trigger_price, 0.0), 2)
     order_type = str(order_type or "").upper()
@@ -3814,8 +3814,7 @@ def _submit_binance_protection_order(close_side, position_side, dual_side, qty, 
         primary_params["closePosition"] = "true"
         primary_params["clientAlgoId"] = f"{client_order_base}_cp"
         try:
-            _binance_futures_signed_request("POST", "/fapi/v1/algoOrder", primary_params)
-            return
+            return _binance_futures_signed_request("POST", "/fapi/v1/algoOrder", primary_params)
         except Exception as e:
             primary_error = e
 
@@ -3829,11 +3828,138 @@ def _submit_binance_protection_order(close_side, position_side, dual_side, qty, 
         fallback_params["reduceOnly"] = "true"
 
     try:
-        _binance_futures_signed_request("POST", "/fapi/v1/algoOrder", fallback_params)
+        return _binance_futures_signed_request("POST", "/fapi/v1/algoOrder", fallback_params)
     except Exception as e:
         if primary_error is not None:
             raise RuntimeError(f"{e}; 原始錯誤: {primary_error}")
         raise
+
+
+def _list_binance_protection_orders():
+    orders = []
+    standard_orders = _binance_futures_signed_get(
+        "/fapi/v1/openOrders",
+        {"symbol": COPY_TRADE_SYMBOL},
+    )
+    if isinstance(standard_orders, list):
+        orders.extend(standard_orders)
+
+    algo_orders = _binance_futures_open_algo_orders(
+        symbol=COPY_TRADE_SYMBOL,
+        algo_type="CONDITIONAL",
+    )
+    if isinstance(algo_orders, list):
+        orders.extend(algo_orders)
+    return orders
+
+
+def _matching_binance_protection_types(orders, close_side, position_side, dual_side):
+    matched = set()
+    for order in orders if isinstance(orders, list) else []:
+        if not _is_binance_protection_order(order, close_side):
+            continue
+        order_position_side = str(order.get("positionSide") or "").upper()
+        if dual_side and order_position_side and order_position_side != position_side:
+            continue
+        order_type = _binance_order_type(order)
+        if order_type.startswith("TAKE_PROFIT"):
+            matched.add("TP")
+        elif order_type.startswith("STOP"):
+            matched.add("SL")
+    return matched
+
+
+def _install_and_verify_binance_protection(
+    close_side,
+    position_side,
+    dual_side,
+    qty,
+    tp,
+    sl,
+    attempts=2,
+):
+    required = {
+        "TP": ("TAKE_PROFIT_MARKET", _safe_float(tp, 0.0)),
+        "SL": ("STOP_MARKET", _safe_float(sl, 0.0)),
+    }
+    invalid = [label for label, (_, trigger) in required.items() if trigger <= 0]
+    if invalid:
+        return False, f"缺少有效 {'/'.join(invalid)} 觸發價"
+
+    errors = {}
+    attempt_count = max(1, _safe_int(attempts, 2))
+    for attempt in range(attempt_count):
+        try:
+            existing = _matching_binance_protection_types(
+                _list_binance_protection_orders(),
+                close_side,
+                position_side,
+                dual_side,
+            )
+        except Exception as exc:
+            existing = set()
+            errors["VERIFY"] = str(exc)
+
+        missing = [label for label in required if label not in existing]
+        if not missing:
+            return True, "TP/SL 均已由 Binance 確認"
+
+        for label in missing:
+            order_type, trigger = required[label]
+            try:
+                _submit_binance_protection_order(
+                    close_side,
+                    position_side,
+                    dual_side,
+                    qty,
+                    order_type,
+                    trigger,
+                )
+                errors.pop(label, None)
+            except Exception as exc:
+                errors[label] = str(exc)
+
+        if attempt + 1 < attempt_count:
+            time.sleep(0.25)
+
+    try:
+        confirmed = _matching_binance_protection_types(
+            _list_binance_protection_orders(),
+            close_side,
+            position_side,
+            dual_side,
+        )
+    except Exception as exc:
+        confirmed = set()
+        errors["VERIFY"] = str(exc)
+
+    missing = [label for label in required if label not in confirmed]
+    if not missing:
+        return True, "TP/SL 均已由 Binance 確認"
+
+    details = "; ".join(f"{label}: {errors[label]}" for label in missing if label in errors)
+    return False, f"Binance 未確認 {'/'.join(missing)} 保護單" + (f"（{details}）" if details else "")
+
+
+def _emergency_close_unprotected_position(direction, position_side, dual_side, qty):
+    close_side = "SELL" if direction == "long" else "BUY"
+    params = {
+        "symbol": COPY_TRADE_SYMBOL,
+        "side": close_side,
+        "type": "MARKET",
+        "quantity": round(max(_safe_float(qty, 0.0), COPY_TRADE_MIN_QTY), 3),
+    }
+    if dual_side:
+        params["positionSide"] = position_side
+    else:
+        params["reduceOnly"] = "true"
+
+    try:
+        _binance_futures_signed_request("POST", "/fapi/v1/order", params)
+        _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
+        return True, "已立即市價平倉，未留下無保護實單"
+    except Exception as exc:
+        return False, f"緊急平倉失敗: {exc}"
 
 
 def update_copy_trade_tp_sl(tp=None, sl=None):
@@ -3864,12 +3990,17 @@ def update_copy_trade_tp_sl(tp=None, sl=None):
     qty = max(abs(position_amt), 0.001)
     _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
 
-    if _safe_float(tp, 0.0) > 0:
-        _submit_binance_protection_order(close_side, position_side, dual_side, qty, "TAKE_PROFIT_MARKET", tp)
-    if _safe_float(sl, 0.0) > 0:
-        _submit_binance_protection_order(close_side, position_side, dual_side, qty, "STOP_MARKET", sl)
-
-    return True, "✅ Binance TP/SL 已同步更新"
+    protected, protection_msg = _install_and_verify_binance_protection(
+        close_side,
+        position_side,
+        dual_side,
+        qty,
+        tp,
+        sl,
+    )
+    if not protected:
+        return False, f"⚠️ Binance TP/SL 更新未完成: {protection_msg}"
+    return True, "✅ Binance TP/SL 已同步更新並確認"
 
 
 def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
@@ -3881,6 +4012,19 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
 
     if not _is_real_copy_enabled():
         return False, "⚠️ 已開啟跟單，但未啟用實單（請設定 BINANCE_REAL_COPY_ENABLED=1）"
+
+    if not _has_valid_tp_sl(
+        {
+            "direction": direction,
+            "entry": _safe_float(
+                active_trade.get("avg_entry", active_trade.get("entry")),
+                _safe_float(WS_PRICE, 0.0),
+            ),
+            "tp": tp,
+            "sl": sl,
+        }
+    ):
+        return False, "❌ Binance 自動開單已阻止：缺少有效 TP/SL"
 
     # 【防呆】已有持倉禁止重複開倉
     if active_trade.get("open"):
@@ -3969,28 +4113,32 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
     except Exception:
         pass
 
-    close_side = "SELL" if direction == "long" else "BUY"
-    cond_errors = []
-
-    try:
-        if direction == "long":
-            if _safe_float(tp, 0.0) > 0:
-                _submit_binance_protection_order(close_side, position_side, dual_side, qty, "TAKE_PROFIT_MARKET", tp)
-            if _safe_float(sl, 0.0) > 0:
-                _submit_binance_protection_order(close_side, position_side, dual_side, qty, "STOP_MARKET", sl)
-        else:
-            if _safe_float(tp, 0.0) > 0:
-                _submit_binance_protection_order(close_side, position_side, dual_side, qty, "TAKE_PROFIT_MARKET", tp)
-            if _safe_float(sl, 0.0) > 0:
-                _submit_binance_protection_order(close_side, position_side, dual_side, qty, "STOP_MARKET", sl)
-    except Exception as e:
-        cond_errors.append(str(e))
-
     order_id = order_resp.get("orderId") if isinstance(order_resp, dict) else None
     executed_qty = _safe_float(order_resp.get("executedQty"), 0.0) if isinstance(order_resp, dict) else 0.0
     orig_qty = _safe_float(order_resp.get("origQty"), qty) if isinstance(order_resp, dict) else qty
     display_qty = executed_qty if executed_qty > 0 else (orig_qty if orig_qty > 0 else qty)
     active_trade["position_qty"] = max(0.0, display_qty)
+
+    close_side = "SELL" if direction == "long" else "BUY"
+    protected, protection_msg = _install_and_verify_binance_protection(
+        close_side,
+        position_side,
+        dual_side,
+        display_qty,
+        tp,
+        sl,
+    )
+    if not protected:
+        closed, close_msg = _emergency_close_unprotected_position(
+            direction,
+            position_side,
+            dual_side,
+            display_qty,
+        )
+        if closed:
+            return False, f"❌ Binance 保護單建立失敗：{protection_msg}；{close_msg}"
+        protection_msg = f"🚨 Binance 實單目前缺少完整 TP/SL：{protection_msg}；{close_msg}"
+
     msg = (
         f"✅ Binance 已自動開單 | 方向: {direction} | 數量: {display_qty:.3f} ETH | 槓桿: {leverage}x"
         f" | orderId: {order_id}"
@@ -3999,8 +4147,7 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
         msg += f"\nℹ️ 槓桿請求 {desired_leverage}x，交易所實際 {leverage}x"
     if leverage_set_error:
         msg += f"\n⚠️ 設定槓桿失敗，沿用交易所槓桿：{leverage_set_error}"
-    if cond_errors:
-        msg += f"\n⚠️ TP/SL 掛單失敗: {cond_errors[-1]}"
+    msg += f"\n🛡️ {protection_msg}"
     return True, msg
 
 
@@ -4209,7 +4356,13 @@ def sync_active_trade_from_binance(send_notice=False):
         size_ratio = actual_qty / base_qty
     if capital_usage_ratio <= 0:
         capital_usage_ratio = min(1.0, size_ratio)
-    tp, sl = _extract_tp_sl_from_binance_orders(orders, direction, position_side, entry_price)
+    exchange_tp, exchange_sl = _extract_tp_sl_from_binance_orders(
+        orders,
+        direction,
+        position_side,
+        entry_price,
+    )
+    tp, sl = exchange_tp, exchange_sl
 
     def _is_valid_tp_level(value):
         level = _safe_float(value, 0.0)
@@ -4251,6 +4404,44 @@ def sync_active_trade_from_binance(send_notice=False):
             if _is_valid_sl_level(candidate):
                 sl = _safe_float(candidate, 0.0)
                 break
+
+    # Repair exchange-side protection if an order was removed externally or a
+    # previous submission was only partially accepted. Local levels are used
+    # only as the desired values; Binance open orders remain the confirmation.
+    protection_missing = not _is_valid_tp_level(exchange_tp) or not _is_valid_sl_level(exchange_sl)
+    repair_due = (
+        time.time()
+        - _safe_float(
+            getattr(sync_active_trade_from_binance, "last_protection_repair_ts", 0.0),
+            0.0,
+        )
+        >= 60
+    )
+    if (
+        protection_missing
+        and _is_valid_tp_level(tp)
+        and _is_valid_sl_level(sl)
+        and repair_due
+    ):
+        sync_active_trade_from_binance.last_protection_repair_ts = time.time()
+        protected, protection_msg = _install_and_verify_binance_protection(
+            close_side="SELL" if direction == "long" else "BUY",
+            position_side=position_side,
+            dual_side=_is_binance_dual_side_mode(),
+            qty=actual_qty,
+            tp=tp,
+            sl=sl,
+        )
+        if protected:
+            print("🛡️ 已補回並確認 Binance TP/SL 保護單")
+        elif time.time() - _safe_float(
+            getattr(sync_active_trade_from_binance, "last_protection_alert_ts", 0.0),
+            0.0,
+        ) >= 300:
+            warning = f"🚨 Binance 實單缺少完整 TP/SL，補掛未成功：{protection_msg}"
+            print(warning)
+            _send_trade_notification(warning, priority=True)
+            sync_active_trade_from_binance.last_protection_alert_ts = time.time()
 
     max_size, min_size = _resolve_scaling_bounds(
         size_ratio,
