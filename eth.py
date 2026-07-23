@@ -7667,9 +7667,9 @@ def _evaluate_pending_entry_confirmation(
         return False, "價格資料不足"
 
     max_age = max(60.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_AGE_SEC", 420), 420))
-    min_wait = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 15), 15))
-    max_chase = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_CHASE_RATE", 0.003), 0.003))
-    max_reversal = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_REVERSAL_RATE", 0.0035), 0.0035))
+    min_wait = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 10), 10))
+    max_chase = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_CHASE_RATE", 0.004), 0.004))
+    max_reversal = max(0.0, _safe_float(os.getenv("TRADE_ENTRY_CONFIRM_MAX_REVERSAL_RATE", 0.0045), 0.0045))
     require_new_candle = str(os.getenv("TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M", "0") or "0").strip().lower() in {
         "1",
         "true",
@@ -8459,7 +8459,7 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
         )
 
     if str(status or "waiting") == "pending_confirmation":
-        wait_sec = max(0, _safe_int(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 15), 15))
+        wait_sec = max(0, _safe_int(os.getenv("TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC", 10), 10))
         add_condition(
             "entry_confirmation",
             "進場確認",
@@ -14503,7 +14503,7 @@ def run_bot():
     print(
         "✅ 進場延遲確認: "
         f"{'啟用' if entry_confirm_enabled else '停用'} | "
-        f"wait={os.getenv('TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC', '15')}s | "
+        f"wait={os.getenv('TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC', '10')}s | "
         f"new_5m={os.getenv('TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M', '0')}"
     )
     print(

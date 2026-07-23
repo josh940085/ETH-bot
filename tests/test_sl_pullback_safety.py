@@ -107,6 +107,34 @@ class StopLossAndPullbackSafetyTests(unittest.TestCase):
             self.assertTrue(confirmed)
             self.assertIn("延遲確認通過", reason)
 
+    def test_ordinary_signal_accepts_shorter_confirmation_and_moderate_move(self):
+        pending = {
+            "direction": "long",
+            "price": 2000.0,
+            "score": 0.70,
+            "ts": 1000.0,
+            "candle_id": 1,
+        }
+        env = {
+            "TRADE_ENTRY_CONFIRM_MIN_WAIT_SEC": "10",
+            "TRADE_ENTRY_CONFIRM_MAX_CHASE_RATE": "0.004",
+            "TRADE_ENTRY_CONFIRM_MAX_REVERSAL_RATE": "0.0045",
+            "TRADE_ENTRY_CONFIRM_REQUIRE_NEW_5M": "0",
+        }
+
+        with patch.dict(eth.os.environ, env, clear=False):
+            confirmed, reason = eth._evaluate_pending_entry_confirmation(
+                pending,
+                "long",
+                2007.0,
+                0.70,
+                1,
+                1010.0,
+            )
+
+        self.assertTrue(confirmed)
+        self.assertIn("延遲確認通過 10s", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
