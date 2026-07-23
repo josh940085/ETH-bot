@@ -1,0 +1,128 @@
+{
+  "id": "ethBotNotifications",
+  "name": "ETH-bot Notifications",
+  "active": true,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "eth-bot-notifications",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "7c0ff085-6a75-4bed-b50d-04d4980f0ca8",
+      "name": "ETH-bot Notification Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [260, 300],
+      "webhookId": "e7482a62-d4cc-47c0-95c3-209403b59f70"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.body.source }}",
+                    "rightValue": "eth-bot",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.body.secret }}",
+                    "rightValue": "={{ $env.ETH_BOT_N8N_WEBHOOK_SECRET }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  },
+                  {
+                    "leftValue": "={{ $json.body.destination }}",
+                    "rightValue": "/^(telegram|discord_news|discord_trade)$/",
+                    "operator": {
+                      "type": "string",
+                      "operation": "regex"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "verified"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      },
+      "id": "91782783-134f-4d9c-a5ac-2a2521271180",
+      "name": "Verify Local ETH-bot Event",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [500, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.body.destination === 'telegram' ? 'https://api.telegram.org/bot' + $env.TELEGRAM_TOKEN + '/sendMessage' : ($json.body.destination === 'discord_news' ? $env.DISCORD_NEWS + ($json.body.wait_for_response ? '?wait=true' : '') : ($json.body.destination === 'discord_trade' ? $env.DISCORD_WEBHOOK + ($json.body.wait_for_response ? '?wait=true' : '') : 'http://127.0.0.1:9/invalid-destination')) }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.body.payload }}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "d155101c-4bc5-45d4-a3da-fd3cc69b092d",
+      "name": "Deliver Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [760, 300]
+    }
+  ],
+  "connections": {
+    "ETH-bot Notification Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Local ETH-bot Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Local ETH-bot Event": {
+      "main": [
+        [
+          {
+            "node": "Deliver Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "1bd1b7f7-e0c5-49ac-824a-112d528e42ca",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

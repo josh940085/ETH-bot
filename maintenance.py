@@ -32,6 +32,7 @@ CHECK_NAME_ZH = {
     "dependency_constraints": "套件依賴",
     "runtime_memory": "記憶體使用與優化",
     "panel_tunnel_health": "面板連線與隧道",
+    "n8n_health": "n8n 通知自動化",
     "runtime_storage": "執行資料儲存空間",
     "runtime_json": "執行狀態 JSON",
     "entry_confirm_runtime": "進場確認執行狀態",
@@ -59,6 +60,8 @@ TEXT_SCAN_FILES = (
     "requirements-realtime.txt",
 )
 PANEL_PUBLIC_URL_PATH = data_path("panel_realtime_public_url.txt")
+N8N_BINARY_PATH = REPO_DIR / ".runtime" / "n8n-package" / "node_modules" / ".bin" / "n8n"
+N8N_WORKFLOW_PATH = REPO_DIR / "n8n" / "workflows" / "eth-bot-notifications.json"
 RUNTIME_CLEANUP_MIN_BYTES = max(
     10 * 1024 * 1024,
     int(float(os.getenv("MAINTENANCE_RUNTIME_CLEANUP_MIN_MB", "100") or "100") * 1024 * 1024),
@@ -1232,6 +1235,45 @@ def _check_trade_decision_initialization():
     }
 
 
+def _check_n8n_health():
+    if not N8N_BINARY_PATH.exists():
+        raise RuntimeError("n8n 執行套件不存在")
+    if not N8N_WORKFLOW_PATH.exists():
+        raise RuntimeError("ETH-bot n8n 通知工作流程不存在")
+
+    supervisor = _run_command(
+        [
+            str(REPO_DIR / ".venv" / "bin" / "supervisorctl"),
+            "-c",
+            str(REPO_DIR / "supervisord.conf"),
+            "status",
+            "n8n",
+        ],
+        timeout=15,
+    )
+    status_text = str(supervisor.stdout or "").strip()
+    if supervisor.returncode != 0 or "RUNNING" not in status_text:
+        raise RuntimeError(status_text or "n8n Supervisor 狀態異常")
+
+    response = requests.get("http://127.0.0.1:5678/healthz", timeout=5)
+    if response.status_code != 200:
+        raise RuntimeError(f"n8n healthz HTTP {response.status_code}")
+    try:
+        healthy = response.json().get("status") == "ok"
+    except Exception:
+        healthy = False
+    if not healthy:
+        raise RuntimeError("n8n healthz 回應內容異常")
+
+    return {
+        "status": "ok",
+        "detail": "Supervisor=RUNNING; localhost healthz=200; workflow present",
+        "supervisor": status_text,
+        "healthz": 200,
+        "workflow": N8N_WORKFLOW_PATH.name,
+    }
+
+
 def _check_trade_open_status():
     load_local_env(overwrite=True, names=(".env",))
     truthy = {"1", "true", "yes", "on"}
@@ -1614,6 +1656,7 @@ def main():
         ("dependency_constraints", _check_dependency_constraints),
         ("runtime_memory", _check_runtime_memory_and_optimize),
         ("panel_tunnel_health", _check_cloudflared_and_panel_tunnel),
+        ("n8n_health", _check_n8n_health),
         ("runtime_json", _check_runtime_json_and_repair),
         ("entry_confirm_runtime", _check_entry_confirm_runtime_liveness),
         ("entry_confirm_candle_id", _check_entry_confirm_candle_id_and_repair),

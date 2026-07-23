@@ -6,6 +6,7 @@ from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 import numpy as np
 import requests
+from n8n_client import post_n8n_notification
 from sklearn.ensemble import VotingClassifier
 from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -1927,13 +1928,25 @@ def _post_discord_webhook(webhook_url: str, content: str, timeout: int = 5):
         return
 
     payload = {"content": str(content or "")}
-    if DISCORD_AUTO_DELETE_SEC <= 0:
-        HTTP_SESSION.post(url, json=payload, timeout=timeout)
-        return
+    destination = "discord_news" if url == str(DISCORD_NEWS or "").strip() else "discord_trade"
+    res = post_n8n_notification(
+        destination,
+        payload,
+        wait_for_response=DISCORD_AUTO_DELETE_SEC > 0,
+        timeout=timeout,
+        session=HTTP_SESSION,
+    )
 
-    # 需要 wait=true 才能拿到 message id，供後續刪除
-    res = HTTP_SESSION.post(url, json=payload, params={"wait": "true"}, timeout=timeout)
-    res.raise_for_status()
+    if res is None:
+        if DISCORD_AUTO_DELETE_SEC <= 0:
+            HTTP_SESSION.post(url, json=payload, timeout=timeout)
+            return
+
+        # 需要 wait=true 才能拿到 message id，供後續刪除
+        res = HTTP_SESSION.post(url, json=payload, params={"wait": "true"}, timeout=timeout)
+        res.raise_for_status()
+    elif DISCORD_AUTO_DELETE_SEC <= 0:
+        return
 
     message_id = ""
     try:

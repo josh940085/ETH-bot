@@ -45,6 +45,7 @@ from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from local_chat import extract_chat_text as _extract_chat_text
+from n8n_client import post_n8n_notification
 from runtime_config import (
     env_float as _safe_float_env,
     env_int as _safe_int_env,
@@ -4354,6 +4355,15 @@ def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
     }
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
+
+    n8n_response = post_n8n_notification(
+        "telegram",
+        payload,
+        timeout=timeout,
+        session=HTTP_SESSION,
+    )
+    if n8n_response is not None:
+        return n8n_response
 
     try:
         return HTTP_SESSION.post(
