@@ -57,12 +57,13 @@ def _ensure_webhook_secret() -> str:
 
 
 def build_n8n_environment():
+    webhook_secret = _ensure_webhook_secret()
     env = {
         "HOME": os.environ.get("HOME", str(REPO_DIR)),
         "PATH": f"{NODE_BIN_DIR}:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         "N8N_USER_FOLDER": str(N8N_HOME),
         "N8N_ENCRYPTION_KEY": _ensure_encryption_key(),
-        "ETH_BOT_N8N_WEBHOOK_SECRET": _ensure_webhook_secret(),
+        "ETH_BOT_N8N_WEBHOOK_SECRET": webhook_secret,
         "N8N_HOST": "127.0.0.1",
         "N8N_LISTEN_ADDRESS": "127.0.0.1",
         "N8N_PORT": "5678",
@@ -78,6 +79,8 @@ def build_n8n_environment():
         "N8N_BLOCK_ENV_ACCESS_IN_NODE": "false",
         "N8N_SECURE_COOKIE": "false",
         "N8N_PYTHON_ENABLED": "false",
+        "N8N_RUNNERS_MODE": "external",
+        "N8N_RUNNERS_AUTH_TOKEN": webhook_secret,
         "N8N_UNVERIFIED_PACKAGES_ENABLED": "false",
         "N8N_COMMUNITY_PACKAGES_ENABLED": "false",
         "N8N_PUBLIC_API_DISABLED": "true",
