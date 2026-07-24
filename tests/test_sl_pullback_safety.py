@@ -73,6 +73,53 @@ class StopLossAndPullbackSafetyTests(unittest.TestCase):
             )
         )
 
+    def test_strong_directional_breakout_can_skip_retest(self):
+        common = {
+            "breakout_confirmed": True,
+            "breakout_quality_score": 6.8,
+            "breakout_quality_required": 3.0,
+        }
+        self.assertFalse(
+            eth._entry_confirmation_requires_pullback(
+                "short",
+                {
+                    **common,
+                    "final": "🚀 做空",
+                    "breakout": -1,
+                    "regime": "bear_trend",
+                    "repeated_support_tests": 7,
+                },
+            )
+        )
+        self.assertFalse(
+            eth._entry_confirmation_requires_pullback(
+                "long",
+                {
+                    **common,
+                    "final": "🚀 做多",
+                    "breakout": 1,
+                    "regime": "bull_trend",
+                    "repeated_resistance_tests": 7,
+                },
+            )
+        )
+
+    def test_ordinary_directional_breakout_still_requires_retest(self):
+        self.assertTrue(
+            eth._entry_confirmation_requires_pullback(
+                "short",
+                {
+                    "final": "🚀 做空",
+                    "breakout": -1,
+                    "breakout_confirmed": True,
+                    "breakout_quality_score": 4.0,
+                    "breakout_quality_required": 3.0,
+                    "regime": "bear_trend",
+                    "repeated_support_tests": 7,
+                },
+            )
+        )
+
     def test_breakout_waits_for_pullback_and_reclaim(self):
         pending = {
             "direction": "long",

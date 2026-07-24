@@ -7633,8 +7633,39 @@ def _entry_confirmation_requires_pullback(direction, decision):
     )
     breakout = _safe_int(payload.get("breakout"), 0)
     regime = str(payload.get("regime") or "")
+    breakout_quality_score = _safe_float(payload.get("breakout_quality_score"), 0.0)
+    breakout_quality_required = max(
+        0.0,
+        _safe_float(payload.get("breakout_quality_required"), 3.0),
+    )
+    strong_quality_margin = max(
+        1.0,
+        min(
+            3.0,
+            _safe_float(os.getenv("TRADE_STRONG_BREAKOUT_SKIP_RETEST_MARGIN", 1.5), 1.5),
+        ),
+    )
+    repeated_structure_tests = (
+        _safe_int(payload.get("repeated_resistance_tests"), 0)
+        if direction == "long"
+        else _safe_int(payload.get("repeated_support_tests"), 0)
+    )
+    strong_directional_breakout = (
+        payload.get("breakout_confirmed") is True
+        and breakout == (1 if direction == "long" else -1)
+        and repeated_structure_tests >= 2
+        and breakout_quality_score >= breakout_quality_required + strong_quality_margin
+        and (
+            direction == "long"
+            and regime in {"bull_trend", "bull_trend_strong"}
+            or direction == "short"
+            and regime in {"bear_trend", "bear_trend_strong"}
+        )
+    )
     if direction == "long" and reclaim.get("applied"):
         return True
+    if strong_directional_breakout:
+        return False
     if direction == "long" and breakout == 1 and regime in {"bull_trend", "bull_trend_strong"}:
         return True
     if direction == "short" and breakout == -1 and regime in {"bear_trend", "bear_trend_strong"}:
