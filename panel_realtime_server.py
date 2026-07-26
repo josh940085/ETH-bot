@@ -325,34 +325,7 @@ def _normalize_market_symbol(symbol: str) -> str:
     return clean if clean else "ETHUSDT"
 
 
-def _fetch_binance_mark_price_sync(symbol: str) -> dict:
-    expected_symbol = _normalize_market_symbol(symbol)
-    last_error = None
-    for base_url in MARKET_PRICE_BINANCE_BASE_URLS:
-        try:
-            mark_response = requests.get(
-                f"{base_url}/fapi/v1/premiumIndex",
-                params={"symbol": expected_symbol},
-                timeout=6,
-            )
-            mark_response.raise_for_status()
-            mark_payload = mark_response.json()
-            ticker_response = requests.get(
-                f"{base_url}/fapi/v1/ticker/price",
-                params={"symbol": expected_symbol},
-                timeout=6,
-            )
-            ticker_response.raise_for_status()
-            ticker_payload = ticker_response.json()
-        except Exception as exc:
-            last_error = exc
-            continue
-        break
-    else:
-        if last_error is not None:
-            raise last_error
-        raise RuntimeError("Binance Futures market data host is not configured")
-
+def _validated_binance_mark_price_snapshot(expected_symbol: str, mark_payload, ticker_payload) -> dict:
     if str(mark_payload.get("symbol") or "").upper() != expected_symbol:
         raise RuntimeError("Binance mark price symbol mismatch")
     if str(ticker_payload.get("symbol") or "").upper() != expected_symbol:
@@ -386,6 +359,40 @@ def _fetch_binance_mark_price_sync(symbol: str) -> dict:
         "exchange_ts": exchange_ts_ms / 1000.0,
         "max_deviation_rate": max_deviation,
     }
+
+
+def _fetch_binance_mark_price_sync(symbol: str) -> dict:
+    expected_symbol = _normalize_market_symbol(symbol)
+    last_error = None
+    for base_url in MARKET_PRICE_BINANCE_BASE_URLS:
+        try:
+            mark_response = requests.get(
+                f"{base_url}/fapi/v1/premiumIndex",
+                params={"symbol": expected_symbol},
+                timeout=6,
+            )
+            mark_response.raise_for_status()
+            mark_payload = mark_response.json()
+            ticker_response = requests.get(
+                f"{base_url}/fapi/v1/ticker/price",
+                params={"symbol": expected_symbol},
+                timeout=6,
+            )
+            ticker_response.raise_for_status()
+            ticker_payload = ticker_response.json()
+            snapshot = _validated_binance_mark_price_snapshot(
+                expected_symbol,
+                mark_payload,
+                ticker_payload,
+            )
+            snapshot["market_data_host"] = base_url
+            return snapshot
+        except Exception as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Binance Futures market data host is not configured")
 
 
 def _usable_cached_market_price(cached, now_ts: float):
@@ -1126,6 +1133,7 @@ async def get_market_price(request: Request):
             "last_price": snapshot["last_price"],
             "exchange_ts": snapshot["exchange_ts"],
             "max_deviation_rate": snapshot["max_deviation_rate"],
+            "market_data_host": snapshot["market_data_host"],
             "ts": int(now_ts),
         }
         async with MARKET_DATA_LOCK:
