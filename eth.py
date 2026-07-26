@@ -5903,6 +5903,9 @@ def sync_position_panel(current_price=None):
             "strategy_regime": str(POSITION_PANEL_STATE.get("strategy_regime") or ""),
             "strategy_reclaim_gate": dict(POSITION_PANEL_STATE.get("strategy_reclaim_gate") or {}),
             "strategy_breakout": dict(POSITION_PANEL_STATE.get("strategy_breakout") or {}),
+            "strategy_host_logic": dict(POSITION_PANEL_STATE.get("strategy_host_logic") or {}),
+            "strategy_macro_alignment": dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {}),
+            "strategy_context": dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
@@ -8569,6 +8572,16 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
         status,
         reason,
     )
+    host_logic = (
+        decision.get("host_opening_logic")
+        if isinstance(decision.get("host_opening_logic"), dict)
+        else {}
+    )
+    macro_alignment = (
+        decision.get("macro_indicator_alignment")
+        if isinstance(decision.get("macro_indicator_alignment"), dict)
+        else {}
+    )
     POSITION_PANEL_STATE.update(
         {
             "strategy_price": round(max(0.0, _safe_float(current_price, 0.0)), 4),
@@ -8584,6 +8597,44 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
             "strategy_ai_short_prob": round(ai_short_prob, 4),
             "strategy_regime": str(decision.get("regime") or POSITION_PANEL_STATE.get("strategy_regime") or ""),
             "strategy_reclaim_gate": dict(decision.get("multitimeframe_bull_reclaim") or {}),
+            "strategy_host_logic": {
+                "direction": str(host_logic.get("direction") or "neutral"),
+                "mode": str(host_logic.get("mode") or "wait"),
+                "confidence": round(_safe_float(host_logic.get("confidence"), 0.0), 4),
+                "edge": round(_safe_float(host_logic.get("edge"), 0.0), 4),
+                "range_pos": round(_safe_float(host_logic.get("range_pos"), 0.5), 4),
+                "reasons": list(host_logic.get("reasons") or [])[:8],
+            },
+            "strategy_macro_alignment": {
+                "score": round(_safe_float(macro_alignment.get("score"), 0.0), 4),
+                "min_score": round(_safe_float(macro_alignment.get("min_score"), 0.0), 4),
+                "aligned": _safe_int(macro_alignment.get("aligned"), 0),
+                "against": _safe_int(macro_alignment.get("against"), 0),
+                "hard_block": bool(macro_alignment.get("hard_block", False)),
+                "reasons": list(macro_alignment.get("reasons") or [])[:8],
+            },
+            "strategy_context": {
+                "htf": _safe_int(decision.get("htf"), 0),
+                "mid_trend": _safe_int(decision.get("mid_trend"), 0),
+                "macro_bias": round(_safe_float(decision.get("macro_bias"), 0.0), 4),
+                "derivatives_pressure": round(
+                    _safe_float(decision.get("derivatives_pressure"), 0.0),
+                    4,
+                ),
+                "event_risk": _safe_int(decision.get("event_risk"), 0),
+                "volume_ratio": round(_safe_float(decision.get("volume_ratio"), 0.0), 4),
+                "buy_pressure": bool(decision.get("buy_pressure", False)),
+                "sell_pressure": bool(decision.get("sell_pressure", False)),
+                "support_hits": _safe_int(decision.get("support_hits"), 0),
+                "resistance_hits": _safe_int(decision.get("resistance_hits"), 0),
+                "repeated_support_tests": _safe_int(decision.get("repeated_support_tests"), 0),
+                "repeated_resistance_tests": _safe_int(decision.get("repeated_resistance_tests"), 0),
+                "net_edge_rate_est": round(
+                    _safe_float(decision.get("net_edge_rate_est"), 0.0),
+                    6,
+                ),
+                "risk_rate": round(_safe_float(decision.get("risk_rate"), 0.0), 6),
+            },
             "strategy_breakout": {
                 "attempt": _safe_int(decision.get("breakout_attempt"), 0),
                 "confirmed": bool(decision.get("breakout_confirmed", False)),

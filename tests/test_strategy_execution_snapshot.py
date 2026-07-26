@@ -429,13 +429,46 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999
-        decision = {"final": "做多", "score": 0.7, "ai_prob": 0.72, "regime": "bull_trend"}
+        decision = {
+            "final": "做多",
+            "score": 0.7,
+            "ai_prob": 0.72,
+            "regime": "bull_trend",
+            "host_opening_logic": {
+                "direction": "long",
+                "mode": "trend_pullback_long",
+                "confidence": 0.71,
+                "edge": 1.4,
+                "range_pos": 0.52,
+                "reasons": ["4H/1H方向偏多"],
+            },
+            "macro_indicator_alignment": {
+                "score": 1.3,
+                "min_score": 1.15,
+                "aligned": 4,
+                "against": 1,
+                "hard_block": False,
+                "reasons": ["大中週期趨勢同向"],
+            },
+            "htf": 1,
+            "mid_trend": 1,
+            "derivatives_pressure": 0.22,
+            "event_risk": 0,
+            "net_edge_rate_est": 0.003,
+            "risk_rate": 0.01,
+        }
 
         eth._update_panel_execution_snapshot(
             decision, 1871.8, "pending_confirmation", reason="等待確認", actual_open=False
         )
         self.assertEqual(eth.POSITION_PANEL_STATE["strategy_signal"], "wait")
         self.assertFalse(eth.POSITION_PANEL_STATE["strategy_actual_open"])
+        self.assertEqual(
+            eth.POSITION_PANEL_STATE["strategy_host_logic"]["mode"],
+            "trend_pullback_long",
+        )
+        self.assertEqual(eth.POSITION_PANEL_STATE["strategy_macro_alignment"]["score"], 1.3)
+        self.assertEqual(eth.POSITION_PANEL_STATE["strategy_context"]["htf"], 1)
 
         eth._update_panel_execution_snapshot(
             decision, 1871.8, "opened", reason="Binance 實際開單成功", actual_open=True
