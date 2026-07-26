@@ -100,6 +100,41 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
 
     @patch("panel_realtime_server.requests.get")
     @patch("panel_realtime_server.time.time", return_value=2000.0)
+    def test_current_price_fails_over_between_official_binance_hosts(self, _time, get):
+        failed_response = Mock()
+        failed_response.raise_for_status.side_effect = RuntimeError("primary unavailable")
+        mark_response = Mock()
+        mark_response.json.return_value = {
+            "symbol": "ETHUSDT", "markPrice": "1874.62", "indexPrice": "1874.50", "time": 1_999_500,
+        }
+        ticker_response = Mock()
+        ticker_response.json.return_value = {"symbol": "ETHUSDT", "price": "1874.70", "time": 1_999_600}
+        get.side_effect = [failed_response, mark_response, ticker_response]
+
+        with patch.object(
+            panel_realtime_server,
+            "MARKET_PRICE_BINANCE_BASE_URLS",
+            ("https://www.binance.com", "https://fapi.binance.com"),
+        ):
+            snapshot = panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
+
+        self.assertEqual(snapshot["price"], 1874.62)
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(
+            get.call_args_list[0].args[0],
+            "https://www.binance.com/fapi/v1/premiumIndex",
+        )
+        self.assertEqual(
+            get.call_args_list[1].args[0],
+            "https://fapi.binance.com/fapi/v1/premiumIndex",
+        )
+        self.assertEqual(
+            get.call_args_list[2].args[0],
+            "https://fapi.binance.com/fapi/v1/ticker/price",
+        )
+
+    @patch("panel_realtime_server.requests.get")
+    @patch("panel_realtime_server.time.time", return_value=2000.0)
     def test_current_price_rejects_stale_payload(self, _time, get):
         mark_response = Mock()
         mark_response.json.return_value = {

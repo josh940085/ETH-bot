@@ -176,6 +176,23 @@ MARKET_PRICE_MAX_DEVIATION_RATE = max(
     0.001,
     min(0.05, _safe_float_env("POSITION_PANEL_MARKET_PRICE_MAX_DEVIATION_RATE", 0.01)),
 )
+_market_price_base_urls = str(
+    os.getenv(
+        "POSITION_PANEL_BINANCE_MARKET_DATA_BASE_URLS",
+        os.getenv(
+            "BINANCE_FUTURES_MARKET_DATA_BASE_URLS",
+            "https://www.binance.com,https://fapi.binance.com",
+        ),
+    )
+    or ""
+)
+MARKET_PRICE_BINANCE_BASE_URLS = tuple(
+    dict.fromkeys(
+        base.strip().rstrip("/")
+        for base in _market_price_base_urls.split(",")
+        if base.strip()
+    )
+)
 PANEL_ERROR_LOG_ENABLED = _safe_bool_env("POSITION_PANEL_ERROR_LOG_ENABLED", True)
 APP_VERSION_RE = re.compile(r'const\s+APP_VERSION\s*=\s*["\']([^"\']*)["\'];')
 
@@ -310,20 +327,31 @@ def _normalize_market_symbol(symbol: str) -> str:
 
 def _fetch_binance_mark_price_sync(symbol: str) -> dict:
     expected_symbol = _normalize_market_symbol(symbol)
-    mark_response = requests.get(
-        "https://fapi.binance.com/fapi/v1/premiumIndex",
-        params={"symbol": expected_symbol},
-        timeout=6,
-    )
-    mark_response.raise_for_status()
-    mark_payload = mark_response.json()
-    ticker_response = requests.get(
-        "https://fapi.binance.com/fapi/v1/ticker/price",
-        params={"symbol": expected_symbol},
-        timeout=6,
-    )
-    ticker_response.raise_for_status()
-    ticker_payload = ticker_response.json()
+    last_error = None
+    for base_url in MARKET_PRICE_BINANCE_BASE_URLS:
+        try:
+            mark_response = requests.get(
+                f"{base_url}/fapi/v1/premiumIndex",
+                params={"symbol": expected_symbol},
+                timeout=6,
+            )
+            mark_response.raise_for_status()
+            mark_payload = mark_response.json()
+            ticker_response = requests.get(
+                f"{base_url}/fapi/v1/ticker/price",
+                params={"symbol": expected_symbol},
+                timeout=6,
+            )
+            ticker_response.raise_for_status()
+            ticker_payload = ticker_response.json()
+        except Exception as exc:
+            last_error = exc
+            continue
+        break
+    else:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Binance Futures market data host is not configured")
 
     if str(mark_payload.get("symbol") or "").upper() != expected_symbol:
         raise RuntimeError("Binance mark price symbol mismatch")
