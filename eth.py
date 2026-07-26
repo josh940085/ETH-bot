@@ -7401,16 +7401,37 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
             0.003,
             min(
                 max_bear_long_risk,
-                _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_LONG_MIN_RISK_RATE", 0.02), 0.02),
+                _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_LONG_MIN_RISK_RATE", 0.003), 0.003),
+            ),
+        )
+        min_bear_long_host_conf = max(
+            0.55,
+            min(
+                0.88,
+                _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_LONG_MIN_HOST_CONF", 0.70), 0.70),
+            ),
+        )
+        min_bear_long_score = max(
+            0.60,
+            min(
+                0.90,
+                _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_LONG_MIN_SCORE", 0.75), 0.75),
+            ),
+        )
+        min_bear_long_edge = max(
+            0.0012,
+            min(
+                0.04,
+                _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_LONG_MIN_EDGE_RATE", 0.003), 0.003),
             ),
         )
         tested_bear_breakout_long = (
             direction == "long"
             and str(host_logic.get("direction") or "neutral") == "long"
             and host_mode == "breakout_after_pressure_tests"
-            and host_conf >= 0.88
-            and score_value >= 0.90
-            and net_edge >= 0.04
+            and host_conf >= min_bear_long_host_conf
+            and score_value >= min_bear_long_score
+            and net_edge >= min_bear_long_edge
             and min_bear_long_risk <= risk_rate <= max_bear_long_risk
             and news_bias >= 0
             and event_risk <= 0

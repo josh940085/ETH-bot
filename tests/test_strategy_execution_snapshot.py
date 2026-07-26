@@ -260,13 +260,13 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
     def test_daily_anchor_allows_quality_long_in_bear_profile(self):
         decision = {
             "market_profile": {"phase": "bear"},
-            "risk_rate": 0.02,
-            "net_edge_rate_est": 0.045,
+            "risk_rate": 0.008,
+            "net_edge_rate_est": 0.004,
             "position_size": 0.08,
             "host_opening_logic": {
                 "direction": "long",
                 "mode": "breakout_after_pressure_tests",
-                "confidence": 0.88,
+                "confidence": 0.72,
                 "range_pos": 0.24,
             },
             "host_logic_applied": True,
@@ -279,7 +279,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         should_wait = eth._daily_anchor_guard_should_wait(
             "↩️ 反彈做多",
-            0.90,
+            0.78,
             decision,
         )
 
@@ -295,12 +295,12 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "net_edge_rate_est": 0.0004,
             "position_size": 0.02,
             "host_opening_logic": {
-                "direction": "neutral",
-                "mode": "wait",
-                "confidence": 0.30,
+                "direction": "long",
+                "mode": "breakout_after_pressure_tests",
+                "confidence": 0.72,
                 "range_pos": 0.50,
             },
-            "host_logic_applied": False,
+            "host_logic_applied": True,
             "htf": -1,
             "mid_trend": -1,
             "event_risk": 0,
@@ -308,7 +308,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         should_wait = eth._daily_anchor_guard_should_wait(
             "🚀 做多",
-            0.57,
+            0.78,
             decision,
         )
 
