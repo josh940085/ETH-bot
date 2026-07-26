@@ -120,7 +120,10 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
             snapshot = panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
 
         self.assertEqual(snapshot["price"], 1874.62)
-        self.assertEqual(snapshot["market_data_host"], "https://fapi.binance.com")
+        self.assertEqual(
+            snapshot["market_data_host"],
+            "https://fapi.binance.com|https://www.binance.com",
+        )
         self.assertEqual(get.call_count, 3)
         self.assertEqual(
             get.call_args_list[0].args[0],
@@ -132,7 +135,7 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
         )
         self.assertEqual(
             get.call_args_list[2].args[0],
-            "https://fapi.binance.com/fapi/v1/ticker/price",
+            "https://www.binance.com/fapi/v1/ticker/price",
         )
 
     @patch("panel_realtime_server.requests.get")
@@ -142,10 +145,6 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
         stale_mark_response.json.return_value = {
             "symbol": "ETHUSDT", "markPrice": "1874.62", "indexPrice": "1874.50", "time": 1_900_000,
         }
-        stale_ticker_response = Mock()
-        stale_ticker_response.json.return_value = {
-            "symbol": "ETHUSDT", "price": "1874.70", "time": 1_900_000,
-        }
         fresh_mark_response = Mock()
         fresh_mark_response.json.return_value = {
             "symbol": "ETHUSDT", "markPrice": "1874.62", "indexPrice": "1874.50", "time": 1_999_500,
@@ -154,12 +153,7 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
         fresh_ticker_response.json.return_value = {
             "symbol": "ETHUSDT", "price": "1874.70", "time": 1_999_600,
         }
-        get.side_effect = [
-            stale_mark_response,
-            stale_ticker_response,
-            fresh_mark_response,
-            fresh_ticker_response,
-        ]
+        get.side_effect = [stale_mark_response, fresh_mark_response, fresh_ticker_response]
 
         with patch.object(
             panel_realtime_server,
@@ -169,11 +163,18 @@ class PanelMarketKlineSourceTests(unittest.TestCase):
             snapshot = panel_realtime_server._fetch_binance_mark_price_sync("ETHUSDT")
 
         self.assertEqual(snapshot["price"], 1874.62)
-        self.assertEqual(snapshot["market_data_host"], "https://fapi.binance.com")
-        self.assertEqual(get.call_count, 4)
+        self.assertEqual(
+            snapshot["market_data_host"],
+            "https://fapi.binance.com|https://www.binance.com",
+        )
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(
+            get.call_args_list[1].args[0],
+            "https://fapi.binance.com/fapi/v1/premiumIndex",
+        )
         self.assertEqual(
             get.call_args_list[2].args[0],
-            "https://fapi.binance.com/fapi/v1/premiumIndex",
+            "https://www.binance.com/fapi/v1/ticker/price",
         )
 
     @patch("panel_realtime_server.requests.get")

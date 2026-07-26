@@ -361,38 +361,72 @@ def _validated_binance_mark_price_snapshot(expected_symbol: str, mark_payload, t
     }
 
 
-def _fetch_binance_mark_price_sync(symbol: str) -> dict:
-    expected_symbol = _normalize_market_symbol(symbol)
+def _fetch_binance_price_payload(expected_symbol: str, path: str, *, payload_kind: str):
     last_error = None
     for base_url in MARKET_PRICE_BINANCE_BASE_URLS:
         try:
-            mark_response = requests.get(
-                f"{base_url}/fapi/v1/premiumIndex",
+            response = requests.get(
+                f"{base_url}/{path.lstrip('/')}",
                 params={"symbol": expected_symbol},
                 timeout=6,
             )
-            mark_response.raise_for_status()
-            mark_payload = mark_response.json()
-            ticker_response = requests.get(
-                f"{base_url}/fapi/v1/ticker/price",
-                params={"symbol": expected_symbol},
-                timeout=6,
+            response.raise_for_status()
+            payload = response.json()
+            if str(payload.get("symbol") or "").upper() != expected_symbol:
+                raise RuntimeError(f"Binance {payload_kind} symbol mismatch")
+
+            if payload_kind == "mark price":
+                price_values = (
+                    float(payload.get("markPrice", 0) or 0),
+                    float(payload.get("indexPrice", 0) or 0),
+                    int(float(payload.get("time", 0) or 0)),
+                )
+            else:
+                price_values = (
+                    float(payload.get("price", 0) or 0),
+                    int(float(payload.get("time", 0) or 0)),
+                )
+            if min(price_values) <= 0:
+                raise RuntimeError(f"Binance {payload_kind} payload is incomplete")
+
+            age_sec = max(
+                0.0,
+                (int(time.time() * 1000) - int(price_values[-1])) / 1000.0,
             )
-            ticker_response.raise_for_status()
-            ticker_payload = ticker_response.json()
-            snapshot = _validated_binance_mark_price_snapshot(
-                expected_symbol,
-                mark_payload,
-                ticker_payload,
-            )
-            snapshot["market_data_host"] = base_url
-            return snapshot
+            if age_sec > MARKET_PRICE_MAX_AGE_SEC:
+                raise RuntimeError(f"Binance {payload_kind} payload is stale")
+            return payload, base_url
         except Exception as exc:
             last_error = exc
 
     if last_error is not None:
         raise last_error
     raise RuntimeError("Binance Futures market data host is not configured")
+
+
+def _fetch_binance_mark_price_sync(symbol: str) -> dict:
+    expected_symbol = _normalize_market_symbol(symbol)
+    mark_payload, mark_host = _fetch_binance_price_payload(
+        expected_symbol,
+        "/fapi/v1/premiumIndex",
+        payload_kind="mark price",
+    )
+    ticker_payload, ticker_host = _fetch_binance_price_payload(
+        expected_symbol,
+        "/fapi/v1/ticker/price",
+        payload_kind="ticker",
+    )
+    snapshot = _validated_binance_mark_price_snapshot(
+        expected_symbol,
+        mark_payload,
+        ticker_payload,
+    )
+    snapshot["mark_price_host"] = mark_host
+    snapshot["ticker_price_host"] = ticker_host
+    snapshot["market_data_host"] = (
+        mark_host if mark_host == ticker_host else f"{mark_host}|{ticker_host}"
+    )
+    return snapshot
 
 
 def _usable_cached_market_price(cached, now_ts: float):
@@ -1134,6 +1168,8 @@ async def get_market_price(request: Request):
             "exchange_ts": snapshot["exchange_ts"],
             "max_deviation_rate": snapshot["max_deviation_rate"],
             "market_data_host": snapshot["market_data_host"],
+            "mark_price_host": snapshot["mark_price_host"],
+            "ticker_price_host": snapshot["ticker_price_host"],
             "ts": int(now_ts),
         }
         async with MARKET_DATA_LOCK:
