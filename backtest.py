@@ -1621,9 +1621,6 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             if daily_anchor_guard and not final.startswith("觀望"):
                 final = "觀望（每日單錨定-等待保底）"
 
-            if (not daily_min_forced) and market_phase == "bear" and "做多" in final:
-                final = "觀望（熊市禁止非每日多單）"
-
             if final.startswith("觀望"):
                 forced = _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price)
                 if forced is not None:

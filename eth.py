@@ -7393,6 +7393,47 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
             and event_risk <= 0
         ):
             return False
+        max_bear_long_risk = max(
+            0.02,
+            _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_LONG_MAX_RISK_RATE", 0.05), 0.05),
+        )
+        min_bear_long_risk = max(
+            0.003,
+            min(
+                max_bear_long_risk,
+                _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_TESTED_LONG_MIN_RISK_RATE", 0.02), 0.02),
+            ),
+        )
+        tested_bear_breakout_long = (
+            direction == "long"
+            and str(host_logic.get("direction") or "neutral") == "long"
+            and host_mode == "breakout_after_pressure_tests"
+            and host_conf >= 0.88
+            and score_value >= 0.90
+            and net_edge >= 0.04
+            and min_bear_long_risk <= risk_rate <= max_bear_long_risk
+            and news_bias >= 0
+            and event_risk <= 0
+        )
+        if tested_bear_breakout_long:
+            counter_trend_max_size = max(
+                0.01,
+                min(
+                    0.03,
+                    _safe_float(os.getenv("TRADE_COUNTER_TREND_MAX_SIZE_RATIO", 0.02), 0.02),
+                ),
+            )
+            decision["position_size"] = min(
+                max(0.0, _safe_float(decision.get("position_size"), 0.0)),
+                counter_trend_max_size,
+            )
+            decision["max_position_size"] = decision["position_size"]
+            decision["daily_anchor_quality_signal"] = True
+            decision["general_entry_relaxation"] = "bear_tested_breakout_long"
+            return False
+        # The phase no longer bans longs outright: a tested breakout can pass.
+        # Other bear-profile entries still wait for the daily anchor because
+        # their structure/edge is insufficient, regardless of direction.
         return True
 
     if market_phase == "range_base" and risk_rate > 0:
@@ -7600,7 +7641,9 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     if high_score and (positive_edge or host_confirms or pressure_break or flow_confirms or profile_confirms):
         return False
 
-    return market_phase != "bull" or (direction == "long" and market_phase in {"bear", "bull_high_vol"})
+    # Market phase may adjust score and sizing, but it must not hard-ban a
+    # direction. Signals without enough edge/structure confirmation still wait.
+    return True
 
 
 def _same_entry_confirm_candle(prev_candle_id, candle_id):
@@ -15524,22 +15567,7 @@ def run_bot():
                 and not _daily_min_trade_due()
                 and not str(final).startswith("觀望")
             ):
-                market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
-                market_phase = str(market_profile.get("phase") or "range_base")
-                final_direction = get_signal_direction(final)
-                bull_reclaim = (
-                    decision.get("multitimeframe_bull_reclaim")
-                    if isinstance(decision.get("multitimeframe_bull_reclaim"), dict)
-                    else {}
-                )
-                if (
-                    market_phase == "bear"
-                    and final_direction == "long"
-                    and not bull_reclaim.get("applied")
-                ):
-                    final = "觀望（熊市禁止非每日多單）"
-                    position_size = 0.0
-                elif _daily_anchor_guard_should_wait(final, score, decision):
+                if _daily_anchor_guard_should_wait(final, score, decision):
                     final = "觀望（每日單錨定-等待保底）"
                     position_size = 0.0
 

@@ -257,6 +257,89 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(decision["max_position_size"], 0.05)
         self.assertTrue(decision["daily_anchor_quality_signal"])
 
+    def test_daily_anchor_allows_quality_long_in_bear_profile(self):
+        decision = {
+            "market_profile": {"phase": "bear"},
+            "risk_rate": 0.02,
+            "net_edge_rate_est": 0.045,
+            "position_size": 0.08,
+            "host_opening_logic": {
+                "direction": "long",
+                "mode": "breakout_after_pressure_tests",
+                "confidence": 0.88,
+                "range_pos": 0.24,
+            },
+            "host_logic_applied": True,
+            "htf": -1,
+            "mid_trend": 1,
+            "buy_pressure": True,
+            "volume_spike": True,
+            "event_risk": 0,
+        }
+
+        should_wait = eth._daily_anchor_guard_should_wait(
+            "↩️ 反彈做多",
+            0.90,
+            decision,
+        )
+
+        self.assertFalse(should_wait)
+        self.assertEqual(decision["position_size"], 0.02)
+        self.assertEqual(decision["max_position_size"], 0.02)
+        self.assertEqual(decision["general_entry_relaxation"], "bear_tested_breakout_long")
+
+    def test_daily_anchor_still_waits_for_weak_bear_profile_long(self):
+        decision = {
+            "market_profile": {"phase": "bear"},
+            "risk_rate": 0.008,
+            "net_edge_rate_est": 0.0004,
+            "position_size": 0.02,
+            "host_opening_logic": {
+                "direction": "neutral",
+                "mode": "wait",
+                "confidence": 0.30,
+                "range_pos": 0.50,
+            },
+            "host_logic_applied": False,
+            "htf": -1,
+            "mid_trend": -1,
+            "event_risk": 0,
+        }
+
+        should_wait = eth._daily_anchor_guard_should_wait(
+            "🚀 做多",
+            0.57,
+            decision,
+        )
+
+        self.assertTrue(should_wait)
+
+    def test_daily_anchor_keeps_event_risk_block_for_bear_breakout_long(self):
+        decision = {
+            "market_profile": {"phase": "bear"},
+            "risk_rate": 0.02,
+            "net_edge_rate_est": 0.045,
+            "position_size": 0.02,
+            "host_opening_logic": {
+                "direction": "long",
+                "mode": "breakout_after_pressure_tests",
+                "confidence": 0.88,
+                "range_pos": 0.72,
+            },
+            "host_logic_applied": True,
+            "event_risk": 1,
+            "news_bias": 0,
+        }
+
+        should_wait = eth._daily_anchor_guard_should_wait(
+            "🚀 做多",
+            0.90,
+            decision,
+        )
+
+        self.assertTrue(should_wait)
+        self.assertNotIn("general_entry_relaxation", decision)
+
     def test_daily_anchor_allows_tested_range_break_with_small_size(self):
         decision = {
             "market_profile": {"phase": "range_base"},
