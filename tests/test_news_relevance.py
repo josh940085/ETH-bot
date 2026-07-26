@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest import mock
 
 os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 
@@ -7,6 +8,77 @@ import news
 
 
 class NewsRelevanceTests(unittest.TestCase):
+    def test_auto_corrects_obvious_semantic_conflicts(self):
+        cases = [
+            (
+                "An Inflation Double Whammy Awaits Wall Street, Making a Stock Market Crash Likelier",
+                1,
+                -1,
+                "semantic_bearish_conflict",
+            ),
+            (
+                "Bitcoin surges as spot ETF inflows hit a record",
+                -1,
+                1,
+                "semantic_bullish_conflict",
+            ),
+        ]
+        for headline, model_bias, expected_bias, expected_reason in cases:
+            with self.subTest(headline=headline):
+                with mock.patch.object(
+                    news,
+                    "predict_news_sentiment_with_confidence",
+                    return_value=(model_bias, 0.91),
+                ):
+                    analysis = news.analyze_news_text(headline, log_result=False)
+                self.assertEqual(analysis["bias"], expected_bias)
+                self.assertTrue(analysis["correction_applied"])
+                self.assertEqual(analysis["correction_reason"], expected_reason)
+                self.assertIn("auto_corrected", analysis["tags"])
+                message = news.build_news_message(
+                    f"[Test] {headline}",
+                    now_time="12:30:00",
+                    analysis=analysis,
+                )
+                self.assertIn("🔧 自動修正:", message)
+
+    def test_auto_corrects_non_directional_headlines_to_neutral(self):
+        headlines = [
+            "Here's what happened in crypto today",
+            "Over 70% of Gen Z investors hold crypto and only 13% of day traders make money",
+        ]
+        for headline in headlines:
+            with self.subTest(headline=headline):
+                with mock.patch.object(
+                    news,
+                    "predict_news_sentiment_with_confidence",
+                    return_value=(1, 0.88),
+                ):
+                    analysis = news.analyze_news_text(headline, log_result=False)
+                self.assertEqual(analysis["bias"], 0)
+                self.assertTrue(analysis["correction_applied"])
+                self.assertLess(analysis["ai_confidence"], 0.55)
+
+    def test_low_accuracy_safe_mode_neutralizes_unsupported_direction(self):
+        with (
+            mock.patch.object(
+                news,
+                "predict_news_sentiment_with_confidence",
+                return_value=(1, 0.82),
+            ),
+            mock.patch.object(
+                news,
+                "get_prediction_accuracy",
+                return_value={"accuracy": 34.47, "total": 850, "correct": 293},
+            ),
+        ):
+            analysis = news.analyze_news_text(
+                "Ethereum market outlook remains uncertain this weekend",
+                log_result=False,
+            )
+        self.assertEqual(analysis["bias"], 0)
+        self.assertEqual(analysis["correction_reason"], "low_accuracy_neutral_fallback")
+
     def test_rejects_recent_non_market_pushes(self):
         headlines = [
             "DOJ sentences two former TD Bank employees to prison",

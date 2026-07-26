@@ -64,7 +64,7 @@ NEWS_LEARNING_BUFFER = data_path("learning_buffer.pkl")
 NEWS_EVAL_PENDING_PATH = data_path("news_eval_pending.pkl")
 NEWS_STATS_CACHE_PATH = data_path("news_stats_cache.json")
 NEWS_PUSH_DEDUPE_PATH = data_path("news_push_dedupe.json")
-NEWS_MODEL_VERSION = 3
+NEWS_MODEL_VERSION = 4
 news_model = news_vectorizer = NEWS_EVAL_PENDING = None
 PREDICTION_ACCURACY_CACHE = {"cache_key": None, "stats": None}
 INCREMENTAL_LEARNING_ENABLED = True
@@ -792,6 +792,14 @@ NEWS_TRAINING_DATA = [
     ("Economic event scheduled", 0),
     ("Geopolitical news", 0),
     ("Policy announcement", 0),
+    # 自動語意修正種子：避免高信心模型把風險警告或摘要標題判成利多
+    ("Inflation makes a stock market crash likelier", -1),
+    ("Risk of a stock market crash increases", -1),
+    ("Persistent inflation raises the risk of higher interest rates", -1),
+    ("Only a small share of day traders make money", 0),
+    ("Survey warns young investors are taking excessive risk", 0),
+    ("Here's what happened in crypto today", 0),
+    ("Daily crypto news roundup", 0),
 ]
 
 def train_news_model():
@@ -950,6 +958,85 @@ def _refine_neutral_bias(text, ai_bias, ai_confidence):
     return final_bias
 
 
+def _semantic_news_bias_correction(text, predicted_bias, ai_confidence):
+    """用高精度標題語意修正明顯衝突，避免模型信心高時放大錯誤。
+
+    回傳 (修正後方向, 修正後信心, 原因, 事件風險, 可作為學習標籤)。
+    只處理能從標題直接判定的情況；其餘交由模型與事後價格驗證。
+    """
+    prepared = _prepare_news_text_for_model(text)
+    bias = _safe_int(predicted_bias, 0)
+    confidence = max(0.0, min(1.0, _safe_float(ai_confidence, 0.0)))
+    if not prepared:
+        return bias, confidence, "", 0, False
+
+    digest_patterns = (
+        r"\b(?:here(?: s| is) what happened|what happened) in crypto today\b",
+        r"\b(?:daily|today(?: s)?) crypto (?:news )?(?:roundup|recap|digest)\b",
+        r"(?:今日|今天)(?:加密貨幣|加密市場|幣圈)(?:新聞)?(?:整理|摘要|回顧)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in digest_patterns):
+        return 0, min(confidence, 0.54), "non_directional_digest", 0, True
+
+    education_patterns = (
+        r"\bonly\s+\d+(?:\.\d+)?%\s+of\s+(?:day\s+)?traders?\s+(?:make money|are profitable)\b",
+        r"\b(?:most|majority of)\s+(?:day\s+)?traders?\s+(?:lose money|are unprofitable)\b",
+        r"\bsurvey\b.*\b(?:investor|trader)s?\b.*\b(?:risk|portfolio|literacy)\b",
+        r"(?:只有|僅有)\s*\d+(?:\.\d+)?%\s*(?:的)?(?:日內)?交易者(?:能夠)?(?:賺錢|獲利)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in education_patterns):
+        return 0, min(confidence, 0.54), "risk_education_neutral", 0, True
+
+    # 先排除否定式，避免「crash less likely」因 crash 關鍵字被判空。
+    bear_negations = (
+        r"\bcrash (?:less likely|risk (?:falls|eases|declines))\b",
+        r"\b(?:avoids?|averts?) (?:a )?(?:crash|collapse)\b",
+        r"(?:崩盤|暴跌)(?:風險)?(?:降低|下降|緩解)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in bear_negations):
+        return bias, confidence, "", 0, False
+
+    bearish_patterns = (
+        r"\b(?:stock|crypto|bitcoin|ethereum|market).{0,45}\bcrash (?:likelier|more likely)\b",
+        r"\b(?:raises?|increases?|heightens?) (?:the )?(?:risk|likelihood) of (?:a )?(?:market )?crash\b",
+        r"\b(?:risk|likelihood) of (?:a )?(?:market )?crash (?:rises?|increases?|grows?)\b",
+        r"\b(?:market|bitcoin|ethereum|stocks?|shares?)\s+(?:crash(?:es|ed)?|plunge(?:s|d)?|collapse(?:s|d)?|tumble(?:s|d)?|sell(?:s)? off)\b",
+        r"\b(?:persistent|hotter|rising|accelerating) inflation\b.*\b(?:rate hike|higher rates?|market risk)\b",
+        r"(?:股市|市場|比特幣|以太坊).{0,18}(?:崩盤機率|崩盤風險)(?:升高|增加|加劇|更大)",
+        r"(?:股市|市場|比特幣|以太坊).{0,12}(?:暴跌|崩盤|重挫|拋售)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in bearish_patterns):
+        corrected = bias if bias < 0 else -1
+        reason = "semantic_bearish_confirmation" if bias < 0 else "semantic_bearish_conflict"
+        return corrected, max(confidence, 0.78), reason, 1, True
+
+    bullish_patterns = (
+        r"\b(?:bitcoin|ethereum|crypto|market|stocks?|shares?)\s+(?:rall(?:y|ies|ied)|surge(?:s|d)?|soar(?:s|ed)?|breaks? out)\b",
+        r"\b(?:record|massive|strong)\s+(?:bitcoin|ethereum|crypto|etf)?\s*inflows?\b",
+        r"\b(?:sec|regulator).{0,30}\bapprov(?:e|es|ed|al)\b.*\b(?:bitcoin|ethereum|crypto|etf)\b",
+        r"(?:比特幣|以太坊|加密市場|股市).{0,12}(?:大漲|飆升|突破|強彈)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in bullish_patterns):
+        corrected = bias if bias > 0 else 1
+        reason = "semantic_bullish_confirmation" if bias > 0 else "semantic_bullish_conflict"
+        return corrected, max(confidence, 0.78), reason, 0, True
+
+    return bias, confidence, "", 0, False
+
+
+def _news_low_accuracy_safe_mode():
+    """歷史驗證不足時，停止放大缺乏明確語意依據的模型方向訊號。"""
+    stats = get_prediction_accuracy()
+    total = max(0, _safe_int(stats.get("total"), 0))
+    accuracy = max(0.0, _safe_float(stats.get("accuracy"), 0.0))
+    min_samples = max(20, _safe_int(os.getenv("NEWS_AUTO_CORRECT_MIN_SAMPLES", 50), 50))
+    min_accuracy = max(
+        0.0,
+        min(100.0, _safe_float(os.getenv("NEWS_AUTO_CORRECT_MIN_ACCURACY", 45.0), 45.0)),
+    )
+    return total >= min_samples and accuracy < min_accuracy
+
+
 # ===== 增量學習系統：記錄預測並持續改進 =====
 def log_prediction_result(
     news_text,
@@ -960,6 +1047,8 @@ def log_prediction_result(
     ai_confidence=None,
     source="News",
     schedule_eval=True,
+    model_bias=None,
+    correction_reason="",
 ):
     """記錄預測結果用於增量學習和精準度評估"""
     try:
@@ -993,6 +1082,8 @@ def log_prediction_result(
             "is_correct": correct,
             "ai_confidence": ai_confidence,
             "source": str(source or "News")[:60],
+            "model_bias": _sanitize_news_label(model_bias),
+            "correction_reason": str(correction_reason or "")[:80],
         }
 
         ensure_parent_dir(NEWS_PERFORMANCE_LOG)
@@ -1132,17 +1223,40 @@ def analyze_news_text(raw_text, log_result=True):
             "score": 0,
             "ai_bias": 0,
             "ai_confidence": 0.33,
+            "confidence": 0.33,
             "tags": ["empty_text"],
             "is_event": False,
             "fusion_method": "empty_text",
+            "correction_applied": False,
+            "correction_reason": "",
         }
 
-    # ===== 直接使用 AI 模型判斷，不再依賴關鍵字規則 =====
+    # ===== 模型 + 即時語意衝突修正 + 低準確率安全降級 =====
     ai_bias, ai_confidence = predict_news_sentiment_with_confidence(text)
     tags = [f"ai_conf:{ai_confidence:.2f}"]
     fusion_note = "ai_only"
     final_bias = _refine_neutral_bias(text, ai_bias, ai_confidence)
     event_risk = 0
+    correction_reason = ""
+    learnable_correction = False
+
+    (
+        final_bias,
+        ai_confidence,
+        correction_reason,
+        semantic_event_risk,
+        learnable_correction,
+    ) = _semantic_news_bias_correction(raw_text, final_bias, ai_confidence)
+    if correction_reason:
+        event_risk = max(event_risk, semantic_event_risk)
+        tags.extend(["auto_corrected", correction_reason])
+        fusion_note = f"auto_correction:{correction_reason}"
+    elif final_bias != 0 and _news_low_accuracy_safe_mode():
+        final_bias = 0
+        ai_confidence = min(ai_confidence, 0.54)
+        correction_reason = "low_accuracy_neutral_fallback"
+        tags.extend(["auto_corrected", correction_reason])
+        fusion_note = f"auto_correction:{correction_reason}"
 
     equity_move_bias, equity_move_confidence = _major_equity_market_move_override(raw_text)
     if equity_move_bias:
@@ -1174,7 +1288,15 @@ def analyze_news_text(raw_text, log_result=True):
         impact = "利空（價格可能下跌）"
 
     if log_result:
-        log_prediction_result(raw_text, final_bias, ai_confidence=ai_confidence)
+        log_prediction_result(
+            raw_text,
+            final_bias,
+            ai_confidence=ai_confidence,
+            model_bias=ai_bias,
+            correction_reason=correction_reason,
+        )
+        if learnable_correction:
+            update_learning_buffer(raw_text, final_bias)
 
     return {
         "sentiment": sentiment,
@@ -1184,9 +1306,12 @@ def analyze_news_text(raw_text, log_result=True):
         "score": final_bias,
         "ai_bias": ai_bias,
         "ai_confidence": ai_confidence,
+        "confidence": ai_confidence,
         "tags": tags,
         "is_event": False,
         "fusion_method": fusion_note,
+        "correction_applied": bool(correction_reason),
+        "correction_reason": correction_reason,
     }
 
 
@@ -1215,6 +1340,21 @@ def build_news_message(news_text, now_time=None, analysis=None):
     impact = analysis["impact"]
     confidence = analysis["ai_confidence"]
     direction_icon = _news_direction_icon(analysis)
+    correction_reason = str(analysis.get("correction_reason", "") or "")
+    correction_labels = {
+        "non_directional_digest": "摘要標題降為中性",
+        "risk_education_neutral": "教育／調查內容降為中性",
+        "semantic_bearish_conflict": "修正為偏空",
+        "semantic_bearish_confirmation": "確認偏空語意",
+        "semantic_bullish_conflict": "修正為偏多",
+        "semantic_bullish_confirmation": "確認偏多語意",
+        "low_accuracy_neutral_fallback": "低準確率保護，降為中性",
+    }
+    correction_line = (
+        f"🔧 自動修正: {correction_labels.get(correction_reason, correction_reason)}\n"
+        if correction_reason
+        else ""
+    )
     
     # ===== 顯示 AI 學習狀態 =====
     accuracy_info = get_prediction_accuracy()
@@ -1228,6 +1368,7 @@ def build_news_message(news_text, now_time=None, analysis=None):
         f"來源: {source}\n"
         f"📊 解讀: {sentiment}\n"
         f"🎯 置信度: {confidence:.1%}\n"
+        f"{correction_line}"
         f"🧠 {accuracy_str}\n"
         f"🔥 影響: {impact}\n"
         f"📝 原文: {raw_text}\n"
@@ -1308,6 +1449,8 @@ def build_panel_news_items(news_list, limit=5):
             "title_zh": str(title_zh or title)[:220],
             "bias": bias,
             "confidence": round(confidence, 4),
+            "auto_corrected": bool(analysis.get("correction_applied", False)),
+            "correction_reason": str(analysis.get("correction_reason", "") or "")[:80],
             "ts": int(time.time()),
         }
         item.update(infer_news_location(title, title_zh, source))
