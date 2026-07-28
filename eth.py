@@ -8529,8 +8529,29 @@ def _binance_ws_strategy_price_payload(symbol="ETHUSDT", reference_price=None, n
     }
 
 
+def _external_kline_strategy_price_payload(symbol="ETHUSDT", reference_price=None, now_ts=None):
+    """Last-resort strategy price from the already loaded external 1m candle."""
+    symbol = str(symbol or "ETHUSDT").upper()
+    now_ts = time.time() if now_ts is None else _safe_float(now_ts, time.time())
+    price = max(0.0, _safe_float(reference_price, 0.0))
+    if price <= 0:
+        raise RuntimeError("外部 1 分鐘行情價格無效")
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "source": "external_kline_fallback",
+        "validated": True,
+        "price": price,
+        "last_price": price,
+        "exchange_ts": now_ts,
+        "max_deviation_rate": 0.0,
+        "fallback": True,
+        "ts": int(now_ts),
+    }
+
+
 def _fetch_strategy_mark_price(symbol="ETHUSDT", reference_price=None):
-    """Prefer cross-checked Mark Price, then continue with fresh Binance trades."""
+    """Use Mark Price, then Binance trades, then the loaded external 1m candle."""
     symbol = str(symbol or "ETHUSDT").upper()
     base = _panel_realtime_internal_base_url().rstrip("/")
     headers = {}
@@ -8577,9 +8598,25 @@ def _fetch_strategy_mark_price(symbol="ETHUSDT", reference_price=None):
             _fetch_strategy_mark_price._last_ws_fallback_log_ts = now_ts
         return fallback
     except Exception as fallback_error:
-        raise RuntimeError(
-            f"策略價格來源皆不可用: mark={primary_error}; websocket={fallback_error}"
-        ) from primary_error
+        try:
+            fallback = _external_kline_strategy_price_payload(
+                symbol,
+                reference_price=reference_price,
+            )
+            now_ts = time.time()
+            last_ts = _safe_float(
+                getattr(_fetch_strategy_mark_price, "_last_kline_fallback_log_ts", 0.0),
+                0.0,
+            )
+            if now_ts - last_ts >= 60:
+                print("🟠 Mark Price/WebSocket 暫時無效，改用本輪外部 1 分鐘行情繼續評估開單")
+                _fetch_strategy_mark_price._last_kline_fallback_log_ts = now_ts
+            return fallback
+        except Exception as external_error:
+            raise RuntimeError(
+                "策略價格來源皆不可用: "
+                f"mark={primary_error}; websocket={fallback_error}; external={external_error}"
+            ) from primary_error
 
 
 def _validated_strategy_mark_price(mark_payload):

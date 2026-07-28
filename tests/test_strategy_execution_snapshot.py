@@ -57,6 +57,22 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["source"], "binance_agg_trade_fallback")
         self.assertTrue(payload["validated"])
 
+    def test_unavailable_panel_and_stale_websocket_use_external_kline(self):
+        with (
+            patch.object(eth.HTTP_SESSION, "get", side_effect=RuntimeError("panel unavailable")),
+            patch.object(eth, "WS_PRICE", 1871.80),
+            patch.object(eth, "WS_PRICE_TS", 1990.0),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            payload = eth._fetch_strategy_mark_price(
+                "ETHUSDT",
+                reference_price=1872.0,
+            )
+
+        self.assertEqual(payload["source"], "external_kline_fallback")
+        self.assertTrue(payload["validated"])
+        self.assertEqual(payload["price"], 1872.0)
+
     def test_stale_binance_websocket_price_is_rejected(self):
         with (
             patch.object(eth, "WS_PRICE", 1871.80),
