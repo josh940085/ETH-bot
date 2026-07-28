@@ -81,6 +81,11 @@ def _parse_args():
     parser.add_argument("--trades-out", help="Optional CSV path for trade log export")
     parser.add_argument("--summary-out", help="Optional JSON path for summary export")
     parser.add_argument("--learn-out", help="Optional CSV path for AI learning sample export")
+    parser.add_argument(
+        "--invert-signals",
+        action="store_true",
+        help="Open short on long signals and long on short signals; live strategy is unchanged.",
+    )
     return parser.parse_args()
 
 
@@ -875,6 +880,31 @@ def _patched_eth_runtime():
         eth.POSITION_PANEL_STATE.update(panel_snapshot)
 
 
+def _invert_entry_signal(direction, signal, entry, decision):
+    """Mirror an entry direction and its TP/SL distances around the entry price."""
+    original_direction = str(direction)
+    inverted_direction = "short" if original_direction == "long" else "long"
+    mirrored = dict(decision)
+    original_tp = float(decision["tp"])
+    original_sl = float(decision["sl"])
+    reward_distance = abs(original_tp - float(entry))
+    risk_distance = abs(float(entry) - original_sl)
+
+    if inverted_direction == "long":
+        mirrored["tp"] = float(entry) + reward_distance
+        mirrored["sl"] = float(entry) - risk_distance
+    else:
+        mirrored["tp"] = float(entry) - reward_distance
+        mirrored["sl"] = float(entry) + risk_distance
+
+    mirrored["original_signal_direction"] = original_direction
+    mirrored["signal_direction_mode"] = "inverted"
+    mirrored["original_tp"] = original_tp
+    mirrored["original_sl"] = original_sl
+    inverted_label = "做多" if inverted_direction == "long" else "做空"
+    return inverted_direction, f"{inverted_label}（反向原訊號：{signal}）", mirrored
+
+
 def _build_open_trade(ts, direction, signal, entry, score, decision):
     size = float(decision["position_size"])
     if size <= 0:
@@ -924,12 +954,18 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
         "open_ts": float(ts.timestamp()),
         "direction": direction,
         "signal": signal,
+        "signal_direction_mode": str(decision.get("signal_direction_mode") or "normal"),
+        "original_signal_direction": str(decision.get("original_signal_direction") or direction),
+        "original_tp": float(decision.get("original_tp", decision["tp"])),
+        "original_sl": float(decision.get("original_sl", decision["sl"])),
         "strategy_version": eth.STRATEGY_VERSION,
         "mlx_factor_tags": list(mlx_factor_tags),
         "entry": float(entry),
         "avg_entry": float(entry),
         "tp": float(decision["tp"]),
         "sl": float(decision["sl"]),
+        "entry_tp": float(decision["tp"]),
+        "entry_sl": float(decision["sl"]),
         "previous_month_adr": dict(decision.get("previous_month_adr") or {}),
         "size": size,
         "score": float(score),
@@ -1288,6 +1324,10 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "closed_at": ts.isoformat(),
         "direction": open_trade["direction"],
         "signal": open_trade["signal"],
+        "signal_direction_mode": str(open_trade.get("signal_direction_mode") or "normal"),
+        "original_signal_direction": str(open_trade.get("original_signal_direction") or open_trade["direction"]),
+        "original_tp": round(float(open_trade.get("original_tp", open_trade["tp"])), 4),
+        "original_sl": round(float(open_trade.get("original_sl", open_trade["sl"])), 4),
         "strategy_version": str(open_trade.get("strategy_version", eth.STRATEGY_VERSION)),
         "mlx_factor_tags": json.dumps(open_trade.get("mlx_factor_tags") or [], ensure_ascii=False),
         "entry": round(float(open_trade["entry"]), 4),
@@ -1295,6 +1335,8 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
         "exit": round(float(exit_price), 4),
         "tp": round(float(open_trade["tp"]), 4),
         "sl": round(float(open_trade["sl"]), 4),
+        "entry_tp": round(float(open_trade.get("entry_tp", open_trade["tp"])), 4),
+        "entry_sl": round(float(open_trade.get("entry_sl", open_trade["sl"])), 4),
         "size": round(remaining_size, 4),
         "score": round(float(open_trade["score"]), 4),
         "regime": str(open_trade.get("regime", "")),
@@ -1368,7 +1410,7 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
     }, learning_sample
 
 
-def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
+def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", invert_signals=False):
     base_5m = fetch_futures_klines(
         symbol=symbol,
         interval="5m",
@@ -1410,7 +1452,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
         model_loaded = eth.model is not None or eth.online_initialized
 
         last_trade_time = 0.0
-        last_trade_signal = None
+        last_trade_direction = None
         last_entry_price = None
         last_signal_value = None
         losing_streak = 0
@@ -1575,7 +1617,11 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
             score = float(decision["score"])
             final = str(decision["final"])
             current_direction = eth.get_signal_direction(final)
-            last_direction_simple = eth.get_signal_direction(last_trade_signal) if last_trade_signal else None
+            candidate_direction = (
+                ("short" if current_direction == "long" else "long")
+                if invert_signals and current_direction in {"long", "short"}
+                else current_direction
+            )
             daily_min_forced = False
             market_profile = decision.get("market_profile") if isinstance(decision.get("market_profile"), dict) else {}
             market_phase = str(market_profile.get("phase") or "range_base")
@@ -1586,7 +1632,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
                 and eth._daily_anchor_guard_should_wait(final, score, decision)
             )
 
-            if current_direction == last_direction_simple:
+            if candidate_direction == last_trade_direction:
                 if last_entry_price is not None:
                     price_change = abs(current_price - last_entry_price) / max(current_price, 1e-9)
                     if price_change < min_price_change:
@@ -1641,9 +1687,11 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
 
             entry = current_price
             direction = "long" if "做多" in final else "short"
+            if invert_signals:
+                direction, final, decision = _invert_entry_signal(direction, final, entry, decision)
             open_trade = _build_open_trade(ts, direction, final, entry, score, decision)
             last_trade_time = ts_sec
-            last_trade_signal = final
+            last_trade_direction = direction
             last_entry_price = entry
             traded_dates.add(_taipei_trade_date(ts))
 
@@ -1665,6 +1713,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto"):
         coverage_start_dt=coverage_start_dt,
     )
     summary["historical_macro_context"] = macro_context.summary()
+    summary["signal_direction_mode"] = "inverted" if invert_signals else "normal"
     return base_5m, trades, summary, learning_samples
 
 
@@ -1677,6 +1726,7 @@ def main():
         end_dt,
         args.warmup_bars,
         data_source=args.data_source,
+        invert_signals=args.invert_signals,
     )
 
     print("Backtest Summary")
@@ -1684,6 +1734,7 @@ def main():
     print(f"Window: {summary['start']} -> {summary['end']}")
     print(f"Data source: {summary.get('data_source', 'futures')}")
     print(f"Strategy version: {summary.get('strategy_version')}")
+    print(f"Signal direction mode: {summary.get('signal_direction_mode', 'normal')}")
     print(f"5m bars: {len(base_5m)}")
     print(f"Model loaded: {summary['model_loaded']}")
     print(f"Trades: {summary['trades']}")
