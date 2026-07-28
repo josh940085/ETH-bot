@@ -3599,6 +3599,56 @@ def _is_binance_insufficient_margin_error(err) -> bool:
     return "-2019" in text or "Margin is insufficient" in text
 
 
+class BinanceAPIRequestError(RuntimeError):
+    def __init__(self, message, *, status_code=0, api_code=None):
+        super().__init__(message)
+        self.status_code = _safe_int(status_code, 0)
+        self.api_code = api_code
+
+
+def _new_binance_client_order_id(tag="order"):
+    seed = f"{time.time_ns()}:{threading.get_ident()}:{tag}"
+    suffix = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:20]
+    return f"{BINANCE_PROTECTION_CLIENT_PREFIX}{str(tag or 'order')[:6]}_{suffix}"[:36]
+
+
+def _binance_response_payload(response, label):
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    status_code = _safe_int(getattr(response, "status_code", 0), 0)
+    api_code = data.get("code") if isinstance(data, dict) else None
+    if not getattr(response, "ok", False) or api_code not in (None, 0):
+        api_message = data.get("msg") if isinstance(data, dict) else ""
+        raise BinanceAPIRequestError(
+            f"{label}: HTTP {status_code} code={api_code} msg={api_message}",
+            status_code=status_code,
+            api_code=api_code,
+        )
+    return data
+
+
+def _is_ambiguous_binance_order_error(error):
+    if isinstance(error, (requests.Timeout, requests.ConnectionError)):
+        return True
+    return _safe_int(getattr(error, "status_code", 0), 0) in {418, 429, 502, 503}
+
+
+def _query_binance_order_by_client_id(symbol, client_order_id):
+    if not symbol or not client_order_id:
+        return None
+    try:
+        payload = _binance_futures_signed_request(
+            "GET",
+            "/fapi/v1/order",
+            {"symbol": symbol, "origClientOrderId": client_order_id},
+        )
+        return payload if isinstance(payload, dict) and payload.get("orderId") is not None else None
+    except Exception:
+        return None
+
+
 def _binance_futures_signed_request(method, path, params=None):
     api_key = str(os.getenv("BINANCE_API_KEY", "")).strip()
     api_secret = str(os.getenv("BINANCE_API_SECRET", "")).strip()
@@ -3606,12 +3656,19 @@ def _binance_futures_signed_request(method, path, params=None):
         raise RuntimeError("未設定 Binance API 金鑰")
 
     query = dict(params or {})
+    method_upper = str(method).upper()
+    is_standard_order = method_upper == "POST" and path == "/fapi/v1/order"
+    is_order_request = method_upper in {"POST", "DELETE"} and path in {
+        "/fapi/v1/order",
+        "/fapi/v1/algoOrder",
+    }
+    if is_standard_order:
+        query.setdefault("newClientOrderId", _new_binance_client_order_id("order"))
     query["timestamp"] = int(time.time() * 1000)
     query["recvWindow"] = 5000
     query_string = urlencode(query)
     signature = hmac.new(api_secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    method_upper = str(method).upper()
     if method_upper == "GET":
         request_func = _binance_request_get
     elif method_upper == "POST":
@@ -3620,19 +3677,26 @@ def _binance_futures_signed_request(method, path, params=None):
         request_func = _binance_request_delete
     else:
         raise ValueError(f"Unsupported method: {method}")
-    res = request_func(
-        f"https://fapi.binance.com{path}",
-        params={**query, "signature": signature},
-        headers={"X-MBX-APIKEY": api_key},
-        timeout=10,
-        prefix="Binance futures signed",
-    )
-    data = res.json()
-    if not res.ok:
-        raise RuntimeError(f"Binance API 錯誤: {data}")
-    if isinstance(data, dict) and data.get("code") not in (None, 0):
-        raise RuntimeError(f"Binance API 錯誤: {data}")
-    return data
+    prefix = "Binance futures order signed" if is_order_request else "Binance futures account signed"
+    try:
+        res = request_func(
+            f"https://fapi.binance.com{path}",
+            params={**query, "signature": signature},
+            headers={"X-MBX-APIKEY": api_key},
+            timeout=10,
+            prefix=prefix,
+        )
+        return _binance_response_payload(res, "Binance API 錯誤")
+    except Exception as error:
+        if is_standard_order and _is_ambiguous_binance_order_error(error):
+            confirmed = _query_binance_order_by_client_id(
+                query.get("symbol"),
+                query.get("newClientOrderId"),
+            )
+            if confirmed is not None:
+                confirmed["reconciled_after_error"] = True
+                return confirmed
+        raise
 
 
 def _binance_futures_signed_get(path, params=None):
@@ -3668,12 +3732,7 @@ def _binance_spot_signed_request(method, path, params=None):
         timeout=10,
         prefix="Binance spot signed",
     )
-    data = res.json()
-    if not res.ok:
-        raise RuntimeError(f"Binance Spot API 錯誤: {data}")
-    if isinstance(data, dict) and data.get("code") not in (None, 0):
-        raise RuntimeError(f"Binance Spot API 錯誤: {data}")
-    return data
+    return _binance_response_payload(res, "Binance Spot API 錯誤")
 
 
 def _binance_spot_signed_get(path, params=None):
@@ -8325,7 +8384,7 @@ KLINE_TTL = {
     "1m": 10
 }
 TRADINGVIEW_FAILURE_COOLDOWN = {}
-BINANCE_RATE_LIMIT_STATE = {"until": 0.0, "status": 0, "reason": ""}
+BINANCE_RATE_LIMIT_STATE = {}
 BINANCE_RATE_LIMIT_LOCK = threading.Lock()
 
 
@@ -8339,14 +8398,24 @@ def _parse_retry_after_seconds(value, default_sec):
         return float(default_sec)
 
 
-def _binance_rate_limit_remaining_sec():
+def _binance_rate_limit_bucket(prefix="Binance"):
+    text = str(prefix or "").lower()
+    if "order signed" in text:
+        return "order"
+    if "signed" in text:
+        return "account"
+    return "market"
+
+
+def _binance_rate_limit_remaining_sec(prefix="Binance"):
+    bucket = _binance_rate_limit_bucket(prefix)
     with BINANCE_RATE_LIMIT_LOCK:
-        until = _safe_float(BINANCE_RATE_LIMIT_STATE.get("until"), 0.0)
+        until = _safe_float((BINANCE_RATE_LIMIT_STATE.get(bucket) or {}).get("until"), 0.0)
         return max(0.0, until - time.time())
 
 
 def _raise_if_binance_rate_limited(prefix="Binance"):
-    remain = _binance_rate_limit_remaining_sec()
+    remain = _binance_rate_limit_remaining_sec(prefix)
     if remain > 0:
         raise RuntimeError(f"{prefix} rate-limit cooldown {remain:.0f}s")
 
@@ -8359,21 +8428,30 @@ def _note_binance_rate_limit_response(response, prefix="Binance"):
     retry_sec = _parse_retry_after_seconds(getattr(response, "headers", {}).get("Retry-After"), default_sec)
     retry_sec = max(float(default_sec), retry_sec) if status == 418 else max(10.0, retry_sec)
     until = time.time() + retry_sec
+    bucket = _binance_rate_limit_bucket(prefix)
     with BINANCE_RATE_LIMIT_LOCK:
-        BINANCE_RATE_LIMIT_STATE.update(
-            {
-                "until": until,
-                "status": status,
-                "reason": str(prefix),
-            }
-        )
-    print(f"⚠️ {prefix} 觸發 {status}，暫停 Binance 請求 {int(retry_sec)} 秒，避免升級封鎖")
+        BINANCE_RATE_LIMIT_STATE[bucket] = {
+            "until": until,
+            "status": status,
+            "reason": str(prefix),
+        }
+    print(
+        f"⚠️ {prefix} 觸發 {status}，僅暫停 {bucket} 類 Binance 請求 "
+        f"{int(retry_sec)} 秒，不連帶封鎖其他交易鏈路"
+    )
 
 
 def _binance_request_get(url, *, params=None, headers=None, timeout=10, prefix="Binance"):
-    _raise_if_binance_rate_limited(prefix)
-    response = HTTP_SESSION.get(url, params=params, headers=headers, timeout=timeout)
-    _note_binance_rate_limit_response(response, prefix=prefix)
+    retries = max(0, min(3, _safe_int(os.getenv("BINANCE_HTTP_GATEWAY_RETRIES", 2), 2)))
+    response = None
+    for attempt in range(retries + 1):
+        _raise_if_binance_rate_limited(prefix)
+        response = HTTP_SESSION.get(url, params=params, headers=headers, timeout=timeout)
+        _note_binance_rate_limit_response(response, prefix=prefix)
+        if _safe_int(getattr(response, "status_code", 0), 0) not in {502, 503}:
+            return response
+        if attempt < retries:
+            time.sleep(min(0.5, 0.1 * (2 ** attempt)))
     return response
 
 
@@ -8409,22 +8487,46 @@ def _mark_tradingview_failure(symbol, interval):
 # WebSocket（tick級）
 # =============================
 def ws_price_stream():
+    retry_sec = 1.0
+
+    def on_open(ws):
+        nonlocal retry_sec
+        retry_sec = 1.0
+
     def on_message(ws, msg):
         global WS_PRICE, WS_PRICE_TS
         data = json.loads(msg)
         WS_PRICE = float(data["p"])
         WS_PRICE_TS = time.time()
 
-    ws = websocket.WebSocketApp(
-        "wss://fstream.binance.com/ws/ethusdt@aggTrade",
-        on_message=on_message
-    )
+    def log_stream_issue(kind, detail=""):
+        now_ts = time.time()
+        last_ts = _safe_float(getattr(ws_price_stream, "_last_issue_log_ts", 0.0), 0.0)
+        if now_ts - last_ts >= 60:
+            suffix = f": {detail}" if detail else ""
+            print(f"⚠️ Binance 成交價 WebSocket {kind}，立即重連{suffix}")
+            ws_price_stream._last_issue_log_ts = now_ts
+
+    def on_close(ws, status_code, message):
+        log_stream_issue("已中斷", f"status={status_code}")
+
+    def on_error(ws, error):
+        log_stream_issue("錯誤", type(error).__name__)
 
     while True:
         try:
-            ws.run_forever()
-        except:
-            time.sleep(2)
+            ws = websocket.WebSocketApp(
+                "wss://fstream.binance.com/ws/ethusdt@aggTrade",
+                on_open=on_open,
+                on_message=on_message,
+                on_close=on_close,
+                on_error=on_error,
+            )
+            ws.run_forever(ping_interval=20, ping_timeout=10)
+        except Exception as error:
+            log_stream_issue("例外", type(error).__name__)
+        time.sleep(retry_sec)
+        retry_sec = min(15.0, retry_sec * 2.0)
 
 
 def ws_liquidation_stream():
