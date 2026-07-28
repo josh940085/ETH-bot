@@ -9802,6 +9802,18 @@ def _score_host_opening_logic(
     }
 
 
+def _historical_support_reclaim_quality_ok(
+    *,
+    direction,
+    breakout_confirmed,
+    support_hits,
+):
+    """Require fresh structural evidence before entering a support-reclaim long."""
+    if str(direction) != "long":
+        return True
+    return bool(breakout_confirmed) or _safe_int(support_hits, 0) >= 2
+
+
 def _count_consecutive_level_tests(df, level, side, *, tolerance=0.0015):
     level = _safe_float(level, 0.0)
     if df is None or level <= 0 or len(df) == 0:
@@ -12423,8 +12435,27 @@ def build_trade_signal_snapshot(
                 and host_mode in {"resistance_rejection", "breakdown_after_support_tests"}
             ):
                 profile_ok = True
+            historical_long_quality_ok = True
+            if (
+                profile_ok
+                and not multitimeframe_bull_reclaim.get("applied")
+                and host_mode == "support_reclaim"
+                and _is_truthy(
+                    os.getenv("TRADE_HISTORICAL_SUPPORT_RECLAIM_QUALITY_GUARD", "1")
+                )
+            ):
+                historical_long_quality_ok = _historical_support_reclaim_quality_ok(
+                    direction=direction_name,
+                    breakout_confirmed=bool(breakout_quality.get("confirmed")),
+                    support_hits=support_hits,
+                )
+                profile_ok = profile_ok and historical_long_quality_ok
             if not profile_ok:
-                final = "觀望（MLX回測輪廓不佳）"
+                final = (
+                    "觀望（MLX歷史結構品質不足）"
+                    if not historical_long_quality_ok
+                    else "觀望（MLX回測輪廓不佳）"
+                )
                 position_size = 0.0
 
     breakout_size_multiplier = 1.0

@@ -328,6 +328,38 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(decision["max_position_size"], 0.05)
         self.assertTrue(decision["daily_anchor_quality_signal"])
 
+    def test_historical_quality_guard_requires_structure_for_support_reclaim(self):
+        self.assertFalse(
+            eth._historical_support_reclaim_quality_ok(
+                direction="long",
+                breakout_confirmed=False,
+                support_hits=1,
+            )
+        )
+        self.assertTrue(
+            eth._historical_support_reclaim_quality_ok(
+                direction="long",
+                breakout_confirmed=False,
+                support_hits=2,
+            )
+        )
+        self.assertTrue(
+            eth._historical_support_reclaim_quality_ok(
+                direction="long",
+                breakout_confirmed=True,
+                support_hits=0,
+            )
+        )
+
+    def test_historical_quality_guard_does_not_change_short_entries(self):
+        self.assertTrue(
+            eth._historical_support_reclaim_quality_ok(
+                direction="short",
+                breakout_confirmed=False,
+                support_hits=0,
+            )
+        )
+
     def test_daily_anchor_allows_quality_long_in_bear_profile(self):
         decision = {
             "market_profile": {"phase": "bear"},
