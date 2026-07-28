@@ -9,6 +9,7 @@ import os
 import re
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from urllib.parse import parse_qsl
 
@@ -361,61 +362,102 @@ def _validated_binance_mark_price_snapshot(expected_symbol: str, mark_payload, t
     }
 
 
+def _request_binance_price_payload(
+    base_url: str,
+    expected_symbol: str,
+    path: str,
+    payload_kind: str,
+):
+    response = requests.get(
+        f"{base_url}/{path.lstrip('/')}",
+        params={"symbol": expected_symbol},
+        timeout=(0.8, 1.2),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if str(payload.get("symbol") or "").upper() != expected_symbol:
+        raise RuntimeError(f"Binance {payload_kind} symbol mismatch")
+
+    if payload_kind == "mark price":
+        price_values = (
+            float(payload.get("markPrice", 0) or 0),
+            float(payload.get("indexPrice", 0) or 0),
+            int(float(payload.get("time", 0) or 0)),
+        )
+    else:
+        price_values = (
+            float(payload.get("price", 0) or 0),
+            int(float(payload.get("time", 0) or 0)),
+        )
+    if min(price_values) <= 0:
+        raise RuntimeError(f"Binance {payload_kind} payload is incomplete")
+
+    age_sec = max(
+        0.0,
+        (int(time.time() * 1000) - int(price_values[-1])) / 1000.0,
+    )
+    if age_sec > MARKET_PRICE_MAX_AGE_SEC:
+        raise RuntimeError(f"Binance {payload_kind} payload is stale")
+    return payload, base_url
+
+
 def _fetch_binance_price_payload(expected_symbol: str, path: str, *, payload_kind: str):
-    last_error = None
-    for base_url in MARKET_PRICE_BINANCE_BASE_URLS:
-        try:
-            response = requests.get(
-                f"{base_url}/{path.lstrip('/')}",
-                params={"symbol": expected_symbol},
-                timeout=6,
+    base_urls = tuple(MARKET_PRICE_BINANCE_BASE_URLS)
+    if not base_urls:
+        raise RuntimeError("Binance Futures market data host is not configured")
+
+    errors = []
+    executor = ThreadPoolExecutor(max_workers=len(base_urls))
+    try:
+        futures = [
+            executor.submit(
+                _request_binance_price_payload,
+                base_url,
+                expected_symbol,
+                path,
+                payload_kind,
             )
-            response.raise_for_status()
-            payload = response.json()
-            if str(payload.get("symbol") or "").upper() != expected_symbol:
-                raise RuntimeError(f"Binance {payload_kind} symbol mismatch")
+            for base_url in base_urls
+        ]
+        for future in as_completed(futures):
+            try:
+                payload = future.result()
+            except Exception as exc:
+                errors.append(exc)
+                continue
+            for pending in futures:
+                if pending is not future:
+                    pending.cancel()
+            return payload
+    finally:
+        # Do not make the successful official host wait for a slow sibling.
+        # Running requests keep their own short timeout and finish in place.
+        executor.shutdown(wait=False, cancel_futures=True)
 
-            if payload_kind == "mark price":
-                price_values = (
-                    float(payload.get("markPrice", 0) or 0),
-                    float(payload.get("indexPrice", 0) or 0),
-                    int(float(payload.get("time", 0) or 0)),
-                )
-            else:
-                price_values = (
-                    float(payload.get("price", 0) or 0),
-                    int(float(payload.get("time", 0) or 0)),
-                )
-            if min(price_values) <= 0:
-                raise RuntimeError(f"Binance {payload_kind} payload is incomplete")
-
-            age_sec = max(
-                0.0,
-                (int(time.time() * 1000) - int(price_values[-1])) / 1000.0,
-            )
-            if age_sec > MARKET_PRICE_MAX_AGE_SEC:
-                raise RuntimeError(f"Binance {payload_kind} payload is stale")
-            return payload, base_url
-        except Exception as exc:
-            last_error = exc
-
-    if last_error is not None:
-        raise last_error
-    raise RuntimeError("Binance Futures market data host is not configured")
+    if errors:
+        raise errors[-1]
+    raise RuntimeError(f"Binance {payload_kind} is unavailable")
 
 
 def _fetch_binance_mark_price_sync(symbol: str) -> dict:
     expected_symbol = _normalize_market_symbol(symbol)
-    mark_payload, mark_host = _fetch_binance_price_payload(
-        expected_symbol,
-        "/fapi/v1/premiumIndex",
-        payload_kind="mark price",
-    )
-    ticker_payload, ticker_host = _fetch_binance_price_payload(
-        expected_symbol,
-        "/fapi/v1/ticker/price",
-        payload_kind="ticker",
-    )
+    # Mark and ticker are independent cross-checks. Fetch them concurrently so
+    # the local strategy's two-second deadline is not consumed by serial waits.
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        mark_future = executor.submit(
+            _fetch_binance_price_payload,
+            expected_symbol,
+            "/fapi/v1/premiumIndex",
+            payload_kind="mark price",
+        )
+        ticker_future = executor.submit(
+            _fetch_binance_price_payload,
+            expected_symbol,
+            "/fapi/v1/ticker/price",
+            payload_kind="ticker",
+        )
+        mark_payload, mark_host = mark_future.result()
+        ticker_payload, ticker_host = ticker_future.result()
     snapshot = _validated_binance_mark_price_snapshot(
         expected_symbol,
         mark_payload,
@@ -461,6 +503,18 @@ def _mark_market_price_failure(cache_key: str, now_ts: float) -> float:
 def _clear_market_price_failures(cache_key: str):
     MARKET_PRICE_FAILURE_UNTIL.pop(cache_key, None)
     MARKET_PRICE_FAILURE_COUNT.pop(cache_key, None)
+
+
+def _market_price_unavailable_payload(symbol: str, now_ts: float, *, retry_after_sec=0.0):
+    return {
+        "ok": False,
+        "symbol": symbol,
+        "source": "binance_mark_price",
+        "validated": False,
+        "status": "temporarily_unavailable",
+        "retry_after_sec": max(0.0, round(float(retry_after_sec), 3)),
+        "ts": int(now_ts),
+    }
 
 
 def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
@@ -1143,7 +1197,13 @@ async def get_market_price(request: Request):
             if fallback is not None:
                 fallback["cached"] = True
                 return JSONResponse(fallback)
-            raise HTTPException(status_code=503, detail="mark price refresh cooling down")
+            return JSONResponse(
+                _market_price_unavailable_payload(
+                    symbol,
+                    now_ts,
+                    retry_after_sec=failure_until - now_ts,
+                )
+            )
 
         try:
             snapshot = await asyncio.to_thread(_fetch_binance_mark_price_sync, symbol)
@@ -1153,7 +1213,7 @@ async def get_market_price(request: Request):
             if fallback is not None:
                 fallback["cached"] = True
                 return JSONResponse(fallback)
-            raise HTTPException(status_code=502, detail=f"mark price unavailable: {exc}") from exc
+            return JSONResponse(_market_price_unavailable_payload(symbol, now_ts))
 
         _clear_market_price_failures(cache_key)
 
