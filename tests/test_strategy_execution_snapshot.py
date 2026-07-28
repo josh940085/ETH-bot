@@ -26,6 +26,61 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "標記價格無效"):
             eth._validated_strategy_mark_price({"price": 0.0})
 
+    def test_fresh_binance_websocket_price_can_replace_unavailable_mark_price(self):
+        with (
+            patch.object(eth, "WS_PRICE", 1871.80),
+            patch.object(eth, "WS_PRICE_TS", 1999.0),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            payload = eth._binance_ws_strategy_price_payload(
+                "ETHUSDT",
+                reference_price=1872.0,
+            )
+
+        self.assertTrue(payload["validated"])
+        self.assertTrue(payload["fallback"])
+        self.assertEqual(payload["source"], "binance_agg_trade_fallback")
+        self.assertEqual(payload["price"], 1871.80)
+
+    def test_unavailable_panel_uses_fresh_binance_websocket_instead_of_blocking(self):
+        with (
+            patch.object(eth.HTTP_SESSION, "get", side_effect=RuntimeError("panel unavailable")),
+            patch.object(eth, "WS_PRICE", 1871.80),
+            patch.object(eth, "WS_PRICE_TS", 1999.0),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            payload = eth._fetch_strategy_mark_price(
+                "ETHUSDT",
+                reference_price=1872.0,
+            )
+
+        self.assertEqual(payload["source"], "binance_agg_trade_fallback")
+        self.assertTrue(payload["validated"])
+
+    def test_stale_binance_websocket_price_is_rejected(self):
+        with (
+            patch.object(eth, "WS_PRICE", 1871.80),
+            patch.object(eth, "WS_PRICE_TS", 1990.0),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "過期"):
+                eth._binance_ws_strategy_price_payload(
+                    "ETHUSDT",
+                    reference_price=1872.0,
+                )
+
+    def test_divergent_binance_websocket_price_is_rejected(self):
+        with (
+            patch.object(eth, "WS_PRICE", 1900.0),
+            patch.object(eth, "WS_PRICE_TS", 1999.0),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "價差過大"):
+                eth._binance_ws_strategy_price_payload(
+                    "ETHUSDT",
+                    reference_price=1872.0,
+                )
+
     def test_multitimeframe_bull_reclaim_allows_sustained_breakout(self):
         result = eth._assess_multitimeframe_bull_reclaim(
             price=1928.52,

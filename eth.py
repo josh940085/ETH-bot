@@ -5891,6 +5891,9 @@ def sync_position_panel(current_price=None):
             ),
             "strategy_price": round(_safe_float(POSITION_PANEL_STATE.get("strategy_price"), 0.0), 4),
             "strategy_price_ts": _safe_int(POSITION_PANEL_STATE.get("strategy_price_ts"), 0),
+            "strategy_price_source": str(
+                POSITION_PANEL_STATE.get("strategy_price_source") or ""
+            ),
             "strategy_evaluated_ts": _safe_int(POSITION_PANEL_STATE.get("strategy_evaluated_ts"), 0),
             "strategy_execution_status": str(POSITION_PANEL_STATE.get("strategy_execution_status") or "waiting"),
             "strategy_execution_reason": str(POSITION_PANEL_STATE.get("strategy_execution_reason") or "等待實際開單策略"),
@@ -8478,34 +8481,105 @@ if LIVE_RUNTIME_ENABLED:
     threading.Thread(target=ws_liquidation_stream, name="binance-liquidation-stream", daemon=True).start()
 
 
-def _fetch_strategy_mark_price(symbol="ETHUSDT"):
-    """Read the already cross-checked Mark Price from the local panel service."""
+def _binance_ws_strategy_price_payload(symbol="ETHUSDT", reference_price=None, now_ts=None):
+    """Build a bounded execution-price fallback from Binance's live trade stream."""
+    symbol = str(symbol or "ETHUSDT").upper()
+    now_ts = time.time() if now_ts is None else _safe_float(now_ts, time.time())
+    price = max(0.0, _safe_float(WS_PRICE, 0.0))
+    exchange_ts = max(0.0, _safe_float(WS_PRICE_TS, 0.0))
+    max_age_sec = max(
+        1.0,
+        _safe_float(os.getenv("STRATEGY_BINANCE_WS_FALLBACK_MAX_AGE_SEC", "5"), 5.0),
+    )
+    age_sec = max(0.0, now_ts - exchange_ts)
+    if price <= 0 or exchange_ts <= 0 or age_sec > max_age_sec:
+        raise RuntimeError("Binance WebSocket 成交價過期或無效")
+
+    reference_price = max(0.0, _safe_float(reference_price, 0.0))
+    if reference_price <= 0:
+        raise RuntimeError("Binance WebSocket 備援缺少外部行情交叉驗證")
+    deviation_rate = abs(price - reference_price) / reference_price
+    max_deviation_rate = max(
+        0.001,
+        min(
+            0.03,
+            _safe_float(
+                os.getenv("STRATEGY_BINANCE_WS_FALLBACK_MAX_DEVIATION_RATE", "0.01"),
+                0.01,
+            ),
+        ),
+    )
+    if deviation_rate > max_deviation_rate:
+        raise RuntimeError(
+            "Binance WebSocket 備援價差過大 "
+            f"deviation={deviation_rate:.4%} max={max_deviation_rate:.4%}"
+        )
+
+    return {
+        "ok": True,
+        "symbol": symbol,
+        "source": "binance_agg_trade_fallback",
+        "validated": True,
+        "price": price,
+        "last_price": price,
+        "exchange_ts": exchange_ts,
+        "max_deviation_rate": deviation_rate,
+        "fallback": True,
+        "ts": int(now_ts),
+    }
+
+
+def _fetch_strategy_mark_price(symbol="ETHUSDT", reference_price=None):
+    """Prefer cross-checked Mark Price, then continue with fresh Binance trades."""
     symbol = str(symbol or "ETHUSDT").upper()
     base = _panel_realtime_internal_base_url().rstrip("/")
     headers = {}
     if POSITION_PANEL_REALTIME_TOKEN:
         headers["X-Panel-Token"] = POSITION_PANEL_REALTIME_TOKEN
-    response = HTTP_SESSION.get(
-        f"{base}/api/market/price",
-        params={"symbol": symbol},
-        headers=headers,
-        timeout=min(2.0, POSITION_PANEL_REALTIME_TIMEOUT_SEC),
-    )
-    response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise RuntimeError("策略標記價格回應格式錯誤")
-    exchange_ts = _safe_float(payload.get("exchange_ts"), 0.0)
-    age_sec = max(0.0, time.time() - exchange_ts)
-    if (
-        payload.get("validated") is not True
-        or str(payload.get("source") or "") != "binance_mark_price"
-        or str(payload.get("symbol") or "").upper() != symbol
-        or _safe_float(payload.get("price"), 0.0) <= 0
-        or age_sec > 10.0
-    ):
-        raise RuntimeError("策略標記價格驗證失敗")
-    return payload
+    primary_error = None
+    try:
+        response = HTTP_SESSION.get(
+            f"{base}/api/market/price",
+            params={"symbol": symbol},
+            headers=headers,
+            timeout=min(2.0, POSITION_PANEL_REALTIME_TIMEOUT_SEC),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("策略標記價格回應格式錯誤")
+        exchange_ts = _safe_float(payload.get("exchange_ts"), 0.0)
+        age_sec = max(0.0, time.time() - exchange_ts)
+        if (
+            payload.get("validated") is not True
+            or str(payload.get("source") or "") != "binance_mark_price"
+            or str(payload.get("symbol") or "").upper() != symbol
+            or _safe_float(payload.get("price"), 0.0) <= 0
+            or age_sec > 10.0
+        ):
+            raise RuntimeError("策略標記價格驗證失敗")
+        return payload
+    except Exception as exc:
+        primary_error = exc
+
+    try:
+        fallback = _binance_ws_strategy_price_payload(
+            symbol,
+            reference_price=reference_price,
+        )
+        now_ts = time.time()
+        last_ts = _safe_float(
+            getattr(_fetch_strategy_mark_price, "_last_ws_fallback_log_ts", 0.0),
+            0.0,
+        )
+        if now_ts - last_ts >= 60:
+            print("🟡 Mark Price 暫時無效，改用新鮮 Binance WebSocket 成交價繼續評估開單")
+            _fetch_strategy_mark_price._last_ws_fallback_log_ts = now_ts
+        return fallback
+    except Exception as fallback_error:
+        raise RuntimeError(
+            f"策略價格來源皆不可用: mark={primary_error}; websocket={fallback_error}"
+        ) from primary_error
 
 
 def _validated_strategy_mark_price(mark_payload):
@@ -8649,7 +8723,10 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
     POSITION_PANEL_STATE.update(
         {
             "strategy_price": round(max(0.0, _safe_float(current_price, 0.0)), 4),
-            "strategy_price_ts": _safe_int(POSITION_PANEL_STATE.get("binance_mark_price_ts"), int(time.time())),
+            "strategy_price_ts": _safe_int(
+                POSITION_PANEL_STATE.get("strategy_price_ts"),
+                int(time.time()),
+            ),
             "strategy_evaluated_ts": int(time.time()),
             "strategy_execution_status": str(status or "waiting"),
             "strategy_execution_reason": str(reason or decision.get("final") or "等待實際開單策略"),
@@ -14808,10 +14885,23 @@ def run_bot():
             # strategy executes from validated Binance Mark Price, while shadow
             # entries and grading use the externally routed 1m candle.
             shadow_price = max(0.0, _safe_float(df_1m["close"].iloc[-1], 0.0))
-            mark_payload = _fetch_strategy_mark_price(COPY_TRADE_SYMBOL)
+            mark_payload = _fetch_strategy_mark_price(
+                COPY_TRADE_SYMBOL,
+                reference_price=shadow_price,
+            )
             price = _validated_strategy_mark_price(mark_payload)
-            POSITION_PANEL_STATE["binance_mark_price"] = price
-            POSITION_PANEL_STATE["binance_mark_price_ts"] = _safe_int(mark_payload.get("exchange_ts"), int(time.time()))
+            strategy_price_source = str(mark_payload.get("source") or "")
+            POSITION_PANEL_STATE["strategy_price_source"] = strategy_price_source
+            POSITION_PANEL_STATE["strategy_price_ts"] = _safe_int(
+                mark_payload.get("exchange_ts"),
+                int(time.time()),
+            )
+            if strategy_price_source == "binance_mark_price":
+                POSITION_PANEL_STATE["binance_mark_price"] = price
+                POSITION_PANEL_STATE["binance_mark_price_ts"] = _safe_int(
+                    mark_payload.get("exchange_ts"),
+                    int(time.time()),
+                )
 
             # Binance is the position source of truth. Synchronize before any
             # shadow/background analysis so manual fills and exchange-side
@@ -16239,7 +16329,11 @@ def run_bot():
                 if now_ts - last_ts >= 300:
                     print("⚠️ TradingView 暫時不可用，已改用快取/等待下一輪:", err_text)
                     run_bot.last_tradingview_error_log_ts = now_ts
-            elif "api/market/price" in err_text or "策略標記價格" in err_text:
+            elif (
+                "api/market/price" in err_text
+                or "策略標記價格" in err_text
+                or "策略價格來源" in err_text
+            ):
                 now_ts = time.time()
                 last_ts = _safe_float(getattr(run_bot, "last_mark_price_error_log_ts", 0.0), 0.0)
                 if now_ts - last_ts >= 60:
