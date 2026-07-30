@@ -8,10 +8,14 @@ import threading
 import time
 from pathlib import Path
 
+from runtime_config import load_local_env
 from runtime_paths import ai_data_path, ensure_parent_dir
 
 
-DB_PATH = ai_data_path("mlx_agent_learning.sqlite3")
+load_local_env(overwrite=False, names=(".env",))
+ACTIVE_SYMBOL = str(os.getenv("TRADE_SYMBOL", "BTCUSDT") or "BTCUSDT").strip().upper()
+ACTIVE_SYMBOL_SLUG = re.sub(r"[^a-z0-9]+", "_", ACTIVE_SYMBOL.lower()).strip("_") or "btcusdt"
+DB_PATH = ai_data_path(f"{ACTIVE_SYMBOL_SLUG}_mlx_agent_learning.sqlite3")
 EVALUATION_HOURS = max(0.25, float(os.getenv("MLX_LEARNING_EVALUATION_HOURS", "1")))
 MIN_MOVE_PCT = max(0.05, float(os.getenv("MLX_LEARNING_MIN_MOVE_PCT", "0.25")))
 EVALUATION_INTERVAL_SEC = max(
@@ -211,11 +215,11 @@ def _historical_source_paths():
     paths = []
     seen = set()
     for path in [
-        ai_dir / "ai_data.csv",
-        ai_dir / "backtest_ai_data.csv",
-        *ai_dir.glob("*learn*.csv"),
-        *ai_dir.glob("*ai_data*.csv"),
-        *data_dir.glob("*trades.csv"),
+        ai_dir / f"{ACTIVE_SYMBOL_SLUG}_ai_data.csv",
+        ai_dir / f"{ACTIVE_SYMBOL_SLUG}_backtest_ai_data.csv",
+        *ai_dir.glob(f"{ACTIVE_SYMBOL_SLUG}_*learn*.csv"),
+        *ai_dir.glob(f"{ACTIVE_SYMBOL_SLUG}_*ai_data*.csv"),
+        *data_dir.glob(f"{ACTIVE_SYMBOL_SLUG}_*trades.csv"),
     ]:
         if not path.exists() or path in seen:
             continue
@@ -231,7 +235,7 @@ def _historical_source_paths():
 
 def import_turning_point_history(force=False):
     global _LAST_TURNING_POINTS_MTIME
-    path = DB_PATH.parent.parent / "data" / "ethusdt_turning_points" / "all_turning_points.csv"
+    path = DB_PATH.parent.parent / "data" / f"{ACTIVE_SYMBOL_SLUG}_turning_points" / "all_turning_points.csv"
     if not path.exists():
         return 0
     try:
@@ -315,7 +319,7 @@ def import_non_turning_contrast_history(force=False):
     path = (
         DB_PATH.parent.parent
         / "data"
-        / "ethusdt_turning_points"
+        / f"{ACTIVE_SYMBOL_SLUG}_turning_points"
         / "non_turning_contrast_examples.csv"
     )
     if not path.exists():
@@ -399,7 +403,7 @@ def import_non_turning_contrast_history(force=False):
 
 
 def _load_backtest_directions():
-    path = DB_PATH.parent.parent / "data" / "backtest_latest_trades.csv"
+    path = DB_PATH.parent.parent / "data" / f"{ACTIVE_SYMBOL_SLUG}_backtest_latest_trades.csv"
     if not path.exists():
         return []
     try:

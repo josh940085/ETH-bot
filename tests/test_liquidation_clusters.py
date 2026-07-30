@@ -86,12 +86,12 @@ class LiquidationClusterTests(unittest.TestCase):
         sell = {
             "e": "forceOrder",
             "E": 1_700_000_000_000,
-            "o": {"s": "ETHUSDT", "S": "SELL", "ap": "2000", "z": "30", "T": 1_700_000_000_000},
+            "o": {"s": "BTCUSDT", "S": "SELL", "ap": "70000", "z": "1", "T": 1_700_000_000_000},
         }
         buy = {
             "e": "forceOrder",
             "E": 1_700_000_001_000,
-            "o": {"s": "ETHUSDT", "S": "BUY", "ap": "2005", "z": "30", "T": 1_700_000_001_000},
+            "o": {"s": "BTCUSDT", "S": "BUY", "ap": "70100", "z": "1", "T": 1_700_000_001_000},
         }
         old_path = eth.LIQUIDATION_EVENTS_PATH
         try:

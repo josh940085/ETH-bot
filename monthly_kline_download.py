@@ -27,7 +27,7 @@ def download_previous_month(now=None, report_path=None):
     started_at = dt.datetime.now(dt.timezone.utc)
     year, month = _previous_utc_month(now)
     month_key = f"{year:04d}-{month:02d}"
-    symbols = [item.upper() for item in _csv_env("MONTHLY_KLINE_SYMBOLS", "ETHUSDT")]
+    symbols = [item.upper() for item in _csv_env("MONTHLY_KLINE_SYMBOLS", "BTCUSDT")]
     intervals = _csv_env("MONTHLY_KLINE_INTERVALS", "5m")
     files = []
     errors = []

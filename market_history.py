@@ -37,7 +37,7 @@ def _iter_days(start_dt, end_dt):
         cursor += dt.timedelta(days=1)
 
 def _binance_history_zip_url(symbol, interval, year, month, day=None):
-    symbol = str(symbol or "ETHUSDT").upper().strip()
+    symbol = str(symbol or "BTCUSDT").upper().strip()
     interval = str(interval)
     if day is not None:
         return (
@@ -50,7 +50,7 @@ def _binance_history_zip_url(symbol, interval, year, month, day=None):
     )
 
 def _binance_history_cache_path(symbol, interval, year, month, day=None):
-    symbol = str(symbol or "ETHUSDT").upper().strip()
+    symbol = str(symbol or "BTCUSDT").upper().strip()
     interval = str(interval)
     folder = "daily" if day is not None else "monthly"
     suffix = f"{year:04d}-{month:02d}-{day:02d}" if day is not None else f"{year:04d}-{month:02d}"

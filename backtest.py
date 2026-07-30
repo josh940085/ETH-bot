@@ -67,7 +67,7 @@ HIGH_IMPACT_NEWS_CATEGORIES = {
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Replay ETH-bot strategy on historical market klines.")
-    parser.add_argument("--symbol", default="ETHUSDT", help="Trading symbol, e.g. ETHUSDT")
+    parser.add_argument("--symbol", default="BTCUSDT", help="Perpetual trading symbol, e.g. BTCUSDT")
     parser.add_argument("--days", type=int, default=30, help="Lookback days when start/end are not provided")
     parser.add_argument("--start", help="UTC start time, e.g. 2026-05-01 or 2026-05-01T00:00:00")
     parser.add_argument("--end", help="UTC end time, e.g. 2026-05-22 or 2026-05-22T00:00:00")

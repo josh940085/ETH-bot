@@ -88,6 +88,10 @@ from telegram import (
     wait_for_telegram_send_slot as tg_wait_for_telegram_send_slot,
 )
 
+load_local_env(overwrite=True, names=(".env",))
+DEFAULT_PAIR = str(os.getenv("TRADE_SYMBOL", "BTCUSDT") or "BTCUSDT").strip().upper()
+SYMBOL_DATA_PREFIX = re.sub(r"[^a-z0-9]+", "_", DEFAULT_PAIR.lower()).strip("_") or "btcusdt"
+
 LIVE_RUNTIME_ENABLED = str(os.getenv("ETH_BOT_DISABLE_LIVE", "0") or "0").strip().lower() not in {
     "1",
     "true",
@@ -98,8 +102,8 @@ LIVE_RUNTIME_ENABLED = str(os.getenv("ETH_BOT_DISABLE_LIVE", "0") or "0").strip(
 # ===== Macro / host-learning engine =====
 
 MACRO_CACHE = {"sp": 0, "nq": 0, "btc": 0, "dxy": 0, "news": 0, "event": 0, "news_list": [], "ts": 0}
-BINANCE_HOST_LEARNING_STATE_PATH = data_path("binance_host_learning_state.json")
-BINANCE_HOST_LIVE_LEARNING_STATE_PATH = data_path("binance_host_live_learning_state.json")
+BINANCE_HOST_LEARNING_STATE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_binance_host_learning_state.json")
+BINANCE_HOST_LIVE_LEARNING_STATE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_binance_host_live_learning_state.json")
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "Mozilla/5.0"})
@@ -158,8 +162,6 @@ def _get_required_env(name, default=None, mask=False, warn_if_missing=True):
     return value
 
 
-load_local_env(overwrite=True, names=(".env",))
-
 ALLOW_BINANCE_MARKET_DATA_FALLBACK = str(os.getenv("ALLOW_BINANCE_MARKET_DATA_FALLBACK", "0") or "0").strip().lower() in {
     "1",
     "true",
@@ -202,16 +204,15 @@ TELEGRAM_POLL_BACKOFF_MAX = 60.0
 
 # ===== Discord（同步通知） =====
 POSITION_PANEL_FILE = data_path("docs", "position.json")
-PENDING_TRAINING_SAMPLE_PATH = data_path("pending_training_sample.json")
+PENDING_TRAINING_SAMPLE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_pending_training_sample.json")
 MAINTENANCE_REPORT_FILE = data_path("maintenance_latest_report.json")
 PROGRAM_LOG_FILE = data_path("..", "logs", "program.log").resolve()
-DEFAULT_PAIR = "ETHUSDT"
 DEFAULT_LEV = 5
 COPY_TRADE_MAX_LEVERAGE = 5
 PANEL_DEFAULT_MAX_MARGIN_USDT = 100.0
 DEFAULT_MINI_APP_URL = "https://josh940085.github.io/ETH-bot/"
-COPY_TRADE_SYMBOL = "ETHUSDT"
-COPY_TRADE_MIN_QTY = 0.012
+COPY_TRADE_SYMBOL = DEFAULT_PAIR
+COPY_TRADE_MIN_QTY = max(0.001, _safe_float_env("COPY_TRADE_MIN_QTY", 0.001))
 BINANCE_POSITION_SYNC_GRACE_SEC = 90
 BINANCE_PROTECTION_ORDER_TYPES = {"STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"}
 BINANCE_PROTECTION_CLIENT_PREFIX = "ethbot_"
@@ -306,8 +307,8 @@ BINANCE_SPOT_MARKET_CACHE_LOCK = threading.Lock()
 DERIVATIVES_FLOW_CACHE_TTL_SEC = max(15.0, _safe_float_env("DERIVATIVES_FLOW_CACHE_TTL_SEC", 60.0))
 DERIVATIVES_FLOW_CACHE = {"ts": 0.0, "snapshot": {}}
 DERIVATIVES_FLOW_CACHE_LOCK = threading.Lock()
-LIQUIDATION_EVENTS_PATH = data_path("liquidation_events.json")
-PREDICTED_LIQUIDATION_STATE_PATH = data_path("predicted_liquidation_state.json")
+LIQUIDATION_EVENTS_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_liquidation_events.json")
+PREDICTED_LIQUIDATION_STATE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_predicted_liquidation_state.json")
 LIQUIDATION_CLUSTER_WINDOW_SEC = max(300.0, _safe_float_env("LIQUIDATION_CLUSTER_WINDOW_SEC", 3600.0))
 LIQUIDATION_CLUSTER_BUCKET_RATE = max(0.0005, _safe_float_env("LIQUIDATION_CLUSTER_BUCKET_RATE", 0.0025))
 LIQUIDATION_CLUSTER_MIN_NOTIONAL_USDT = max(10000.0, _safe_float_env("LIQUIDATION_CLUSTER_MIN_NOTIONAL_USDT", 50000.0))
@@ -1472,9 +1473,9 @@ def _should_update_binance_host_latest_signal(state, direction, strength, text=N
 def _binance_host_validation_symbol(text):
     text = str(text or "").upper()
     if "ETH" in text or "以太" in text:
-        return "ETHUSDT"
+        return "ETHUSDT" if DEFAULT_PAIR == "ETHUSDT" else ""
     if "BTC" in text or "大餅" in text or "大饼" in text or "比特" in text:
-        return "BTCUSDT"
+        return "BTCUSDT" if DEFAULT_PAIR == "BTCUSDT" else ""
     return ""
 
 
@@ -3470,9 +3471,9 @@ def _get_binance_symbol_leverage(default=DEFAULT_LEV) -> int:
 
 def _calc_copy_trade_qty(size_ratio, leverage=None, eth_price=None) -> float:
     """
-    計算實際下單 ETH 數量。
+    計算實際下單標的數量。
     100% size_ratio = 使用全部可用餘額（以槓桿全開）。
-    若查不到餘額，退回 COPY_TRADE_ETH_QTY 舊模式。
+    若查不到餘額，退回交易所最低下單量。
     """
     ratio = max(_safe_float(size_ratio, 0.0), 0.0)
     lev = max(
@@ -3500,7 +3501,7 @@ def _calc_copy_trade_qty(size_ratio, leverage=None, eth_price=None) -> float:
         # 無法確認可用餘額時採交易所最低量，避免舊固定顆數放大低比例訊號。
         raw_qty = COPY_TRADE_MIN_QTY
 
-    # ETHUSDT 永續最小步進通常為 0.001，向下取整避免超出精度。
+    # BTCUSDT 永續數量步進為 0.001，向下取整避免超出精度。
     return max(COPY_TRADE_MIN_QTY, math.floor(raw_qty * 1000.0) / 1000.0)
 
 
@@ -4405,7 +4406,10 @@ def sync_active_trade_from_binance(send_notice=False):
     size_ratio = _estimate_size_ratio_from_position_margin(position_margin, account_snapshot)
     capital_usage_ratio = _compute_capital_usage_ratio(position_margin, account_snapshot)
     if size_ratio <= 0:
-        base_qty = max(_safe_float(os.getenv("COPY_TRADE_ETH_QTY", 1.0), 1.0), 1e-9)
+        base_qty = max(
+            _safe_float(os.getenv("COPY_TRADE_QTY", COPY_TRADE_MIN_QTY), COPY_TRADE_MIN_QTY),
+            1e-9,
+        )
         size_ratio = actual_qty / base_qty
     if capital_usage_ratio <= 0:
         capital_usage_ratio = min(1.0, size_ratio)
@@ -4550,7 +4554,7 @@ def sync_active_trade_from_binance(send_notice=False):
     else:
         _sync_break_even_state_from_sl(direction, entry_price, sl, preserve_existing=False)
 
-    POSITION_PANEL_STATE["pair"] = "ETHUSDT"
+    POSITION_PANEL_STATE["pair"] = DEFAULT_PAIR
     POSITION_PANEL_STATE["lev"] = leverage
     POSITION_PANEL_STATE["size"] = capital_usage_ratio
     POSITION_PANEL_STATE["size_ratio"] = size_ratio
@@ -6042,7 +6046,7 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
     if qty < COPY_TRADE_MIN_QTY:
         if not reduce:
             active_trade["scale_add_paused"] = True
-            active_trade["scale_add_pause_reason"] = f"補倉量 {qty:.3f} ETH 低於最低補倉顆數 {COPY_TRADE_MIN_QTY:.3f} ETH"
+            active_trade["scale_add_pause_reason"] = f"補倉量 {qty:.3f} BTC 低於最低補倉數量 {COPY_TRADE_MIN_QTY:.3f} BTC"
             active_trade["scale_add_pause_ts"] = time.time()
             return False, f"補倉已暫停：{active_trade['scale_add_pause_reason']}"
         return False, f"下單量低於最小值 {COPY_TRADE_MIN_QTY:.3f}"
@@ -6097,7 +6101,7 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
                 fallback_qty = math.floor(max(0.0, _safe_float(_recalc_scale_qty(retry_steps + 1), 0.0)) * 1000.0) / 1000.0
                 if fallback_qty < COPY_TRADE_MIN_QTY:
                     active_trade["scale_add_paused"] = True
-                    active_trade["scale_add_pause_reason"] = f"補倉量 {fallback_qty:.3f} ETH 低於最低補倉顆數 {COPY_TRADE_MIN_QTY:.3f} ETH"
+                    active_trade["scale_add_pause_reason"] = f"補倉量 {fallback_qty:.3f} BTC 低於最低補倉數量 {COPY_TRADE_MIN_QTY:.3f} BTC"
                     active_trade["scale_add_pause_ts"] = time.time()
                     return False, f"補倉已暫停：{active_trade['scale_add_pause_reason']}"
                 return False, _format_binance_margin_failure("補倉實單失敗", final_qty, leverage, price_ref, last_err)
@@ -8178,7 +8182,7 @@ def get_macro_bias():
     return sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk, news_list
 
 # ===== Online Model Persistence =====
-ONLINE_MODEL_PATH = ai_data_path("online_model.pkl")
+ONLINE_MODEL_PATH = ai_data_path(f"{SYMBOL_DATA_PREFIX}_online_model.pkl")
 
 # =============================
 # 全域
@@ -8511,7 +8515,7 @@ def ws_price_stream():
     while True:
         try:
             ws = websocket.WebSocketApp(
-                "wss://fstream.binance.com/ws/ethusdt@aggTrade",
+                f"wss://fstream.binance.com/ws/{COPY_TRADE_SYMBOL.lower()}@aggTrade",
                 on_open=on_open,
                 on_message=on_message,
                 on_close=on_close,
@@ -8525,7 +8529,7 @@ def ws_price_stream():
 
 
 def ws_liquidation_stream():
-    """Collect public ETHUSDT force-order events and persist a rolling window."""
+    """Collect public force-order events for the active perpetual symbol."""
     def on_open(ws):
         global LIQUIDATION_STREAM_CONNECTED
         LIQUIDATION_STREAM_CONNECTED = True
@@ -8559,7 +8563,7 @@ def ws_liquidation_stream():
     while True:
         try:
             ws = websocket.WebSocketApp(
-                "wss://fstream.binance.com/ws/ethusdt@forceOrder",
+                f"wss://fstream.binance.com/ws/{COPY_TRADE_SYMBOL.lower()}@forceOrder",
                 on_message=on_message,
                 on_open=on_open,
                 on_close=on_close,
@@ -8578,9 +8582,9 @@ if LIVE_RUNTIME_ENABLED:
     threading.Thread(target=ws_liquidation_stream, name="binance-liquidation-stream", daemon=True).start()
 
 
-def _binance_ws_strategy_price_payload(symbol="ETHUSDT", reference_price=None, now_ts=None):
+def _binance_ws_strategy_price_payload(symbol=DEFAULT_PAIR, reference_price=None, now_ts=None):
     """Build a bounded execution-price fallback from Binance's live trade stream."""
-    symbol = str(symbol or "ETHUSDT").upper()
+    symbol = str(symbol or DEFAULT_PAIR).upper()
     now_ts = time.time() if now_ts is None else _safe_float(now_ts, time.time())
     price = max(0.0, _safe_float(WS_PRICE, 0.0))
     exchange_ts = max(0.0, _safe_float(WS_PRICE_TS, 0.0))
@@ -8626,9 +8630,9 @@ def _binance_ws_strategy_price_payload(symbol="ETHUSDT", reference_price=None, n
     }
 
 
-def _external_kline_strategy_price_payload(symbol="ETHUSDT", reference_price=None, now_ts=None):
+def _external_kline_strategy_price_payload(symbol=DEFAULT_PAIR, reference_price=None, now_ts=None):
     """Last-resort strategy price from the already loaded external 1m candle."""
-    symbol = str(symbol or "ETHUSDT").upper()
+    symbol = str(symbol or DEFAULT_PAIR).upper()
     now_ts = time.time() if now_ts is None else _safe_float(now_ts, time.time())
     price = max(0.0, _safe_float(reference_price, 0.0))
     if price <= 0:
@@ -8647,9 +8651,9 @@ def _external_kline_strategy_price_payload(symbol="ETHUSDT", reference_price=Non
     }
 
 
-def _fetch_strategy_mark_price(symbol="ETHUSDT", reference_price=None):
+def _fetch_strategy_mark_price(symbol=DEFAULT_PAIR, reference_price=None):
     """Use Mark Price, then Binance trades, then the loaded external 1m candle."""
-    symbol = str(symbol or "ETHUSDT").upper()
+    symbol = str(symbol or DEFAULT_PAIR).upper()
     base = _panel_realtime_internal_base_url().rstrip("/")
     headers = {}
     if POSITION_PANEL_REALTIME_TOKEN:
@@ -9233,7 +9237,7 @@ def build_higher_timeframe_context(
     candle_value = None
     if df_4h is not None and len(df_4h) > 1 and "time" in df_4h.columns:
         candle_value = df_4h["time"].iloc[-2]
-    context["candle_key"] = f"ETHUSDT:4h:{candle_value}"
+    context["candle_key"] = f"{DEFAULT_PAIR}:4h:{candle_value}"
     return context
 
 # =============================
@@ -10151,14 +10155,14 @@ def analyze_multi_tf_sr(price):
 # =============================
 # AI（Meta Model）
 # =============================
-MODEL_PATH = ai_data_path("model.pkl")
-DATA_PATH = ai_data_path("ai_data.csv")
-BACKTEST_DATA_PATH = ai_data_path("backtest_ai_data.csv")
-ONLINE_SCALER_PATH = ai_data_path("online_scaler.pkl")
-ONLINE_MODEL_META_PATH = ai_data_path("online_model_meta.json")
+MODEL_PATH = ai_data_path(f"{SYMBOL_DATA_PREFIX}_model.pkl")
+DATA_PATH = ai_data_path(f"{SYMBOL_DATA_PREFIX}_ai_data.csv")
+BACKTEST_DATA_PATH = ai_data_path(f"{SYMBOL_DATA_PREFIX}_backtest_ai_data.csv")
+ONLINE_SCALER_PATH = ai_data_path(f"{SYMBOL_DATA_PREFIX}_online_scaler.pkl")
+ONLINE_MODEL_META_PATH = ai_data_path(f"{SYMBOL_DATA_PREFIX}_online_model_meta.json")
 AI_LEARNING_PIPELINE_VERSION = 2
 STRATEGY_VERSION = str(os.getenv("ETH_BOT_STRATEGY_VERSION", "mlx-actual-v1")).strip() or "mlx-actual-v1"
-AI_LEARNING_META_PATH = ai_data_path("ai_learning_meta.json")
+AI_LEARNING_META_PATH = ai_data_path(f"{SYMBOL_DATA_PREFIX}_ai_learning_meta.json")
 MODEL_FEATURE_COLUMNS = [
     "htf",
     "htf_strength",
@@ -10224,7 +10228,7 @@ PENDING_TRAINING_SAMPLE_MAX_AGE_SEC = max(
     3600.0,
     _safe_float(os.getenv("PENDING_TRAINING_SAMPLE_MAX_AGE_SEC", 172800), 172800),
 )
-SL_FOLLOWUP_REVIEWS_PATH = data_path("sl_followup_reviews.json")
+SL_FOLLOWUP_REVIEWS_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_sl_followup_reviews.json")
 SL_FOLLOWUP_REVIEW_DELAY_SEC = max(120.0, _safe_float(os.getenv("SL_FOLLOWUP_REVIEW_DELAY_SEC", 900), 900))
 SL_FOLLOWUP_RECOVERY_ATR = max(0.15, _safe_float(os.getenv("SL_FOLLOWUP_RECOVERY_ATR", 0.6), 0.6))
 SL_FOLLOWUP_MAX_AGE_SEC = max(
@@ -13920,7 +13924,7 @@ def _parse_tradingview_messages(raw):
 
 
 def _tradingview_symbol(symbol):
-    symbol = str(symbol or "ETHUSDT").upper().strip()
+    symbol = str(symbol or DEFAULT_PAIR).upper().strip()
     if symbol in TRADINGVIEW_SYMBOL_MAP:
         return TRADINGVIEW_SYMBOL_MAP[symbol]
     if symbol.endswith("USDT"):
@@ -14127,7 +14131,7 @@ def _fetch_tradingview_kline_rows(symbol, interval, limit=100, start_time_ms=Non
 
 def _fetch_binance_kline_rows(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10, prefix="K線"):
     params = {
-        "symbol": str(symbol or "ETHUSDT").upper(),
+        "symbol": str(symbol or DEFAULT_PAIR).upper(),
         "interval": str(interval),
         "limit": max(1, min(1500, _safe_int(limit, 100))),
     }
@@ -14375,7 +14379,7 @@ def _closed_kline_map(rows, interval, now_ms=None):
     return parsed
 
 
-def _inspect_twelve_data_quality(symbol="ETHUSDT", interval="5m"):
+def _inspect_twelve_data_quality(symbol=DEFAULT_PAIR, interval="5m"):
     checked_at = time.time()
     td_rows = _fetch_twelve_data_kline_rows(symbol, interval, limit=12, timeout=12)
     binance_rows, binance_source = _fetch_binance_kline_rows(
@@ -14426,7 +14430,7 @@ TWELVE_HISTORY_COLUMNS = (
 
 
 def _twelve_history_path(symbol, interval):
-    safe_symbol = re.sub(r"[^A-Z0-9_-]", "", str(symbol or "ETHUSDT").upper())
+    safe_symbol = re.sub(r"[^A-Z0-9_-]", "", str(symbol or DEFAULT_PAIR).upper())
     safe_interval = re.sub(r"[^A-Za-z0-9_-]", "", str(interval or "5m"))
     return TWELVE_DATA_HISTORY_DIR / f"{safe_symbol}_{safe_interval}.csv"
 
@@ -14472,7 +14476,7 @@ def _write_twelve_history_rows(path, rows):
     return ordered
 
 
-def _sync_twelve_data_history(symbol="ETHUSDT", interval="5m"):
+def _sync_twelve_data_history(symbol=DEFAULT_PAIR, interval="5m"):
     path = _twelve_history_path(symbol, interval)
     stored = _load_twelve_history_rows(path)
     before_count = len(stored)
@@ -14547,7 +14551,7 @@ def _run_twelve_data_maintenance_cycle(include_history=False):
     report = _read_twelve_data_quality_report()
     try:
         report["quality"] = _inspect_twelve_data_quality(
-            os.getenv("TWELVE_DATA_QUALITY_SYMBOL", "ETHUSDT"),
+            os.getenv("TWELVE_DATA_QUALITY_SYMBOL", DEFAULT_PAIR),
             os.getenv("TWELVE_DATA_QUALITY_INTERVAL", "5m"),
         )
         print(
@@ -14569,9 +14573,9 @@ def _run_twelve_data_maintenance_cycle(include_history=False):
         ]
         for interval in intervals:
             try:
-                history.append(_sync_twelve_data_history("ETHUSDT", interval))
+                history.append(_sync_twelve_data_history(DEFAULT_PAIR, interval))
             except Exception as exc:
-                history.append({"ok": False, "symbol": "ETHUSDT", "interval": interval, "error": str(exc), "synced_at": time.time()})
+                history.append({"ok": False, "symbol": DEFAULT_PAIR, "interval": interval, "error": str(exc), "synced_at": time.time()})
                 print(f"⚠️ Twelve Data {interval} 歷史補洞失敗: {exc}")
         report["history"] = history
         report["last_history_sync_ts"] = time.time()
@@ -14862,7 +14866,7 @@ def get_kline(interval, limit=100):
             return data
 
     try:
-        data, _ = _fetch_market_kline_rows("ETHUSDT", interval, limit=limit, timeout=10, prefix=f"{interval} K線")
+        data, _ = _fetch_market_kline_rows(DEFAULT_PAIR, interval, limit=limit, timeout=10, prefix=f"{interval} K線")
     except Exception:
         if interval in KLINE_CACHE:
             data, _ = KLINE_CACHE[interval]
@@ -15240,7 +15244,7 @@ def run_bot():
             }
             if not (_real_order_priority_enabled() and active_trade.get("open")):
                 _start_mlx_auto_analysis(
-                    f"ETHUSDT:15m:{completed_15m}",
+                    f"{DEFAULT_PAIR}:15m:{completed_15m}",
                     auto_market_context,
                 )
 
@@ -15411,7 +15415,7 @@ def run_bot():
                         "macro_bias": macro_bias,
                         "news_bias": news_bias,
                         "event_risk": event_risk,
-                        "symbol": "ETHUSDT",
+                        "symbol": DEFAULT_PAIR,
                     },
                 )
                 _process_binance_host_live_learning(
@@ -15425,7 +15429,7 @@ def run_bot():
                         "macro_bias": macro_bias,
                         "news_bias": news_bias,
                         "event_risk": event_risk,
-                        "symbol": "ETHUSDT",
+                        "symbol": DEFAULT_PAIR,
                     },
                 )
             if active_trade["open"]:

@@ -327,8 +327,8 @@ def _extract_panel_session_ws(websocket: WebSocket) -> str:
 
 
 def _normalize_market_symbol(symbol: str) -> str:
-    clean = re.sub(r"[^A-Za-z0-9]", "", str(symbol or "ETHUSDT")).upper()
-    return clean if clean else "ETHUSDT"
+    clean = re.sub(r"[^A-Za-z0-9]", "", str(symbol or "BTCUSDT")).upper()
+    return clean if clean else "BTCUSDT"
 
 
 def _validated_binance_mark_price_snapshot(expected_symbol: str, mark_payload, ticker_payload) -> dict:
@@ -1140,7 +1140,7 @@ async def get_market_klines(request: Request):
     if not _market_data_authorized_http(request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
-    symbol = _normalize_market_symbol(request.query_params.get("symbol", "ETHUSDT"))
+    symbol = _normalize_market_symbol(request.query_params.get("symbol", "BTCUSDT"))
     interval = str(request.query_params.get("interval", "1m") or "1m").strip()
     if interval not in {"1m", "4h"}:
         raise HTTPException(status_code=400, detail="unsupported interval")
@@ -1182,7 +1182,7 @@ async def get_market_price(request: Request):
     if not _market_data_authorized_http(request):
         raise HTTPException(status_code=401, detail="unauthorized")
 
-    symbol = _normalize_market_symbol(request.query_params.get("symbol", "ETHUSDT"))
+    symbol = _normalize_market_symbol(request.query_params.get("symbol", "BTCUSDT"))
     cache_key = f"mark_price:{symbol}"
     now_ts = time.time()
     async with MARKET_DATA_LOCK:
