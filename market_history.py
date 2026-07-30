@@ -90,7 +90,34 @@ def _read_binance_history_zip(path):
         if not csv_names:
             return pd.DataFrame()
         with archive.open(csv_names[0]) as fh:
-            return pd.read_csv(io.BytesIO(fh.read()))
+            payload = fh.read()
+    frame = pd.read_csv(io.BytesIO(payload))
+    required = {"open_time", "open", "high", "low", "close", "volume", "close_time"}
+    if required.issubset(frame.columns):
+        return frame
+
+    # Binance Futures UM archives before 2022 may be headerless. Re-read them
+    # with the official 12-column K-line schema so a 2022 replay can load its
+    # preceding warmup bars without treating the first candle as a header.
+    columns = [
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_volume",
+        "count",
+        "taker_buy_volume",
+        "taker_buy_quote_volume",
+        "ignore",
+    ]
+    headerless = pd.read_csv(io.BytesIO(payload), header=None)
+    if headerless.shape[1] == len(columns):
+        headerless.columns = columns
+        return headerless
+    return frame
 
 def _history_interval_ms(interval):
     match = re.fullmatch(r"(\d+)([mhd])", str(interval or "").strip().lower())

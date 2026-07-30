@@ -11,6 +11,17 @@ import eth
 
 
 class StrategyExecutionSnapshotTests(unittest.TestCase):
+    def test_telegram_control_keyboard_does_not_attach_crypto_mini_app(self):
+        keyboard = eth._build_control_panel_keyboard(chat_id=123456)
+
+        buttons = [
+            button
+            for row in keyboard.get("keyboard", [])
+            for button in row
+        ]
+        self.assertTrue(buttons)
+        self.assertFalse(any("web_app" in button for button in buttons))
+
     def setUp(self):
         self.panel_state = dict(eth.POSITION_PANEL_STATE)
         self.active_trade = dict(eth.active_trade)
@@ -554,11 +565,11 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         with (
             patch.object(eth, "_get_binance_available_balance", return_value=0.0),
         ):
-            qty = eth._calc_copy_trade_qty(0.05, leverage=5, eth_price=70_000.0)
+            qty = eth._calc_copy_trade_qty(0.05, leverage=5, asset_price=70_000.0)
             buffered_qty = eth._calc_copy_trade_qty_with_buffer(
                 0.05,
                 leverage=5,
-                eth_price=70_000.0,
+                asset_price=70_000.0,
                 extra_buffer_ratio=0.8,
                 enforce_min=False,
             )

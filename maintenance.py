@@ -143,11 +143,11 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "restart", "description": "重新啟動 bot"},
 ]
 TELEGRAM_BOT_DESCRIPTION = (
-    "白名單限定的 ETH 交易管理 Bot 與 Mini App。"
+    "白名單限定的 BTC 交易管理 Bot。"
     "隱私政策：https://josh940085.github.io/ETH-bot/privacy.html "
     "可用 /stop 停止通知，或用 /delete_my_data 刪除本機留存資料。"
 )
-TELEGRAM_BOT_SHORT_DESCRIPTION = "白名單限定的 ETH 交易管理工具；使用 /privacy 查看資料處理方式。"
+TELEGRAM_BOT_SHORT_DESCRIPTION = "白名單限定的 BTC 交易管理工具；使用 /privacy 查看資料處理方式。"
 
 
 def _extract_repair_lines(output, limit=8):
@@ -233,6 +233,23 @@ def _check_telegram_policy_and_repair():
                 "target": "telegram_webhook",
                 "action": "delete_webhook_for_long_polling",
                 "content": webhook_url,
+            }
+        )
+
+    current_menu_button = _telegram_api_request(token, "getChatMenuButton", "GET")
+    if not isinstance(current_menu_button, dict) or current_menu_button.get("type") != "commands":
+        _telegram_api_request(
+            token,
+            "setChatMenuButton",
+            "POST",
+            {"menu_button": {"type": "commands"}},
+        )
+        repaired.append("menu_button")
+        repair_details.append(
+            {
+                "target": "telegram_menu_button",
+                "action": "detach_crypto_mini_app_use_bot_commands",
+                "content": "commands",
             }
         )
 

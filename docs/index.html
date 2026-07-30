@@ -2873,7 +2873,7 @@
   <div class="command-deck" aria-label="戰術交易總覽">
     <section class="command-card command-market">
       <div class="command-label">MARKET</div>
-      <div class="command-symbol">ETH / USDT</div>
+      <div class="command-symbol">BTC / USDT</div>
       <div class="command-price">${marketPrice > 0 ? fmt(marketPrice) : "-"}</div>
       <div class="command-change ${regime.changePct >= 0 ? "positive" : "negative"}">4H×20 ${fmt_signed(regime.changePct)}%</div>
       <div class="command-meta">${marketPrice > 0 ? "BINANCE MARK · 開單策略已執行" : "等待開單策略完成 · 暫停顯示"} ｜ 總資產 ${fmt(totalAssetsUsdt)} USDT</div>
@@ -2908,7 +2908,7 @@
       <div class="command-label">POSITION</div>
       <div class="command-list">
         <div class="command-list-row"><span>狀態</span><strong>${actualDirection ? "實際持倉中" : "無實際持倉"}</strong></div>
-        <div class="command-list-row"><span>數量</span><strong>${actualDirection && qty > 0 ? `${qty.toFixed(4)} ETH` : "-"}</strong></div>
+        <div class="command-list-row"><span>數量</span><strong>${actualDirection && qty > 0 ? `${qty.toFixed(4)} BTC` : "-"}</strong></div>
         <div class="command-list-row"><span>進場價</span><strong>${actualDirection && ENTRY > 0 ? fmt(ENTRY) : "-"}</strong></div>
         <div class="command-list-row"><span>損益</span><strong>${pnl ? `${fmt_signed(pnl.shown_usdt)} USDT` : "-"}</strong></div>
       </div>

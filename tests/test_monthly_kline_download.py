@@ -15,15 +15,20 @@ import monthly_kline_download
 import program
 
 
-def _monthly_zip_bytes(year, month, interval_ms=300_000):
+def _monthly_zip_bytes(year, month, interval_ms=300_000, include_header=True):
     start = dt.datetime(year, month, 1, tzinfo=dt.timezone.utc)
     end = market_history.next_month(start)
     start_ms = int(start.timestamp() * 1000)
     count = int((end - start).total_seconds() * 1000 // interval_ms)
-    rows = ["open_time,open,high,low,close,volume,close_time"]
+    rows = []
+    if include_header:
+        rows.append("open_time,open,high,low,close,volume,close_time")
     for index in range(count):
         open_time = start_ms + index * interval_ms
-        rows.append(f"{open_time},2000,2001,1999,2000.5,10,{open_time + interval_ms - 1}")
+        row = f"{open_time},2000,2001,1999,2000.5,10,{open_time + interval_ms - 1}"
+        if not include_header:
+            row += ",20005,10,5,10002.5,0"
+        rows.append(row)
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(f"ETHUSDT-5m-{year:04d}-{month:02d}.csv", "\n".join(rows))
@@ -52,6 +57,25 @@ class MonthlyKlineDownloadTests(unittest.TestCase):
             payload = _monthly_zip_bytes(2026, 6)
             truncated.write_bytes(payload[: len(payload) // 2])
             self.assertFalse(market_history.validate_binance_history_zip(truncated, "ETHUSDT", "5m", 2026, 6))
+
+    def test_reads_legacy_headerless_month_for_2022_warmup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive_path = Path(tmp) / "BTCUSDT-5m-2021-12.zip"
+            archive_path.write_bytes(_monthly_zip_bytes(2021, 12, include_header=False))
+
+            frame = market_history._read_binance_history_zip(archive_path)
+
+            self.assertEqual(len(frame), 31 * 24 * 12)
+            self.assertIn("open_time", frame.columns)
+            self.assertTrue(
+                market_history.validate_binance_history_zip(
+                    archive_path,
+                    "BTCUSDT",
+                    "5m",
+                    2021,
+                    12,
+                )
+            )
 
     def test_completed_report_schedules_next_month_instead_of_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp:

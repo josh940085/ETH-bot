@@ -1249,6 +1249,25 @@ def _apply_trade_management(open_trade, current_price, atr, ts, favorable_price=
             new_tp=round(tp_after, 4),
         )
 
+    protected_tp, required_rate = eth._ensure_minimum_net_profit_tp(
+        open_trade["direction"],
+        float(eth.active_trade.get("avg_entry") or open_trade["avg_entry"]),
+        float(eth.active_trade.get("tp") or open_trade["tp"]),
+        hold_hours=hold_hours,
+    )
+    if abs(protected_tp - float(eth.active_trade.get("tp") or open_trade["tp"])) > 1e-9:
+        old_tp = float(eth.active_trade.get("tp") or open_trade["tp"])
+        eth.active_trade["tp"] = protected_tp
+        open_trade["tp"] = protected_tp
+        _append_trade_event(
+            open_trade,
+            ts,
+            "tp_net_profit_floor",
+            old_tp=round(old_tp, 4),
+            new_tp=round(protected_tp, 4),
+            minimum_gross_rate_pct=round(required_rate * 100, 4),
+        )
+
     return _pull_trade_state_from_eth(open_trade)
 
 

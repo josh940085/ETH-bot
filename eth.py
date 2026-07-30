@@ -493,72 +493,11 @@ def _get_follow_button_text() -> str:
 
 def _build_control_panel_keyboard(chat_id=None):
     follow_text = _get_follow_button_text()
-    panel_url = MINI_APP_URL
-    state_url, ws_url, _ = _current_panel_realtime_urls()
-    panel_session = _create_panel_session(chat_id) if (state_url or ws_url) else ""
-
-    snapshot = {
-        "t": int(time.time()),
-        "snapshot_ts": int(_safe_int(POSITION_PANEL_STATE.get("ts"), 0)),
-        "pair": str(POSITION_PANEL_STATE.get("pair") or DEFAULT_PAIR),
-        "lev": int(_safe_int(POSITION_PANEL_STATE.get("lev"), DEFAULT_LEV) or DEFAULT_LEV),
-    }
-    if state_url:
-        snapshot["state_url"] = state_url
-    if ws_url:
-        snapshot["ws_url"] = ws_url
-    if panel_session:
-        snapshot["panel_session"] = panel_session
-
-    if state_url or ws_url:
-        if not active_trade.get("open"):
-            snapshot["restart"] = 1
-    elif active_trade.get("open"):
-        entry_price = _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0)
-        fee_round_trip_rate = _safe_float(POSITION_PANEL_STATE.get("fee_round_trip_rate"), 0.001)
-        snapshot.update(
-            {
-                "total_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_total_assets_usdt"), 0.0), 4),
-                "spot_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_spot_total_assets_usdt"), 0.0), 4),
-                "futures_assets_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_futures_total_assets_usdt"), 0.0), 4),
-                "wallet_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_wallet_balance_usdt"), 0.0), 4),
-                "available_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_available_balance_usdt"), 0.0), 4),
-                "margin_balance_usdt": round(_safe_float(POSITION_PANEL_STATE.get("account_margin_balance_usdt"), 0.0), 4),
-                "dir": str(active_trade.get("direction") or "long"),
-                "entry": round(entry_price, 4),
-                "tp": round(_safe_float(active_trade.get("tp"), 0.0), 4),
-                "sl": round(_safe_float(active_trade.get("sl"), 0.0), 4),
-                "size": round(max(0.0, _safe_float(active_trade.get("size"), 0.0)) * 100.0, 2),
-                "capital_usage_ratio": round(max(0.0, _safe_float(POSITION_PANEL_STATE.get("capital_usage_ratio"), 0.0)), 4),
-                "binance_qty": round(_safe_float(POSITION_PANEL_STATE.get("binance_qty"), _get_active_trade_position_qty()), 6),
-                "position_notional_usdt": round(_safe_float(POSITION_PANEL_STATE.get("position_notional_usdt"), 0.0), 4),
-                "position_margin_usdt": round(_safe_float(POSITION_PANEL_STATE.get("position_margin_usdt"), 0.0), 4),
-                "binance_entry_price": round(entry_price, 4),
-                "binance_mark_price": round(_safe_float(POSITION_PANEL_STATE.get("binance_mark_price"), 0.0), 4),
-                "binance_mark_price_ts": int(_safe_int(POSITION_PANEL_STATE.get("binance_mark_price_ts"), snapshot["snapshot_ts"])),
-                "binance_break_even_price": round(
-                    entry_price * (1 + fee_round_trip_rate / 2),
-                    4,
-                )
-                if str(active_trade.get("direction") or "long") == "long"
-                else round(entry_price * (1 - fee_round_trip_rate / 2), 4),
-                "binance_unrealized_pnl_usdt": round(_safe_float(POSITION_PANEL_STATE.get("binance_unrealized_pnl_usdt"), 0.0), 4),
-                "binance_unrealized_pnl_ts": int(_safe_int(POSITION_PANEL_STATE.get("binance_unrealized_pnl_ts"), snapshot["snapshot_ts"])),
-                "estimated_unrealized_pnl_usdt": round(_safe_float(POSITION_PANEL_STATE.get("estimated_unrealized_pnl_usdt"), 0.0), 4),
-            }
-        )
-    else:
-        snapshot["restart"] = 1
-
-    if panel_url:
-        sep = "&" if "?" in panel_url else "?"
-        panel_url = f"{panel_url}{sep}{urlencode(snapshot)}"
-
+    # Telegram's blockchain rules exempt regular bots, but not crypto-enabled
+    # Mini Apps. Keep trading controls as ordinary private-chat buttons and do
+    # not attach the standalone BTC panel as a Telegram Web App.
     return {
         "keyboard": [
-            [
-                {"text": "📱 倉位面板", "web_app": {"url": panel_url}},
-            ],
             [
                 {"text": follow_text},
                 {"text": "⛔ 一鍵平倉"},
@@ -3497,7 +3436,7 @@ def _get_binance_symbol_leverage(default=DEFAULT_LEV) -> int:
     return fallback
 
 
-def _calc_copy_trade_qty(size_ratio, leverage=None, eth_price=None) -> float:
+def _calc_copy_trade_qty(size_ratio, leverage=None, asset_price=None) -> float:
     """
     計算實際下單標的數量。
     100% size_ratio = 使用全部可用餘額（以槓桿全開）。
@@ -3517,7 +3456,7 @@ def _calc_copy_trade_qty(size_ratio, leverage=None, eth_price=None) -> float:
 
     # 嘗試用帳戶餘額計算
     balance = _get_binance_available_balance()
-    price = _safe_float(eth_price, 0.0) if eth_price else _safe_float(WS_PRICE, 0.0)
+    price = _safe_float(asset_price, 0.0) if asset_price else _safe_float(WS_PRICE, 0.0)
 
     if balance > 0 and price > 0:
         # margin = balance * size_ratio（使用比例的可用資金）
@@ -3533,7 +3472,7 @@ def _calc_copy_trade_qty(size_ratio, leverage=None, eth_price=None) -> float:
     return max(COPY_TRADE_MIN_QTY, math.floor(raw_qty * 1000.0) / 1000.0)
 
 
-def _calc_copy_trade_qty_with_buffer(size_ratio, leverage=None, eth_price=None, extra_buffer_ratio=1.0, enforce_min=True) -> float:
+def _calc_copy_trade_qty_with_buffer(size_ratio, leverage=None, asset_price=None, extra_buffer_ratio=1.0, enforce_min=True) -> float:
     """以額外緩衝重新估算可承受下單量，供 -2019 重試使用。"""
     ratio = max(_safe_float(size_ratio, 0.0), 0.0)
     lev = max(
@@ -3548,7 +3487,7 @@ def _calc_copy_trade_qty_with_buffer(size_ratio, leverage=None, eth_price=None, 
     buffer_ratio = min(1.0, max(0.3, _safe_float(extra_buffer_ratio, 1.0)))
 
     balance = _get_binance_available_balance()
-    price = _safe_float(eth_price, 0.0) if eth_price else _safe_float(WS_PRICE, 0.0)
+    price = _safe_float(asset_price, 0.0) if asset_price else _safe_float(WS_PRICE, 0.0)
 
     if balance > 0 and price > 0:
         margin_used = balance * ratio * balance_usage_cap * buffer_ratio
@@ -3613,7 +3552,7 @@ def _format_binance_margin_failure(prefix, attempted_qty, leverage, price_ref, l
     if available_balance > 0:
         details += f" | 可用保證金約 {available_balance:.2f} USDT"
     if approx_required_margin > 0:
-        details += f" | 最後嘗試 {attempted_qty:.3f} ETH 約需保證金 {approx_required_margin:.2f} USDT @ {max(_safe_int(leverage, 1), 1)}x"
+        details += f" | 最後嘗試 {attempted_qty:.3f} BTC 約需保證金 {approx_required_margin:.2f} USDT @ {max(_safe_int(leverage, 1), 1)}x"
     return details
 
 
@@ -3959,7 +3898,32 @@ def _install_and_verify_binance_protection(
     tp,
     sl,
     attempts=2,
+    entry_price=None,
+    hold_hours=None,
 ):
+    direction = "long" if str(close_side or "").upper() == "SELL" else "short"
+    resolved_entry = _safe_float(
+        entry_price,
+        _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0),
+    )
+    resolved_hold_hours = hold_hours
+    if resolved_hold_hours is None:
+        open_ts = _safe_float(active_trade.get("open_time"), 0.0)
+        resolved_hold_hours = max(0.0, (time.time() - open_ts) / 3600.0) if open_ts > 0 else None
+    adjusted_tp, required_rate = _ensure_minimum_net_profit_tp(
+        direction,
+        resolved_entry,
+        tp,
+        hold_hours=resolved_hold_hours,
+    )
+    if adjusted_tp > 0 and abs(adjusted_tp - _safe_float(tp, 0.0)) > 1e-9:
+        tp = adjusted_tp
+        active_trade["tp"] = adjusted_tp
+        print(
+            f"🛡️ TP 已提高至可覆蓋成本並保留淨利 | "
+            f"TP={adjusted_tp:.2f} | 最低毛利={required_rate * 100:.3f}%"
+        )
+
     required = {
         "TP": ("TAKE_PROFIT_MARKET", _safe_float(tp, 0.0)),
         "SL": ("STOP_MARKET", _safe_float(sl, 0.0)),
@@ -4079,6 +4043,7 @@ def update_copy_trade_tp_sl(tp=None, sl=None):
         qty,
         tp,
         sl,
+        entry_price=_safe_float(row.get("entryPrice"), 0.0),
     )
     if not protected:
         return False, f"⚠️ Binance TP/SL 更新未完成: {protection_msg}"
@@ -4146,7 +4111,7 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
 
     # 以交易所實際槓桿為準，避免訊息顯示與實際下單不一致
     leverage = min(COPY_TRADE_MAX_LEVERAGE, _get_binance_symbol_leverage(default=leverage))
-    qty = _calc_copy_trade_qty(size_ratio, leverage=leverage, eth_price=_safe_float(WS_PRICE, 0.0))
+    qty = _calc_copy_trade_qty(size_ratio, leverage=leverage, asset_price=_safe_float(WS_PRICE, 0.0))
 
     order_params = {
         "symbol": COPY_TRADE_SYMBOL,
@@ -4167,7 +4132,7 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
         return _calc_copy_trade_qty_with_buffer(
             size_ratio,
             leverage=leverage,
-            eth_price=_safe_float(WS_PRICE, 0.0),
+            asset_price=_safe_float(WS_PRICE, 0.0),
             extra_buffer_ratio=buffer_ratio,
             enforce_min=False,
         )
@@ -4209,6 +4174,7 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
         display_qty,
         tp,
         sl,
+        entry_price=_safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0),
     )
     if not protected:
         closed, close_msg = _emergency_close_unprotected_position(
@@ -4222,7 +4188,7 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
         protection_msg = f"🚨 Binance 實單目前缺少完整 TP/SL：{protection_msg}；{close_msg}"
 
     msg = (
-        f"✅ Binance 已自動開單 | 方向: {direction} | 數量: {display_qty:.3f} ETH | 槓桿: {leverage}x"
+        f"✅ Binance 已自動開單 | 方向: {direction} | 數量: {display_qty:.3f} BTC | 槓桿: {leverage}x"
         f" | orderId: {order_id}"
     )
     if desired_leverage != leverage:
@@ -4516,6 +4482,7 @@ def sync_active_trade_from_binance(send_notice=False):
             qty=actual_qty,
             tp=tp,
             sl=sl,
+            entry_price=entry_price,
         )
         if protected:
             print("🛡️ 已補回並確認 Binance TP/SL 保護單")
@@ -4601,7 +4568,7 @@ def sync_active_trade_from_binance(send_notice=False):
     sl_text = f"{sl:.2f}" if sl > 0 else "未抓到"
     msg = (
         f"✅ 已同步 Binance 倉位\n"
-        f"方向: {direction} | 數量: {actual_qty:.4f} ETH | 資金使用率: {capital_usage_ratio*100:.2f}%\n"
+        f"方向: {direction} | 數量: {actual_qty:.4f} BTC | 資金使用率: {capital_usage_ratio*100:.2f}%\n"
         f"進場: {entry_price:.2f} | 現價: {mark_price:.2f} | 槓桿: {leverage}x\n"
         f"TP: {tp_text} | SL: {sl_text}"
     )
@@ -6057,12 +6024,12 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
     leverage = max(1, _safe_int(row.get("leverage"), DEFAULT_LEV))
     price_ref = _safe_float(mark_price, 0.0) or _safe_float(row.get("markPrice"), 0.0) or _safe_float(WS_PRICE, 0.0)
     if reduce:
-        qty = _calc_copy_trade_qty(delta_ratio, leverage=leverage, eth_price=price_ref)
+        qty = _calc_copy_trade_qty(delta_ratio, leverage=leverage, asset_price=price_ref)
     else:
         qty = _calc_copy_trade_qty_with_buffer(
             delta_ratio,
             leverage=leverage,
-            eth_price=price_ref,
+            asset_price=price_ref,
             enforce_min=False,
         )
 
@@ -6111,7 +6078,7 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
             return _calc_copy_trade_qty_with_buffer(
                 delta_ratio,
                 leverage=leverage,
-                eth_price=price_ref,
+                asset_price=price_ref,
                 extra_buffer_ratio=buffer_ratio,
                 enforce_min=False,
             )
@@ -6209,6 +6176,28 @@ def _estimate_trade_cost_rate_est(hold_hours=None) -> float:
     funding_rate_abs = abs(_safe_float(POSITION_PANEL_STATE.get("funding_rate"), 0.0))
     funding_cost_rate_est = max(0.0, funding_rate_abs * max(hours / 8.0, 0.0))
     return fee_round_trip_rate + est_slippage_rate + funding_cost_rate_est
+
+
+def _ensure_minimum_net_profit_tp(direction, entry, tp, hold_hours=None):
+    """Keep a TP beyond estimated costs so a nominal TP cannot close at a net loss."""
+    direction = str(direction or "").lower()
+    entry = _safe_float(entry, 0.0)
+    tp = _safe_float(tp, 0.0)
+    if direction not in {"long", "short"} or entry <= 0 or tp <= 0:
+        return tp, 0.0
+
+    min_net_profit_rate = max(
+        0.0002,
+        _safe_float(os.getenv("TRADE_TP_MIN_NET_PROFIT_RATE", 0.0005), 0.0005),
+    )
+    required_rate = _estimate_trade_cost_rate_est(hold_hours=hold_hours) + min_net_profit_rate
+    tick_size = max(0.01, _safe_float(os.getenv("TRADE_PRICE_TICK_SIZE", 0.01), 0.01))
+    if direction == "long":
+        required_tp = math.ceil((entry * (1 + required_rate)) / tick_size) * tick_size
+        return max(tp, required_tp), required_rate
+
+    required_tp = math.floor((entry * (1 - required_rate)) / tick_size) * tick_size
+    return min(tp, required_tp), required_rate
 
 
 def _is_break_even_or_better(direction, entry, sl) -> bool:
@@ -7366,6 +7355,13 @@ def maybe_shrink_tp_after_hold(current_price=None, now_ts=None):
     else:
         return False
 
+    hold_hours = max(0.0, (resolved_now_ts - open_ts) / 3600.0)
+    new_tp, _ = _ensure_minimum_net_profit_tp(
+        direction,
+        entry_ref,
+        new_tp,
+        hold_hours=hold_hours,
+    )
     active_trade["tp"] = round(new_tp, 2)
     active_trade["tp_sl_adjusted_4h"] = True
     sync_position_panel(current_price or entry_ref)
@@ -13172,7 +13168,7 @@ def ask_ai_analysis(prompt, market_context=None, question="", learning_limit=Non
         {
             "role": "system",
             "content": (
-                "你是一個專業 ETH 交易分析師。只根據使用者提供的市場資料分析，"
+                "你是一個專業 BTC 交易分析師。只根據使用者提供的市場資料分析，"
                 "清楚區分事實與推論，不承諾獲利，並用繁體中文簡潔回答。"
             ),
         },
@@ -13222,7 +13218,7 @@ def _start_mlx_auto_analysis(period_key, market_context):
         try:
             with _MLX_AUTO_ANALYSIS_LOCK:
                 prompt = f"""
-你是 ETH 影子交易分析 Agent。根據以下資料建立影子交易預測。
+你是 BTC 影子交易分析 Agent。根據以下資料建立影子交易預測。
 這是無資金風險的研究分析，絕對不會送出真實委託。
 影子開單數量不設上限，可同時建立多筆做多或做空預測。每筆先等待指定進場價觸發，
 成交後持續追蹤到 TP 或 SL 其中一個先到。TP 先到才算成功，SL 先到算失敗，
@@ -13597,14 +13593,14 @@ def handle_ai_command(text, context=None):
     if text.startswith("/start"):
         if is_private_chat:
             send_control_panel(chat_id)
-        return "歡迎使用 ETH bot\n\n" + _build_bot_help_text()
+        return "歡迎使用 BTC bot\n\n" + _build_bot_help_text()
 
     if text.startswith("/help"):
         return _build_bot_help_text()
 
     if text.startswith("/privacy"):
         return (
-            "🔐 ETH bot 隱私政策\n"
+            "🔐 BTC bot 隱私政策\n"
             "https://josh940085.github.io/ETH-bot/privacy.html\n\n"
             "只接受白名單私聊；必要狀態以加密方式保存，金鑰分離存放；"
             "不販售或分享 Telegram 個資。可用 /stop 停止通知，"
@@ -13807,7 +13803,7 @@ def handle_ai_command(text, context=None):
 
         # 注入你系統數據（核心升級）
         prompt = f"""
-你是一個專業ETH交易分析師，請根據以下即時市場數據進行分析：
+你是一個專業BTC交易分析師，請根據以下即時市場數據進行分析：
 
 【市場數據】
 價格: {context.get('price')}
@@ -13873,7 +13869,7 @@ Volume Spike: {context.get('volume_spike')}
 
     if text.startswith("/panel") or text.startswith("/menu"):
         send_control_panel(chat_id)
-        return "✅ 已送出倉位面板 / 跟單設定 / 一鍵平倉控制面板"
+        return "✅ 已送出倉位摘要 / 跟單設定 / 一鍵平倉控制面板"
 
     if is_private_chat and text:
         if text.startswith("/"):

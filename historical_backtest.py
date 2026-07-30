@@ -151,6 +151,7 @@ def main():
             cmd = [
                 sys.executable,
                 str(BACKTEST_FILE),
+                "--symbol", os.getenv("HISTORICAL_BACKTEST_SYMBOL", "BTCUSDT"),
                 "--start", start,
                 "--end", end,
                 "--warmup-bars", os.getenv("HISTORICAL_BACKTEST_WARMUP_BARS", "1500"),

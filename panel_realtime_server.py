@@ -141,7 +141,7 @@ def _resolve_panel_port(default: int = 8787) -> int:
 
 WS_PING_INTERVAL_SEC = max(10.0, _safe_float_env("POSITION_PANEL_WS_PING_INTERVAL_SEC", 20.0))
 
-app = FastAPI(title="ETH Bot Panel Realtime", version="1.0.0")
+app = FastAPI(title="BTC Bot Panel Realtime", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_load_origins(),
@@ -558,8 +558,8 @@ def _fetch_market_klines_sync(symbol: str, interval: str, limit: int):
     if interval == "1m" and str(source or "").lower().startswith("coinbase") and parsed:
         try:
             ticker_response = requests.get(
-                "https://api.exchange.coinbase.com/products/ETH-USD/ticker",
-                headers={"User-Agent": "ETH-bot/1.0"},
+                "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+                headers={"User-Agent": "BTC-bot/1.0"},
                 timeout=5,
             )
             ticker_response.raise_for_status()
