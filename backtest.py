@@ -890,8 +890,13 @@ def _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, c
 
 
 def _build_low_flat_24h_candidate(decision, frame_now, current_price, ts, last_trade_time):
-    min_idle_hours = max(0.0, eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_MIN_IDLE_HOURS", 2.0), 2.0))
+    min_idle_hours = max(0.0, eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_MIN_IDLE_HOURS", 8.0), 8.0))
     if last_trade_time and (float(ts.timestamp()) - float(last_trade_time)) < min_idle_hours * 3600.0:
+        return None
+
+    max_event_risk = max(0, eth._safe_int(os.getenv("BACKTEST_LOW_FLAT_MAX_EVENT_RISK", 0), 0))
+    event_risk = eth._safe_int(decision.get("event_risk"), 0)
+    if event_risk > max_event_risk:
         return None
 
     frame_5m = frame_now.get("5m")
@@ -911,6 +916,11 @@ def _build_low_flat_24h_candidate(decision, frame_now, current_price, ts, last_t
     slow_ma = float(closes_5m.tail(36).mean())
     rsi_15m = eth._safe_float(decision.get("rsi_15m"), 50.0)
     threshold = max(0.0002, eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_MOMENTUM_THRESHOLD", 0.0012), 0.0012))
+    news_bias = eth._safe_float(decision.get("news_bias"), 0.0)
+    news_align_threshold = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_NEWS_ALIGN_THRESHOLD", 0.25), 0.25),
+    )
 
     if momentum >= threshold and fast_ma >= slow_ma:
         direction = "long"
@@ -918,15 +928,23 @@ def _build_low_flat_24h_candidate(decision, frame_now, current_price, ts, last_t
     elif momentum <= -threshold and fast_ma <= slow_ma:
         direction = "short"
         reason = "momentum_follow"
-    elif rsi_15m <= 42:
+    elif rsi_15m <= 42 and news_bias >= -news_align_threshold:
         direction = "long"
         reason = "rsi_reversion"
-    elif rsi_15m >= 58:
+    elif rsi_15m >= 58 and news_bias <= news_align_threshold:
         direction = "short"
         reason = "rsi_reversion"
-    else:
+    elif is_truthy(os.getenv("BACKTEST_LOW_FLAT_ALLOW_SCORE_TIEBREAK", "0")):
         direction = "long" if eth._safe_float(decision.get("score"), 0.5) >= 0.5 else "short"
         reason = "score_tiebreak"
+    else:
+        return None
+
+    if news_align_threshold > 0 and abs(news_bias) >= news_align_threshold:
+        if direction == "long" and news_bias < 0:
+            return None
+        if direction == "short" and news_bias > 0:
+            return None
 
     atr_decision = eth._safe_float(decision.get("atr"), 0.0)
     range_5m = (frame_5m["high"].astype(float) - frame_5m["low"].astype(float)).tail(24).mean()
@@ -972,12 +990,64 @@ def _build_low_flat_24h_candidate(decision, frame_now, current_price, ts, last_t
             "reasons": list(host_logic.get("reasons") or []) + [
                 f"low_flat_idle>={min_idle_hours:.2f}h",
                 reason,
+                f"news_bias={news_bias:+.2f}",
+                f"event_risk<={max_event_risk}",
                 "max_hold_24h",
             ],
         }
     )
     candidate["host_opening_logic"] = host_logic
     return final, float(score), candidate
+
+
+def _low_flat_news_allows_entry(decision, direction, daily_min_forced=False):
+    if daily_min_forced:
+        return True
+    max_event_risk = max(0, eth._safe_int(os.getenv("BACKTEST_LOW_FLAT_MAX_EVENT_RISK", 0), 0))
+    event_risk = eth._safe_int(decision.get("event_risk"), 0)
+    if event_risk > max_event_risk:
+        return False
+    news_bias = eth._safe_float(decision.get("news_bias"), 0.0)
+    news_align_threshold = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_NEWS_ALIGN_THRESHOLD", 0.25), 0.25),
+    )
+    if news_align_threshold > 0 and is_truthy(os.getenv("BACKTEST_LOW_FLAT_SKIP_STRONG_NEWS", "1")):
+        if abs(news_bias) >= news_align_threshold:
+            return False
+    if news_align_threshold > 0 and abs(news_bias) > 0:
+        if direction == "long" and news_bias <= -news_align_threshold:
+            return False
+        if direction == "short" and news_bias >= news_align_threshold:
+            return False
+    return True
+
+
+def _low_flat_quality_size(decision, default_size=0.001):
+    defensive_size = max(0.001, eth._safe_float(default_size, 0.001))
+    if not is_truthy(os.getenv("BACKTEST_LOW_FLAT_QUALITY_SIZE_ENABLED", "1")):
+        return defensive_size
+    max_risk_pct = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_QUALITY_MAX_RISK_PCT", 1.5), 1.5),
+    )
+    min_reward_pct = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_QUALITY_MIN_REWARD_PCT", 3.0), 3.0),
+    )
+    min_breakout_quality = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_QUALITY_MIN_BREAKOUT_SCORE", 2.0), 2.0),
+    )
+    risk_pct = eth._safe_float(decision.get("risk_rate", 0.0), 0.0) * 100.0
+    reward_pct = eth._safe_float(decision.get("reward_rate", 0.0), 0.0) * 100.0
+    breakout_quality = eth._safe_float(decision.get("breakout_quality_score", 0.0), 0.0)
+    if risk_pct <= max_risk_pct and reward_pct >= min_reward_pct and breakout_quality >= min_breakout_quality:
+        return max(
+            defensive_size,
+            eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_QUALITY_POSITION_SIZE", 0.03), 0.03),
+        )
+    return defensive_size
 
 
 def _noop(*args, **kwargs):
@@ -1064,6 +1134,7 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
     )
     min_open_size = 0.001 if (
         str(host_logic.get("mode") or "") == "daily_minimum"
+        or str(host_logic.get("mode") or "") == "low_flat_24h"
         or counter_trend_probe
         or opposing_turn_probe
         or quality_signal
@@ -1327,7 +1398,8 @@ def _apply_trade_management(open_trade, current_price, atr, ts, favorable_price=
             new_sl=round(sl_after, 4),
         )
 
-    if not profit_locked and not be_triggered:
+    scaling_disabled = str(open_trade.get("trade_source") or "") == "low_flat_24h"
+    if not profit_locked and not be_triggered and not scaling_disabled:
         size_before = float(eth.active_trade.get("size") or open_trade["size"])
         entry_before = float(eth.active_trade.get("avg_entry") or open_trade["avg_entry"])
         add_count_before = int(eth.active_trade.get("add_count") or open_trade["add_count"])
@@ -1863,8 +1935,19 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
             direction = "long" if "做多" in final else "short"
             if invert_signals:
                 direction, final, decision = _invert_entry_signal(direction, final, entry, decision)
+            if low_flat_24h and not _low_flat_news_allows_entry(decision, direction, daily_min_forced=daily_min_forced):
+                continue
             open_trade = _build_open_trade(ts, direction, final, entry, score, decision)
             if low_flat_24h:
+                defensive_size = max(
+                    0.001,
+                    eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_DEFENSIVE_POSITION_SIZE", 0.001), 0.001),
+                )
+                if is_truthy(os.getenv("BACKTEST_LOW_FLAT_DEFENSIVE_SIZING", "1")):
+                    capped_size = _low_flat_quality_size(decision, default_size=defensive_size)
+                    open_trade["size"] = min(float(open_trade.get("size") or capped_size), capped_size)
+                    open_trade["max_size"] = min(float(open_trade.get("max_size") or capped_size), capped_size)
+                    open_trade["min_size"] = min(float(open_trade.get("min_size") or capped_size), capped_size)
                 open_trade["max_hold_sec"] = 24 * 3600.0
                 open_trade["primary_indicator"] = str(open_trade.get("primary_indicator") or "low_flat_24h")
                 host_logic = open_trade.get("host_opening_logic") if isinstance(open_trade.get("host_opening_logic"), dict) else {}

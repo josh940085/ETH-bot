@@ -1,5 +1,7 @@
 import datetime as dt
+import os
 import unittest
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -27,6 +29,8 @@ class LowFlat24hBacktestTests(unittest.TestCase):
             "score": 0.51,
             "atr": 0.5,
             "rsi_15m": 50.0,
+            "news_bias": 0.0,
+            "event_risk": 0,
             "host_opening_logic": {"reasons": ["baseline_wait"]},
         }
 
@@ -44,6 +48,156 @@ class LowFlat24hBacktestTests(unittest.TestCase):
         self.assertEqual(candidate["max_hold_sec"], 24 * 3600.0)
         self.assertEqual(candidate["primary_indicator"], "low_flat_24h")
         self.assertEqual(candidate["host_opening_logic"]["mode"], "low_flat_24h")
+
+        trade = backtest._build_open_trade(frame_5m.index[-1], "long", final, 108.0, _score, candidate)
+        self.assertEqual(trade["size"], 0.02)
+
+    def test_low_flat_candidate_can_use_exchange_minimum_size(self):
+        decision = {
+            "tp": 101.0,
+            "sl": 99.0,
+            "position_size": 0.001,
+            "host_opening_logic": {"mode": "low_flat_24h"},
+        }
+
+        trade = backtest._build_open_trade(
+            dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+            "long",
+            "做多（低空倉24h候選）",
+            100.0,
+            0.56,
+            decision,
+        )
+
+        self.assertEqual(trade["size"], 0.001)
+
+    def test_low_flat_candidate_does_not_scale_position(self):
+        decision = {
+            "tp": 101.0,
+            "sl": 99.0,
+            "position_size": 0.001,
+            "host_opening_logic": {"mode": "low_flat_24h"},
+        }
+        trade = backtest._build_open_trade(
+            dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
+            "long",
+            "做多（低空倉24h候選）",
+            100.0,
+            0.56,
+            decision,
+        )
+
+        with (
+            patch.object(backtest.eth, "maybe_lock_profit_after_reversal", return_value=False),
+            patch.object(backtest.eth, "maybe_activate_auto_break_even", return_value=False),
+            patch.object(backtest.eth, "maybe_shrink_tp_after_hold", return_value=False),
+            patch.object(backtest.eth, "_ensure_minimum_net_profit_tp", return_value=(101.0, 0.0)),
+            patch.object(backtest.eth, "manage_position_scaling") as scaling,
+        ):
+            updated = backtest._apply_trade_management(
+                trade,
+                100.5,
+                1.0,
+                dt.datetime(2026, 1, 1, 1, tzinfo=dt.timezone.utc),
+                favorable_price=100.8,
+            )
+
+        scaling.assert_not_called()
+        self.assertEqual(updated["size"], 0.001)
+
+    def test_candidate_rejects_adverse_news_direction(self):
+        frame_5m = _frame(
+            [
+                {"open": 100.0 + i * 0.1, "high": 100.3 + i * 0.1, "low": 99.8 + i * 0.1, "close": 100.1 + i * 0.1, "volume": 1.0}
+                for i in range(80)
+            ]
+        )
+        frame_15m = frame_5m.resample("15min", label="right", closed="right").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna()
+        decision = {
+            "final": "觀望",
+            "score": 0.51,
+            "atr": 0.5,
+            "rsi_15m": 50.0,
+            "news_bias": -0.7,
+            "event_risk": 0,
+            "host_opening_logic": {"reasons": ["baseline_wait"]},
+        }
+
+        result = backtest._build_low_flat_24h_candidate(
+            decision,
+            {"5m": frame_5m, "15m": frame_15m},
+            float(frame_5m["close"].iloc[-1]),
+            frame_5m.index[-1],
+            0.0,
+        )
+
+        self.assertIsNone(result)
+
+    def test_candidate_rejects_high_event_risk_by_default(self):
+        frame_5m = _frame(
+            [
+                {"open": 100.0 + i * 0.1, "high": 100.3 + i * 0.1, "low": 99.8 + i * 0.1, "close": 100.1 + i * 0.1, "volume": 1.0}
+                for i in range(80)
+            ]
+        )
+        frame_15m = frame_5m.resample("15min", label="right", closed="right").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna()
+        decision = {
+            "final": "觀望",
+            "score": 0.51,
+            "atr": 0.5,
+            "rsi_15m": 50.0,
+            "news_bias": 0.0,
+            "event_risk": 1,
+            "host_opening_logic": {"reasons": ["baseline_wait"]},
+        }
+
+        with patch.dict(os.environ, {"BACKTEST_LOW_FLAT_MAX_EVENT_RISK": "0"}):
+            result = backtest._build_low_flat_24h_candidate(
+                decision,
+                {"5m": frame_5m, "15m": frame_15m},
+                float(frame_5m["close"].iloc[-1]),
+                frame_5m.index[-1],
+                0.0,
+            )
+
+        self.assertIsNone(result)
+
+    def test_low_flat_news_gate_rejects_non_daily_event_risk(self):
+        self.assertFalse(
+            backtest._low_flat_news_allows_entry(
+                {"event_risk": 1, "news_bias": 0.0},
+                "long",
+                daily_min_forced=False,
+            )
+        )
+
+    def test_low_flat_news_gate_allows_daily_min_event_risk(self):
+        self.assertTrue(
+            backtest._low_flat_news_allows_entry(
+                {"event_risk": 1, "news_bias": -1.0},
+                "long",
+                daily_min_forced=True,
+            )
+        )
+
+    def test_low_flat_quality_size_allows_only_bounded_high_reward_setups(self):
+        quality = {
+            "risk_rate": 0.012,
+            "reward_rate": 0.035,
+            "breakout_quality_score": 2.0,
+        }
+        weak = {
+            "risk_rate": 0.02,
+            "reward_rate": 0.035,
+            "breakout_quality_score": 2.0,
+        }
+
+        self.assertEqual(backtest._low_flat_quality_size(quality, default_size=0.001), 0.03)
+        self.assertEqual(backtest._low_flat_quality_size(weak, default_size=0.001), 0.001)
 
     def test_time_exposure_reports_trades_over_24h(self):
         start = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
