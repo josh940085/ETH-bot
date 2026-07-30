@@ -86,6 +86,11 @@ def _parse_args():
         action="store_true",
         help="Open short on long signals and long on short signals; live strategy is unchanged.",
     )
+    parser.add_argument(
+        "--low-flat-24h",
+        action="store_true",
+        help="Backtest an offline candidate that reduces flat time and force-closes every trade within 24h.",
+    )
     return parser.parse_args()
 
 
@@ -665,8 +670,49 @@ def _summarize_trade_day_coverage(df, start_dt, end_dt):
     }
 
 
+def _summarize_time_exposure(trades, start_dt, end_dt):
+    total_sec = max(0.0, (end_dt - start_dt).total_seconds())
+    if not trades:
+        return {
+            "flat_time_pct": 100.0 if total_sec > 0 else 0.0,
+            "holding_time_pct": 0.0,
+            "avg_hold_hours": 0.0,
+            "max_hold_hours": 0.0,
+            "trades_over_24h": 0,
+        }
+
+    hold_hours = []
+    holding_sec = 0.0
+    for trade in trades:
+        try:
+            opened = dt.datetime.fromisoformat(str(trade.get("opened_at")).replace("Z", "+00:00"))
+            closed = dt.datetime.fromisoformat(str(trade.get("closed_at")).replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=dt.timezone.utc)
+        if closed.tzinfo is None:
+            closed = closed.replace(tzinfo=dt.timezone.utc)
+        opened = max(opened.astimezone(dt.timezone.utc), start_dt)
+        closed = min(closed.astimezone(dt.timezone.utc), end_dt)
+        duration_sec = max(0.0, (closed - opened).total_seconds())
+        holding_sec += duration_sec
+        hold_hours.append(duration_sec / 3600.0)
+
+    holding_pct = (holding_sec / total_sec * 100.0) if total_sec > 0 else 0.0
+    flat_pct = max(0.0, 100.0 - holding_pct)
+    return {
+        "flat_time_pct": round(flat_pct, 2),
+        "holding_time_pct": round(min(100.0, holding_pct), 2),
+        "avg_hold_hours": round(float(sum(hold_hours) / len(hold_hours)), 3) if hold_hours else 0.0,
+        "max_hold_hours": round(float(max(hold_hours)), 3) if hold_hours else 0.0,
+        "trades_over_24h": int(sum(1 for hours in hold_hours if hours > 24.0001)),
+    }
+
+
 def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source="futures", coverage_start_dt=None):
     coverage_start_dt = coverage_start_dt or start_dt
+    time_exposure = _summarize_time_exposure(trades, coverage_start_dt, end_dt)
     if not trades:
         day_coverage = _summarize_trade_day_coverage(pd.DataFrame(), coverage_start_dt, end_dt)
         return {
@@ -700,6 +746,7 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source
             "by_strategy_version": {},
             "by_mlx_factor": {},
             "trade_day_coverage": day_coverage,
+            "time_exposure": time_exposure,
         }
 
     df = pd.DataFrame(trades)
@@ -749,6 +796,7 @@ def summarize_trades(trades, start_dt, end_dt, symbol, model_loaded, data_source
         "by_strategy_version": _summarize_grouped_trades(df, "strategy_version"),
         "by_mlx_factor": _summarize_mlx_factors(df),
         "trade_day_coverage": _summarize_trade_day_coverage(df, coverage_start_dt, end_dt),
+        "time_exposure": time_exposure,
     }
 
 
@@ -839,6 +887,97 @@ def _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, c
     if final.startswith("觀望"):
         return None
     return final, score, daily_decision
+
+
+def _build_low_flat_24h_candidate(decision, frame_now, current_price, ts, last_trade_time):
+    min_idle_hours = max(0.0, eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_MIN_IDLE_HOURS", 2.0), 2.0))
+    if last_trade_time and (float(ts.timestamp()) - float(last_trade_time)) < min_idle_hours * 3600.0:
+        return None
+
+    frame_5m = frame_now.get("5m")
+    frame_15m = frame_now.get("15m")
+    if frame_5m is None or frame_15m is None or len(frame_5m) < 36 or len(frame_15m) < 20:
+        return None
+
+    closes_5m = frame_5m["close"].astype(float)
+    entry = float(current_price)
+    if entry <= 0:
+        return None
+
+    momentum_bars = max(6, eth._safe_int(os.getenv("BACKTEST_LOW_FLAT_MOMENTUM_BARS", 12), 12))
+    previous = float(closes_5m.iloc[-min(momentum_bars + 1, len(closes_5m))])
+    momentum = (entry - previous) / max(previous, 1e-9)
+    fast_ma = float(closes_5m.tail(12).mean())
+    slow_ma = float(closes_5m.tail(36).mean())
+    rsi_15m = eth._safe_float(decision.get("rsi_15m"), 50.0)
+    threshold = max(0.0002, eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_MOMENTUM_THRESHOLD", 0.0012), 0.0012))
+
+    if momentum >= threshold and fast_ma >= slow_ma:
+        direction = "long"
+        reason = "momentum_follow"
+    elif momentum <= -threshold and fast_ma <= slow_ma:
+        direction = "short"
+        reason = "momentum_follow"
+    elif rsi_15m <= 42:
+        direction = "long"
+        reason = "rsi_reversion"
+    elif rsi_15m >= 58:
+        direction = "short"
+        reason = "rsi_reversion"
+    else:
+        direction = "long" if eth._safe_float(decision.get("score"), 0.5) >= 0.5 else "short"
+        reason = "score_tiebreak"
+
+    atr_decision = eth._safe_float(decision.get("atr"), 0.0)
+    range_5m = (frame_5m["high"].astype(float) - frame_5m["low"].astype(float)).tail(24).mean()
+    atr_ref = max(atr_decision, float(range_5m), entry * 0.001)
+    reward = max(entry * eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_MIN_REWARD_RATE", 0.0035), 0.0035), atr_ref * 2.0)
+    risk = max(entry * eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_MIN_RISK_RATE", 0.0025), 0.0025), atr_ref * 1.4)
+    if direction == "long":
+        tp = entry + reward
+        sl = max(0.01, entry - risk)
+        final = "做多（低空倉24h候選）"
+        score = max(0.56, eth._safe_float(decision.get("score"), 0.5))
+    else:
+        tp = max(0.01, entry - reward)
+        sl = entry + risk
+        final = "做空（低空倉24h候選）"
+        score = min(0.44, eth._safe_float(decision.get("score"), 0.5))
+
+    tp, _required_rate = eth._ensure_minimum_net_profit_tp(direction, entry, tp, hold_hours=24.0)
+    candidate = dict(decision)
+    candidate.update(
+        {
+            "final": final,
+            "tp": float(tp),
+            "sl": float(sl),
+            "position_size": max(0.001, eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_POSITION_SIZE", 0.02), 0.02)),
+            "max_position_size": max(0.001, eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_POSITION_SIZE", 0.02), 0.02)),
+            "max_hold_sec": 24 * 3600.0,
+            "score": float(score),
+            "fake_breakout": False,
+            "primary_indicator": "low_flat_24h",
+            "risk_rate": risk / entry,
+            "reward_rate": abs(tp - entry) / entry,
+            "rr_at_entry": abs(tp - entry) / max(abs(entry - sl), 1e-9),
+        }
+    )
+    host_logic = candidate.get("host_opening_logic") if isinstance(candidate.get("host_opening_logic"), dict) else {}
+    host_logic = dict(host_logic)
+    host_logic.update(
+        {
+            "direction": direction,
+            "mode": "low_flat_24h",
+            "confidence": max(0.52, eth._safe_float(host_logic.get("confidence"), 0.0)),
+            "reasons": list(host_logic.get("reasons") or []) + [
+                f"low_flat_idle>={min_idle_hours:.2f}h",
+                reason,
+                "max_hold_24h",
+            ],
+        }
+    )
+    candidate["host_opening_logic"] = host_logic
+    return final, float(score), candidate
 
 
 def _noop(*args, **kwargs):
@@ -1429,7 +1568,7 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
     }, learning_sample
 
 
-def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", invert_signals=False):
+def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", invert_signals=False, low_flat_24h=False):
     base_5m = fetch_futures_klines(
         symbol=symbol,
         interval="5m",
@@ -1537,6 +1676,17 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
                 and is_truthy(os.getenv("BACKTEST_DAILY_MIN_ROLLOVER_ENABLED", "1"))
                 and _daily_min_due_for_backtest(ts, traded_dates)
             ):
+                atr_5m = float(max(bar_high - bar_low, 0.0))
+                max_hold_sec = float(open_trade.get("max_hold_sec") or 0.0)
+                held_sec = float(ts.timestamp()) - float(open_trade["open_ts"])
+                if max_hold_sec > 0 and held_sec >= max_hold_sec:
+                    equity, trade_record, learning_sample = _close_trade(open_trade, current_price, "MAX_HOLD", ts, equity)
+                    trades.append(trade_record)
+                    if learning_sample is not None:
+                        learning_samples.append(learning_sample)
+                    losing_streak = 0 if trade_record["trade_return"] > 0 else (losing_streak + 1)
+                    open_trade = None
+                    continue
                 equity, trade_record, learning_sample = _close_trade(open_trade, current_price, "DAILY_MIN_ROLLOVER", ts, equity)
                 trades.append(trade_record)
                 if learning_sample is not None:
@@ -1686,6 +1836,11 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
             if daily_anchor_guard and not final.startswith("觀望"):
                 final = "觀望（每日單錨定-等待保底）"
 
+            if final.startswith("觀望") and low_flat_24h:
+                candidate = _build_low_flat_24h_candidate(decision, frame_now, current_price, ts, last_trade_time)
+                if candidate is not None:
+                    final, score, decision = candidate
+
             if final.startswith("觀望"):
                 forced = _maybe_force_daily_min_for_backtest(ts, traded_dates, decision, frame_now, current_price)
                 if forced is not None:
@@ -1709,6 +1864,15 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
             if invert_signals:
                 direction, final, decision = _invert_entry_signal(direction, final, entry, decision)
             open_trade = _build_open_trade(ts, direction, final, entry, score, decision)
+            if low_flat_24h:
+                open_trade["max_hold_sec"] = 24 * 3600.0
+                open_trade["primary_indicator"] = str(open_trade.get("primary_indicator") or "low_flat_24h")
+                host_logic = open_trade.get("host_opening_logic") if isinstance(open_trade.get("host_opening_logic"), dict) else {}
+                host_logic = dict(host_logic)
+                host_logic.setdefault("mode", "low_flat_24h")
+                host_logic["reasons"] = list(host_logic.get("reasons") or []) + ["low_flat_mode_global_24h_cap"]
+                open_trade["host_opening_logic"] = host_logic
+                open_trade["trade_source"] = str(host_logic.get("mode") or open_trade.get("trade_source") or "")
             last_trade_time = ts_sec
             last_trade_direction = direction
             last_entry_price = entry
@@ -1733,6 +1897,7 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
     )
     summary["historical_macro_context"] = macro_context.summary()
     summary["signal_direction_mode"] = "inverted" if invert_signals else "normal"
+    summary["strategy_candidate"] = "low_flat_24h" if low_flat_24h else "baseline"
     return base_5m, trades, summary, learning_samples
 
 
@@ -1746,6 +1911,7 @@ def main():
         args.warmup_bars,
         data_source=args.data_source,
         invert_signals=args.invert_signals,
+        low_flat_24h=args.low_flat_24h,
     )
 
     print("Backtest Summary")
@@ -1754,6 +1920,7 @@ def main():
     print(f"Data source: {summary.get('data_source', 'futures')}")
     print(f"Strategy version: {summary.get('strategy_version')}")
     print(f"Signal direction mode: {summary.get('signal_direction_mode', 'normal')}")
+    print(f"Strategy candidate: {summary.get('strategy_candidate', 'baseline')}")
     print(f"5m bars: {len(base_5m)}")
     print(f"Model loaded: {summary['model_loaded']}")
     print(f"Trades: {summary['trades']}")
@@ -1766,6 +1933,16 @@ def main():
     print(f"Avg RR/AI edge: {summary['avg_rr_at_entry']}/{summary['avg_net_edge_rate_pct']}%")
     print(f"Long/Short: {summary['long_trades']}/{summary['short_trades']}")
     print(f"Exit reasons: {json.dumps(summary['exit_reason_counts'], ensure_ascii=False)}")
+    exposure = summary.get("time_exposure") or {}
+    if exposure:
+        print(
+            "Time exposure: "
+            f"flat={exposure.get('flat_time_pct', 0.0)}%, "
+            f"holding={exposure.get('holding_time_pct', 0.0)}%, "
+            f"avg_hold={exposure.get('avg_hold_hours', 0.0)}h, "
+            f"max_hold={exposure.get('max_hold_hours', 0.0)}h, "
+            f"over_24h={exposure.get('trades_over_24h', 0)}"
+        )
     coverage = summary.get("trade_day_coverage") or {}
     if coverage:
         print(

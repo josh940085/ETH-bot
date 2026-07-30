@@ -159,6 +159,8 @@ def main():
                 "--summary-out", str(summary_temp),
                 "--trades-out", str(trades_temp),
             ]
+            if str(os.getenv("HISTORICAL_BACKTEST_LOW_FLAT_24H", "0")).strip().lower() in {"1", "true", "yes", "on"}:
+                cmd.append("--low-flat-24h")
             print(f"📚 歷史回測 {label}: {' '.join(cmd)}", flush=True)
             result = subprocess.run(cmd, cwd=str(REPO_DIR), env=os.environ.copy(), check=False)
             period_result = {"period": label, "start": start, "end": end, "exit_code": result.returncode}
