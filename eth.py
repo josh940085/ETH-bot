@@ -919,6 +919,34 @@ def _load_position_panel_state():
         raw = json.loads(POSITION_PANEL_FILE.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("position.json is not an object")
+        stored_pair = str(raw.get("pair") or "").strip().upper()
+        if stored_pair and stored_pair != DEFAULT_PAIR and not bool(raw.get("open", False)):
+            raw = dict(raw)
+            raw.update(
+                {
+                    "last_close_reason": "",
+                    "last_close_price": 0.0,
+                    "last_close_ts": 0,
+                    "last_close_candle_high": 0.0,
+                    "last_close_candle_low": 0.0,
+                    "close_hits": [],
+                    "size": 0.0,
+                    "size_ratio": 0.0,
+                    "capital_usage_ratio": 0.0,
+                    "position_notional_usdt": 0.0,
+                    "position_margin_usdt": 0.0,
+                    "binance_qty": 0.0,
+                    "binance_mark_price": 0.0,
+                    "binance_mark_price_ts": 0,
+                    "binance_unrealized_pnl_usdt": 0.0,
+                    "binance_unrealized_pnl_ts": 0,
+                    "estimated_unrealized_pnl_usdt": 0.0,
+                    "daily_trade_date": "",
+                    "daily_trade_opened": False,
+                    "daily_trade_source": "",
+                    "daily_trade_opened_ts": 0,
+                }
+            )
     except Exception:
         return {
             "last_close_reason": "",

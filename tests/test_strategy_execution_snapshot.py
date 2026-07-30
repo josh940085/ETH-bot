@@ -1,5 +1,8 @@
+import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
@@ -562,6 +565,34 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         self.assertEqual(qty, eth.COPY_TRADE_MIN_QTY)
         self.assertEqual(buffered_qty, 0.0)
+
+    def test_position_state_drops_flat_previous_symbol_trade_history(self):
+        old_path = eth.POSITION_PANEL_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                eth.POSITION_PANEL_FILE = Path(tmpdir) / "position.json"
+                eth.POSITION_PANEL_FILE.write_text(
+                    json.dumps(
+                        {
+                            "pair": "ETHUSDT",
+                            "open": False,
+                            "last_close_reason": "SL",
+                            "last_close_price": 1900,
+                            "close_hits": [{"reason": "SL", "price": 1900, "ts": 1}],
+                            "daily_trade_date": "2026-07-30",
+                            "daily_trade_opened": True,
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                state = eth._load_position_panel_state()
+
+            self.assertEqual(state["last_close_reason"], "")
+            self.assertEqual(state["last_close_price"], 0.0)
+            self.assertEqual(state["close_hits"], [])
+            self.assertFalse(state["daily_trade_opened"])
+        finally:
+            eth.POSITION_PANEL_FILE = old_path
 
     def test_panel_marks_binance_as_authoritative_for_real_position(self):
         eth.active_trade.update(
