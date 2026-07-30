@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ETH Bot 隱私政策</title>
+  <style>
+    :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #0b1118; color: #e8eef5; line-height: 1.65; }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 22px 64px; }
+    h1, h2 { color: #fff; line-height: 1.25; }
+    h1 { margin-bottom: 6px; }
+    h2 { margin-top: 30px; font-size: 1.15rem; }
+    .updated { color: #9fb0c2; }
+    a { color: #70c7ff; }
+    code { color: #b9e4ff; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>ETH Bot 隱私政策</h1>
+  <p class="updated">最後更新：2026 年 7 月 30 日</p>
+
+  <p>本 Bot 與 Mini App 是獨立的第三方交易管理工具，並非 Telegram 官方服務。服務僅供管理員白名單中的私人帳號使用。</p>
+
+  <h2>收集的資料</h2>
+  <p>在你主動與 Bot 互動時，系統可能處理 Telegram user ID、chat ID、使用者名稱、名字、指令內容、回呼操作、訊息傳送結果與時間。Mini App 會將 Telegram 提供的 <code>initData</code> 送到後端驗證身分；伺服器不信任未驗證的資料。</p>
+
+  <h2>使用目的</h2>
+  <p>資料僅用於驗證白名單、執行你要求的交易控制、回覆指令、傳送已訂閱的交易與維護通知、偵測傳送錯誤，以及保護服務免受未授權操作。Telegram 資料不會出售、用於廣告、建立公開資料集，或提供給第三方訓練 AI。</p>
+
+  <h2>保存與安全</h2>
+  <p>Telegram 執行狀態會加密保存，解密金鑰與資料分開存放，且檔案只允許服務帳號讀寫。待處理指令在執行後刪除；傳送診斷最多保留 7 天及 400 筆。Mini App 的登入資料設有到期時間，並使用加密工作階段避免在網址或瀏覽器儲存中暴露 Telegram user ID。</p>
+
+  <h2>資料分享</h2>
+  <p>回覆與通知會經 Telegram Bot API 傳送。通知工作流可在同一部主機上的 n8n 服務內處理；該流程不會把 Telegram 個資轉交其他外部通知平台。除法律要求外，不會向其他第三方揭露 Telegram 個資。</p>
+
+  <h2>你的控制權</h2>
+  <p>使用 <code>/stop</code> 可停止主動通知，使用 <code>/notifications_on</code> 可重新訂閱，使用 <code>/delete_my_data</code> 可刪除本機留存的 Telegram 使用者資料。服務停止時，除依法必須保存或使用者另行明確同意者外，相關 Telegram 使用者資料會刪除。</p>
+
+  <h2>聯絡方式</h2>
+  <p>請在 Bot 私聊中使用 <code>/privacy</code> 查閱本政策，或由已授權帳號傳送訊息聯絡管理員。政策若有重大變更，Bot 會通知已授權使用者，並保留停止通知與刪除資料的選項。</p>
+</main>
+</body>
+</html>

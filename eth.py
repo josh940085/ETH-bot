@@ -12,6 +12,7 @@ if NotOpenSSLWarning is not None:
     warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
 import requests
+from cryptography.fernet import Fernet
 import datetime
 import time
 import base64
@@ -74,14 +75,17 @@ from mlx_learning import (
 )
 from telegram import (
     fetch_telegram_commands as tg_fetch_telegram_commands,
+    delete_telegram_user_data as tg_delete_telegram_user_data,
     get_follow_mode_enabled as tg_get_follow_mode_enabled,
     get_notification_chat_ids as tg_get_notification_chat_ids,
     is_private_chat_id as tg_is_private_chat_id,
+    is_authorized_telegram_user as tg_is_authorized_telegram_user,
     note_telegram_delivery_event as tg_note_telegram_delivery_event,
     remove_notification_chat as tg_remove_notification_chat,
-    remember_notification_chat as tg_remember_notification_chat,
     resolve_private_chat_id_for_controls as tg_resolve_private_chat_id_for_controls,
+    set_notification_opt_out as tg_set_notification_opt_out,
     toggle_follow_mode_enabled as tg_toggle_follow_mode_enabled,
+    wait_for_telegram_send_slot as tg_wait_for_telegram_send_slot,
 )
 
 LIVE_RUNTIME_ENABLED = str(os.getenv("ETH_BOT_DISABLE_LIVE", "0") or "0").strip().lower() not in {
@@ -329,7 +333,7 @@ POSITION_PANEL_REALTIME_INTERNAL_BASE_URL = str(os.getenv("POSITION_PANEL_REALTI
 POSITION_PANEL_REALTIME_TOKEN = str(os.getenv("POSITION_PANEL_REALTIME_TOKEN", "") or "").strip()
 POSITION_PANEL_REALTIME_HEARTBEAT_SEC = max(3.0, _safe_float_env("POSITION_PANEL_REALTIME_HEARTBEAT_SEC", 5.0))
 POSITION_PANEL_REALTIME_TIMEOUT_SEC = max(0.5, _safe_float_env("POSITION_PANEL_REALTIME_TIMEOUT_SEC", 2.5))
-POSITION_PANEL_SESSION_TTL_SEC = max(300, _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 2592000))
+POSITION_PANEL_SESSION_TTL_SEC = max(300, _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 43200))
 POSITION_PANEL_REALTIME_PORT = max(1, _safe_int_env("POSITION_PANEL_REALTIME_PORT", 8787))
 PANEL_REALTIME_PUBLIC_URL_FILE = data_path("panel_realtime_public_url.txt")
 
@@ -381,12 +385,8 @@ def _panel_session_secret() -> str:
     return secret
 
 
-def _urlsafe_b64encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
-
-
 def _create_panel_session(chat_id) -> str:
-    if not _is_private_chat_id(chat_id):
+    if not tg_is_authorized_telegram_user(chat_id, chat_id, "private"):
         return ""
 
     secret = _panel_session_secret()
@@ -405,13 +405,11 @@ def _create_panel_session(chat_id) -> str:
         "iat": now_ts,
         "exp": now_ts + POSITION_PANEL_SESSION_TTL_SEC,
     }
-    body = _urlsafe_b64encode(
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+    encrypted = Fernet(key).encrypt(
         json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
     )
-    signature = _urlsafe_b64encode(
-        hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
-    )
-    return f"{body}.{signature}"
+    return "v2." + encrypted.decode("ascii")
 
 
 PANEL_REALTIME_PUBLISH_QUEUE = deque(maxlen=1)
@@ -442,10 +440,6 @@ def fetch_telegram_commands(last_update_id=None):
 
 def _is_private_chat_id(chat_id) -> bool:
     return tg_is_private_chat_id(chat_id)
-
-
-def _remember_notification_chat(chat_id):
-    tg_remember_notification_chat(chat_id)
 
 
 def _remove_notification_chat(chat_id):
@@ -4633,6 +4627,7 @@ def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
     if reply_markup is not None:
         payload["reply_markup"] = reply_markup
 
+    tg_wait_for_telegram_send_slot()
     n8n_response = post_n8n_notification(
         "telegram",
         payload,
@@ -13319,6 +13314,10 @@ def _build_bot_help_text():
         "/tpsl 2300 2350 - 同時設定 TP/SL\n"
         "/ai 問題 - AI 分析市場\n"
         "/news - 取得最新新聞\n"
+        "/privacy - 查看隱私政策與資料處理方式\n"
+        "/stop - 停止主動通知\n"
+        "/notifications_on - 重新開啟主動通知\n"
+        "/delete_my_data - 刪除本機留存的 Telegram 個資\n"
         "/fix - 即時修正錯誤\n"
         "/restart - 重啟 bot"
     )
@@ -13570,6 +13569,29 @@ def handle_ai_command(text, context=None):
 
     if text.startswith("/help"):
         return _build_bot_help_text()
+
+    if text.startswith("/privacy"):
+        return (
+            "🔐 ETH bot 隱私政策\n"
+            "https://josh940085.github.io/ETH-bot/privacy.html\n\n"
+            "只接受白名單私聊；必要狀態以加密方式保存，金鑰分離存放；"
+            "不販售或分享 Telegram 個資。可用 /stop 停止通知，"
+            "或用 /delete_my_data 刪除本機留存資料。"
+        )
+
+    if text.startswith("/stop"):
+        tg_set_notification_opt_out(chat_id, True)
+        return "🔕 已停止主動 Telegram 通知。你仍可使用指令；輸入 /notifications_on 可恢復通知。"
+
+    if text.startswith("/notifications_on"):
+        tg_set_notification_opt_out(chat_id, False)
+        return "🔔 已重新開啟主動 Telegram 通知。"
+
+    if text.startswith("/delete_my_data"):
+        deleted = tg_delete_telegram_user_data(chat_id, context.get("user_id"))
+        if deleted:
+            return "🧹 已刪除本機留存的 Telegram 使用者資料。必要的白名單設定仍由系統管理員設定檔管理。"
+        return "⚠️ 無法確認刪除要求，未變更任何資料。"
 
     if text.startswith("/whoami"):
         return _build_whoami_text(context)
@@ -14955,8 +14977,6 @@ def run_bot():
 
                     if not text:
                         continue
-
-                    _remember_notification_chat(chat_id)
 
                     if _handle_control_callback(text, chat_id):
                         continue

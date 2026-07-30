@@ -14,8 +14,10 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 import requests
+from cryptography.fernet import Fernet, InvalidToken
 
 try:
 	import fcntl
@@ -26,6 +28,12 @@ from runtime_paths import data_path
 
 
 TELEGRAM_STATE_FILE = data_path(".telegram_state.json")
+TELEGRAM_SECRET_DIR = Path(
+	str(os.getenv("BOT_SECRET_DIR", TELEGRAM_STATE_FILE.parent.parent / "secrets") or "")
+).expanduser()
+TELEGRAM_STATE_KEY_FILE = TELEGRAM_SECRET_DIR / "telegram_state.key"
+TELEGRAM_SEND_LOCK_FILE = TELEGRAM_STATE_FILE.parent / ".telegram_send_rate"
+TELEGRAM_STATE_ENCRYPTION_PREFIX = "tgstate:v1:"
 TELEGRAM_TOKEN = ""
 
 TELEGRAM_POLL_BACKOFF_SEC = 1.0
@@ -43,21 +51,99 @@ HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "ETH-bot-telegram/1.0"})
 
 
+def _chmod_private(path):
+	try:
+		Path(path).chmod(0o600)
+	except Exception:
+		pass
+
+
+def _load_or_create_state_key() -> bytes:
+	TELEGRAM_STATE_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+	try:
+		TELEGRAM_STATE_KEY_FILE.parent.chmod(0o700)
+	except Exception:
+		pass
+	try:
+		key = TELEGRAM_STATE_KEY_FILE.read_bytes().strip()
+	except FileNotFoundError:
+		key = Fernet.generate_key()
+		try:
+			fd = os.open(
+				str(TELEGRAM_STATE_KEY_FILE),
+				os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+				0o600,
+			)
+		except FileExistsError:
+			key = TELEGRAM_STATE_KEY_FILE.read_bytes().strip()
+		else:
+			with os.fdopen(fd, "wb") as fh:
+				fh.write(key)
+				fh.flush()
+				os.fsync(fh.fileno())
+	_chmod_private(TELEGRAM_STATE_KEY_FILE)
+	# Fernet validates the key length and encoding.
+	Fernet(key)
+	return key
+
+
+def _encode_telegram_state(payload: dict) -> str:
+	raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+	token = Fernet(_load_or_create_state_key()).encrypt(raw).decode("ascii")
+	return TELEGRAM_STATE_ENCRYPTION_PREFIX + token
+
+
+def _decode_telegram_state(raw: str) -> dict:
+	text = str(raw or "").strip()
+	if not text:
+		return {}
+	if text.startswith(TELEGRAM_STATE_ENCRYPTION_PREFIX):
+		token = text[len(TELEGRAM_STATE_ENCRYPTION_PREFIX):].encode("ascii")
+		try:
+			text = Fernet(_load_or_create_state_key()).decrypt(token).decode("utf-8")
+		except (InvalidToken, UnicodeDecodeError) as exc:
+			raise ValueError("encrypted Telegram state could not be decrypted") from exc
+	payload = json.loads(text)
+	if not isinstance(payload, dict):
+		raise ValueError("Telegram state must be a JSON object")
+	return payload
+
+
 def configure_token(token=None):
 	global TELEGRAM_TOKEN
 	if token is None:
 		TELEGRAM_TOKEN = str(os.getenv("TELEGRAM_TOKEN", "") or "").strip()
 	else:
 		TELEGRAM_TOKEN = str(token or "").strip()
+	ensure_telegram_state_encrypted()
 	return TELEGRAM_TOKEN
 
 
 def parse_telegram_state(raw: str) -> dict:
 	try:
-		payload = json.loads(raw) if str(raw).strip() else {}
-		return payload if isinstance(payload, dict) else {}
+		return _decode_telegram_state(raw)
 	except Exception:
 		return {}
+
+
+def ensure_telegram_state_encrypted() -> bool:
+	if not TELEGRAM_STATE_FILE.exists():
+		return True
+	try:
+		raw = TELEGRAM_STATE_FILE.read_text(encoding="utf-8")
+		if raw.strip().startswith(TELEGRAM_STATE_ENCRYPTION_PREFIX):
+			_decode_telegram_state(raw)
+			_chmod_private(TELEGRAM_STATE_FILE)
+			return True
+		payload = _decode_telegram_state(raw)
+		temp_path = TELEGRAM_STATE_FILE.with_name(TELEGRAM_STATE_FILE.name + ".encrypting")
+		temp_path.write_text(_encode_telegram_state(payload), encoding="utf-8")
+		_chmod_private(temp_path)
+		os.replace(temp_path, TELEGRAM_STATE_FILE)
+		return True
+	except Exception as exc:
+		print(f"⚠️ Telegram state 加密遷移失敗: {exc}")
+		return False
 
 
 def read_telegram_state_locked() -> dict:
@@ -71,7 +157,7 @@ def read_telegram_state_locked() -> dict:
 			raw = fh.read()
 			if fcntl is not None:
 				fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-		return parse_telegram_state(raw)
+		return _decode_telegram_state(raw)
 	except Exception:
 		return {}
 
@@ -79,19 +165,36 @@ def read_telegram_state_locked() -> dict:
 def update_telegram_state(mutator):
 	try:
 		TELEGRAM_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+		if not TELEGRAM_STATE_FILE.exists():
+			try:
+				fd = os.open(
+					str(TELEGRAM_STATE_FILE),
+					os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+					0o600,
+				)
+			except FileExistsError:
+				pass
+			else:
+				os.close(fd)
 		with TELEGRAM_STATE_FILE.open("a+", encoding="utf-8") as fh:
 			if fcntl is not None:
 				fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
 
 			fh.seek(0)
-			payload = parse_telegram_state(fh.read())
+			raw = fh.read()
+			try:
+				payload = _decode_telegram_state(raw)
+			except Exception as exc:
+				print(f"⚠️ Telegram state 解密失敗，拒絕覆寫: {exc}")
+				return None
 			result = mutator(payload)
 
 			fh.seek(0)
 			fh.truncate()
-			fh.write(json.dumps(payload, ensure_ascii=False))
+			fh.write(_encode_telegram_state(payload))
 			fh.flush()
 			os.fsync(fh.fileno())
+			_chmod_private(TELEGRAM_STATE_FILE)
 
 			if fcntl is not None:
 				fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
@@ -123,6 +226,105 @@ def is_private_chat_id(chat_id) -> bool:
 		return False
 
 
+def get_allowed_telegram_user_ids() -> set:
+	allowed = set()
+	for env_name in (
+		"POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS",
+		"TELEGRAM_PRIVATE_CHAT_ID",
+		"TELEGRAM_CHAT_ID",
+	):
+		raw = str(os.getenv(env_name, "") or "")
+		for item in re.split(r"[\s,;]+", raw):
+			try:
+				value = int(item.strip())
+			except Exception:
+				continue
+			if value > 0:
+				allowed.add(value)
+	return allowed
+
+
+def is_authorized_telegram_user(chat_id=None, user_id=None, chat_type="") -> bool:
+	if str(chat_type or "").strip().lower() != "private":
+		return False
+	if not is_private_chat_id(chat_id):
+		return False
+	try:
+		resolved_user_id = int(str(user_id if user_id not in (None, "") else chat_id).strip())
+		resolved_chat_id = int(str(chat_id).strip())
+	except Exception:
+		return False
+	allowed = get_allowed_telegram_user_ids()
+	return bool(allowed and resolved_user_id == resolved_chat_id and resolved_user_id in allowed)
+
+
+def _notification_opt_out_ids(payload=None) -> set:
+	state = payload if isinstance(payload, dict) else read_telegram_state_locked()
+	result = set()
+	for item in state.get("notification_opt_out_ids", []) if isinstance(state, dict) else []:
+		try:
+			value = int(str(item).strip())
+		except Exception:
+			continue
+		if value > 0:
+			result.add(value)
+	return result
+
+
+def set_notification_opt_out(chat_id, opted_out=True):
+	try:
+		chat_num = int(str(chat_id).strip())
+	except Exception:
+		return False
+	if chat_num <= 0 or chat_num not in get_allowed_telegram_user_ids():
+		return False
+
+	def _mutate(payload):
+		ids = _notification_opt_out_ids(payload)
+		if opted_out:
+			ids.add(chat_num)
+		else:
+			ids.discard(chat_num)
+		payload["notification_opt_out_ids"] = sorted(ids)
+		return True
+
+	return bool(update_telegram_state(_mutate))
+
+
+def delete_telegram_user_data(chat_id, user_id=None) -> bool:
+	try:
+		chat_text = str(int(str(chat_id).strip()))
+		user_text = str(int(str(user_id if user_id not in (None, "") else chat_id).strip()))
+	except Exception:
+		return False
+
+	def _belongs(item):
+		if not isinstance(item, dict):
+			return False
+		return normalize_chat_id(item.get("chat_id")) == chat_text or normalize_chat_id(item.get("user_id")) == user_text
+
+	def _mutate(payload):
+		for key in ("notify_chat_ids", "notification_opt_out_ids"):
+			items = payload.get(key)
+			if isinstance(items, list):
+				payload[key] = [
+					item for item in items
+					if normalize_chat_id(item) not in {chat_text, user_text}
+				]
+		if normalize_chat_id(payload.get("last_private_chat_id")) == chat_text:
+			payload.pop("last_private_chat_id", None)
+		for key in ("pending_commands", "telegram_delivery_events"):
+			items = payload.get(key)
+			if isinstance(items, list):
+				payload[key] = [item for item in items if not _belongs(item)]
+		summary = payload.get("telegram_delivery_summary")
+		if isinstance(summary, dict) and normalize_chat_id(summary.get("last_error_chat_id")) == chat_text:
+			payload.pop("telegram_delivery_summary", None)
+		return True
+
+	return bool(update_telegram_state(_mutate))
+
+
 def _remember_notification_chat_mutate(payload, chat_id):
 	chat_text = normalize_chat_id(chat_id)
 	if not chat_text:
@@ -133,7 +335,7 @@ def _remember_notification_chat_mutate(payload, chat_id):
 	except Exception:
 		return
 
-	if chat_num <= 0:
+	if chat_num <= 0 or chat_num not in get_allowed_telegram_user_ids():
 		return
 
 	notify_ids = payload.get("notify_chat_ids")
@@ -202,14 +404,23 @@ def get_notification_chat_ids():
 	targets = []
 	seen = set()
 
+	payload = read_telegram_state_locked()
+	allowed = get_allowed_telegram_user_ids()
+	opted_out = _notification_opt_out_ids(payload)
+
 	def _append(value):
 		chat_text = normalize_chat_id(value)
 		if not chat_text or chat_text in seen:
 			return
+		try:
+			chat_num = int(chat_text)
+		except Exception:
+			return
+		if chat_num not in allowed or chat_num in opted_out:
+			return
 		seen.add(chat_text)
 		targets.append(chat_text)
 
-	payload = read_telegram_state_locked()
 	notify_ids = payload.get("notify_chat_ids")
 	if isinstance(notify_ids, list):
 		for item in notify_ids:
@@ -395,7 +606,7 @@ def resolve_private_chat_id_for_controls(chat_id=None):
 	candidate = normalize_chat_id(chat_id)
 	if candidate:
 		try:
-			if int(candidate) > 0:
+			if int(candidate) in get_allowed_telegram_user_ids():
 				return candidate
 		except Exception:
 			pass
@@ -404,11 +615,13 @@ def resolve_private_chat_id_for_controls(chat_id=None):
 	candidate = normalize_chat_id(payload.get("last_private_chat_id"))
 	if candidate:
 		try:
-			if int(candidate) > 0:
+			if int(candidate) in get_allowed_telegram_user_ids():
 				return candidate
 		except Exception:
 			pass
 
+	for candidate_num in sorted(get_allowed_telegram_user_ids()):
+		return str(candidate_num)
 	return None
 
 
@@ -418,7 +631,6 @@ def _append_pending_command(chat_id, text, update_id, user_id=None, username="",
 		if not isinstance(queue, list):
 			queue = []
 
-		_remember_notification_chat_mutate(payload, chat_id)
 		queue.append(
 			{
 				"chat_id": chat_id,
@@ -443,7 +655,6 @@ def _append_pending_callback(chat_id, callback_data, callback_id, message_id, up
 		if not isinstance(queue, list):
 			queue = []
 
-		_remember_notification_chat_mutate(payload, chat_id)
 		queue.append(
 			{
 				"chat_id": chat_id,
@@ -501,6 +712,7 @@ def send_message(chat_id, text, timeout=5, token=None):
 		return
 
 	try:
+		wait_for_telegram_send_slot()
 		response = HTTP_SESSION.post(
 			f"https://api.telegram.org/bot{resolved_token}/sendMessage",
 			data={"chat_id": chat_id, "text": text},
@@ -525,6 +737,38 @@ def send_message(chat_id, text, timeout=5, token=None):
 			context="telegram.send_message",
 		)
 		return None
+
+
+def wait_for_telegram_send_slot(min_interval_sec=1.05):
+	"""Enforce Telegram's per-chat guidance conservatively across local processes."""
+	interval = max(1.0, float(min_interval_sec or 1.05))
+	TELEGRAM_SEND_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+	with TELEGRAM_SEND_LOCK_FILE.open("a+", encoding="utf-8") as fh:
+		_chmod_private(TELEGRAM_SEND_LOCK_FILE)
+		if fcntl is not None:
+			fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+		fh.seek(0)
+		try:
+			last_ts = float((fh.read() or "0").strip())
+		except Exception:
+			last_ts = 0.0
+		wait_sec = interval - (time.time() - last_ts)
+		if wait_sec > 0:
+			time.sleep(wait_sec)
+		fh.seek(0)
+		fh.truncate()
+		fh.write(f"{time.time():.6f}")
+		fh.flush()
+		os.fsync(fh.fileno())
+		if fcntl is not None:
+			fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _mark_update_consumed(update_id):
+	def _mutate(payload):
+		payload["last_update_id"] = int(update_id)
+
+	update_telegram_state(_mutate)
 
 
 def _is_telegram_poll_conflict_error(err) -> bool:
@@ -666,6 +910,15 @@ def poll_telegram_commands(token=None):
 			cq_msg = cq.get("message", {})
 			cq_msg_id = cq_msg.get("message_id")
 			cq_chat_id = cq_msg.get("chat", {}).get("id")
+			cq_from = cq.get("from", {}) if isinstance(cq.get("from"), dict) else {}
+			cq_chat_type = str(cq_msg.get("chat", {}).get("type", "") or "")
+			if not is_authorized_telegram_user(
+				cq_chat_id,
+				cq_from.get("id"),
+				cq_chat_type,
+			):
+				_mark_update_consumed(update_id)
+				continue
 
 			_append_pending_callback(
 				cq_chat_id,
@@ -673,11 +926,15 @@ def poll_telegram_commands(token=None):
 				cq_id,
 				cq_msg_id,
 				update_id,
-				user_id=cq.get("from", {}).get("id"),
-				username=str(cq.get("from", {}).get("username", "") or ""),
-				first_name=str(cq.get("from", {}).get("first_name", "") or ""),
-				chat_type=str(cq_msg.get("chat", {}).get("type", "") or ""),
+				user_id=cq_from.get("id"),
+				username=str(cq_from.get("username", "") or ""),
+				first_name=str(cq_from.get("first_name", "") or ""),
+				chat_type=cq_chat_type,
 			)
+			continue
+
+		if not is_authorized_telegram_user(chat_id, user_id, chat_type):
+			_mark_update_consumed(update_id)
 			continue
 
 		web_app_data = msg.get("web_app_data") if isinstance(msg, dict) else None
@@ -706,7 +963,6 @@ def poll_telegram_commands(token=None):
 
 		if not text:
 			def _mutate(payload):
-				_remember_notification_chat_mutate(payload, chat_id)
 				payload["last_update_id"] = int(update_id)
 
 			update_telegram_state(_mutate)
@@ -745,6 +1001,12 @@ def fetch_telegram_commands(
 
 		for item in pending_items:
 			if not isinstance(item, dict):
+				continue
+			if not is_authorized_telegram_user(
+				item.get("chat_id"),
+				item.get("user_id"),
+				item.get("chat_type"),
+			):
 				continue
 
 			update_id = item.get("update_id")
@@ -802,15 +1064,24 @@ def fetch_telegram_commands(
 
 		cq = u.get("callback_query")
 		if isinstance(cq, dict) and cq:
+			cq_message = cq.get("message", {}) if isinstance(cq.get("message"), dict) else {}
+			cq_chat = cq_message.get("chat", {}) if isinstance(cq_message.get("chat"), dict) else {}
+			cq_from = cq.get("from", {}) if isinstance(cq.get("from"), dict) else {}
+			if not is_authorized_telegram_user(
+				cq_chat.get("id"),
+				cq_from.get("id"),
+				cq_chat.get("type"),
+			):
+				continue
 			commands.append(
 				{
 					"update_id": update_id,
-					"text": f"__callback__:{str(cq.get('data', '') or '')}:{str(cq.get('id', '') or '')}:{cq.get('message', {}).get('message_id')}",
-					"chat_id": cq.get("message", {}).get("chat", {}).get("id"),
-					"user_id": cq.get("from", {}).get("id"),
-					"username": str(cq.get("from", {}).get("username", "") or ""),
-					"first_name": str(cq.get("from", {}).get("first_name", "") or ""),
-					"chat_type": str(cq.get("message", {}).get("chat", {}).get("type", "") or ""),
+					"text": f"__callback__:{str(cq.get('data', '') or '')}:{str(cq.get('id', '') or '')}:{cq_message.get('message_id')}",
+					"chat_id": cq_chat.get("id"),
+					"user_id": cq_from.get("id"),
+					"username": str(cq_from.get("username", "") or ""),
+					"first_name": str(cq_from.get("first_name", "") or ""),
+					"chat_type": str(cq_chat.get("type", "") or ""),
 				}
 			)
 			continue
@@ -821,6 +1092,9 @@ def fetch_telegram_commands(
 		user_id = from_user.get("id")
 		username = str(from_user.get("username", "") or "")
 		first_name = str(from_user.get("first_name", "") or "")
+		chat_id = message.get("chat", {}).get("id")
+		if not is_authorized_telegram_user(chat_id, user_id, chat_type):
+			continue
 		web_app_data = message.get("web_app_data") if isinstance(message, dict) else None
 		if isinstance(web_app_data, dict):
 			raw_web_app_data = str(web_app_data.get("data", "") or "").strip()
@@ -837,7 +1111,7 @@ def fetch_telegram_commands(
 					{
 						"update_id": update_id,
 						"text": f"{webapp_command_prefix}{action}",
-						"chat_id": message.get("chat", {}).get("id"),
+						"chat_id": chat_id,
 						"user_id": user_id,
 						"username": username,
 						"first_name": first_name,
@@ -850,7 +1124,7 @@ def fetch_telegram_commands(
 			{
 				"update_id": update_id,
 				"text": str(message.get("text", "") or ""),
-				"chat_id": message.get("chat", {}).get("id"),
+				"chat_id": chat_id,
 				"user_id": user_id,
 				"username": username,
 				"first_name": first_name,

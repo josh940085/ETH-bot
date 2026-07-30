@@ -20,8 +20,9 @@ Mini App 如果要在 Telegram 手機端即時更新，不能只靠 `docs/positi
 也就是說：
 
 - Bot 推送仍用 `POSITION_PANEL_REALTIME_TOKEN`
-- Mini App 讀取則要求合法 Telegram 身分
-- 可再用 `POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS` 限制只允許特定帳號
+- Mini App 讀取要求合法且未過期的 Telegram `initData`
+- Bot 指令、交易控制與 Mini App 全部只接受 `POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS` 白名單中的私聊帳號；白名單未設定時預設拒絕
+- 面板工作階段內容會加密，預設 12 小時失效
 
 ### 啟動 server
 
@@ -36,6 +37,8 @@ python3 panel_realtime_server.py
 POSITION_PANEL_REALTIME_BASE_URL=https://your-public-domain
 POSITION_PANEL_REALTIME_TOKEN=change-me
 POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS=123456789
+POSITION_PANEL_TELEGRAM_AUTH_MAX_AGE_SEC=3600
+POSITION_PANEL_SESSION_TTL_SEC=43200
 DISCORD_WEBHOOK=https://discord.com/api/webhooks/xxx/yyy
 DISCORD_NEWS=https://discord.com/api/webhooks/xxx/yyy
 DISCORD_AUTO_DELETE_HOURS=24
@@ -156,7 +159,8 @@ BOT_AI_DATA_DIR=.runtime/ai
 
 ```bash
 TELEGRAM_TOKEN=...
-TELEGRAM_CHAT_ID=...
+TELEGRAM_PRIVATE_CHAT_ID=...
+POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS=...
 DISCORD_WEBHOOK=...
 DISCORD_NEWS=...
 DISCORD_AUTO_DELETE_HOURS=24
@@ -170,6 +174,8 @@ POSITION_PANEL_REALTIME_TOKEN=change-me
 POSITION_PANEL_REALTIME_TOKEN=change-me
 TELEGRAM_TOKEN=123456:ABCDEF
 POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS=123456789
+POSITION_PANEL_TELEGRAM_AUTH_MAX_AGE_SEC=3600
+POSITION_PANEL_SESSION_TTL_SEC=43200
 POSITION_PANEL_ALLOWED_ORIGINS=https://your-mini-app-domain
 POSITION_PANEL_REALTIME_HOST=0.0.0.0
 POSITION_PANEL_REALTIME_PORT=8787
@@ -215,6 +221,7 @@ Bot 每天預設於台北時間 `23:50` 發送策略勝率巡檢，包含近 24 
 每日巡檢會測試 MLX 的結構化輸出、推論延遲、已驗證樣本與準確率，並檢查近期交易日覆蓋率及扣除每日保底單後的一般策略單密度，避免策略條件過嚴卻被保底單掩蓋；未完成專用影子回測前不會直接取代交易模型。
 每日系統巡檢預設於台北時間 `04:30` 檢查並更新 Python、n8n 與 Homebrew 套件。Python 依 `requirements.txt` 的相依限制更新，n8n 僅自動更新相同主版本；更新後會跑完整測試與語法檢查。需要重啟時會等 Binance 實單、進場確認及送單狀態結束後才依序重啟受影響服務。可用 `MAINTENANCE_PACKAGE_AUTO_UPDATE=0` 關閉自動更新；版本與安全重啟結果分別保存在 `.runtime/data/package_updates_latest.json`、`.runtime/data/package_restart_latest.json`。
 每日 Telegram 巡檢報告使用繁體中文呈現，保留必要的服務名稱與技術數值。
+Telegram 狀態以 Fernet 加密保存在 `.runtime/data/.telegram_state.json`，金鑰分離保存在 `.runtime/secrets/telegram_state.key`，兩者權限均限制為服務帳號讀寫。可用 `/privacy` 查看隱私政策、`/stop` 停止主動通知、`/notifications_on` 恢復通知、`/delete_my_data` 刪除本機留存的 Telegram 使用者資料。
 
 MLX 依賴只會在 Apple Silicon macOS 安裝；Linux／Intel 環境請在 supervisor 設定停用 `mlx-agent`。
 

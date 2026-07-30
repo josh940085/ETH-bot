@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qsl
 
 import requests
+from cryptography.fernet import Fernet, InvalidToken
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -238,16 +239,20 @@ def _viewer_auth_settings():
     panel_token = str(_runtime_env_value("POSITION_PANEL_REALTIME_TOKEN", "") or "").strip()
     max_age_sec = max(
         60,
-        _safe_int_env("POSITION_PANEL_TELEGRAM_AUTH_MAX_AGE_SEC", 86400),
+        _safe_int_env("POSITION_PANEL_TELEGRAM_AUTH_MAX_AGE_SEC", 3600),
     )
     session_ttl_sec = max(
         300,
-        _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 2592000),
+        _safe_int_env("POSITION_PANEL_SESSION_TTL_SEC", 43200),
     )
     allowed_ids = _load_allowed_user_ids(
-        _runtime_env_value(
-            "POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS",
-            _runtime_env_value("TELEGRAM_CHAT_ID", ""),
+        ",".join(
+            str(value or "")
+            for value in (
+                _runtime_env_value("POSITION_PANEL_ALLOWED_TELEGRAM_USER_IDS", ""),
+                _runtime_env_value("TELEGRAM_PRIVATE_CHAT_ID", ""),
+                _runtime_env_value("TELEGRAM_CHAT_ID", ""),
+            )
         )
     )
     return {
@@ -898,22 +903,18 @@ def _validate_panel_session(panel_session: str):
         return None
 
     token = str(panel_session or "").strip()
-    if "." not in token:
+    if not token.startswith("v2."):
         return None
 
-    body, their_sig = token.split(".", 1)
-    if not body or not their_sig:
-        return None
-
-    expected_sig = base64.urlsafe_b64encode(
-        hmac.new(secret.encode("utf-8"), body.encode("utf-8"), hashlib.sha256).digest()
-    ).decode("ascii").rstrip("=")
-    if not hmac.compare_digest(expected_sig, their_sig):
+    encrypted = token[3:].strip()
+    if not encrypted:
         return None
 
     try:
-        payload = json.loads(_urlsafe_b64decode(body).decode("utf-8"))
-    except Exception:
+        key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+        raw = Fernet(key).decrypt(encrypted.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+    except (InvalidToken, UnicodeDecodeError, ValueError, TypeError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -935,7 +936,7 @@ def _validate_panel_session(panel_session: str):
         return None
 
     allowed_ids = settings.get("allowed_ids") or set()
-    if allowed_ids and user_id not in allowed_ids:
+    if not allowed_ids or user_id not in allowed_ids:
         return None
 
     payload["user_id"] = user_id
@@ -984,7 +985,7 @@ def _validate_telegram_init_data(init_data: str):
     except Exception:
         user_id = None
 
-    if allowed_ids and user_id not in allowed_ids:
+    if not allowed_ids or user_id not in allowed_ids:
         return None
 
     payload["user"] = user
@@ -1003,7 +1004,7 @@ def _viewer_authorized_http(request: Request) -> bool:
     if _validate_panel_session(_extract_panel_session_http(request)) is not None:
         return True
     if not telegram_token:
-        return not panel_token
+        return False
     return _validate_telegram_init_data(_extract_init_data_http(request)) is not None
 
 
@@ -1028,7 +1029,7 @@ def _viewer_authorized_ws(websocket: WebSocket) -> bool:
     if _validate_panel_session(_extract_panel_session_ws(websocket)) is not None:
         return True
     if not telegram_token:
-        return not panel_token
+        return False
     return _validate_telegram_init_data(_extract_init_data_ws(websocket)) is not None
 
 
@@ -1074,6 +1075,14 @@ async def root_head():
 @app.get("/favicon.ico")
 async def favicon():
     return Response(status_code=204)
+
+
+@app.get("/privacy.html")
+async def privacy_policy():
+    privacy_path = Path(__file__).resolve().parent / "docs" / "privacy.html"
+    if not privacy_path.exists():
+        raise HTTPException(status_code=404, detail="privacy policy not found")
+    return FileResponse(privacy_path, media_type="text/html")
 
 
 @app.get("/position.json")

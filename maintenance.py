@@ -21,7 +21,14 @@ import requests
 from package_updates import check_and_update_packages
 from runtime_config import load_local_env
 from runtime_paths import REPO_DIR, data_path
-from telegram import configure_token, get_notification_chat_ids, send_message, truncate_text
+from telegram import (
+    configure_token,
+    get_notification_chat_ids,
+    read_telegram_state_locked,
+    remove_notification_chat,
+    send_message,
+    truncate_text,
+)
 
 
 DEFAULT_REPORT_PATH = data_path("maintenance_latest_report.json")
@@ -69,7 +76,6 @@ RUNTIME_CLEANUP_MIN_BYTES = max(
     int(float(os.getenv("MAINTENANCE_RUNTIME_CLEANUP_MIN_MB", "100") or "100") * 1024 * 1024),
 )
 JSON_AUTO_FIX_DEFAULTS = {
-    data_path(".telegram_state.json"): {},
     data_path("news_stats_cache.json"): {},
     data_path("backtest_latest_summary.json"): {},
     data_path("docs", "position.json"): {
@@ -129,9 +135,19 @@ TELEGRAM_BOT_COMMANDS = [
     {"command": "tpsl", "description": "同時設定止盈止損"},
     {"command": "ai", "description": "AI 市場分析"},
     {"command": "news", "description": "取得最新新聞"},
+    {"command": "privacy", "description": "查看隱私政策與資料處理方式"},
+    {"command": "stop", "description": "停止主動通知"},
+    {"command": "notifications_on", "description": "重新開啟主動通知"},
+    {"command": "delete_my_data", "description": "刪除本機留存的 Telegram 個資"},
     {"command": "fix", "description": "即時修正錯誤"},
     {"command": "restart", "description": "重新啟動 bot"},
 ]
+TELEGRAM_BOT_DESCRIPTION = (
+    "白名單限定的 ETH 交易管理 Bot 與 Mini App。"
+    "隱私政策：https://josh940085.github.io/ETH-bot/privacy.html "
+    "可用 /stop 停止通知，或用 /delete_my_data 刪除本機留存資料。"
+)
+TELEGRAM_BOT_SHORT_DESCRIPTION = "白名單限定的 ETH 交易管理工具；使用 /privacy 查看資料處理方式。"
 
 
 def _extract_repair_lines(output, limit=8):
@@ -167,21 +183,6 @@ def _telegram_api_request(token, method, http_method="GET", payload=None, timeou
             description = str(data.get("description", "") or "").strip()
         raise RuntimeError(description or f"Telegram API {method} failed")
     return data.get("result")
-
-
-def _normalize_private_chat_list(values, limit=5):
-    cleaned = []
-    seen = set()
-    for value in values:
-        try:
-            text = str(int(str(value).strip()))
-        except Exception:
-            continue
-        if text.startswith("-") or text in seen:
-            continue
-        seen.add(text)
-        cleaned.append(text)
-    return cleaned[-max(1, int(limit)) :]
 
 
 def _is_https_url(value):
@@ -235,37 +236,6 @@ def _check_telegram_policy_and_repair():
             }
         )
 
-    state_path = data_path(".telegram_state.json")
-    state_payload = _read_json(state_path)
-    if isinstance(state_payload, dict):
-        updated_state = dict(state_payload)
-        original_state = json.dumps(state_payload, ensure_ascii=False, sort_keys=True)
-        normalized_notify = _normalize_private_chat_list(updated_state.get("notify_chat_ids", []))
-        if updated_state.get("notify_chat_ids") != normalized_notify:
-            updated_state["notify_chat_ids"] = normalized_notify
-
-        last_private = updated_state.get("last_private_chat_id")
-        try:
-            last_private_text = str(int(str(last_private).strip()))
-            if last_private_text.startswith("-"):
-                raise ValueError("group id is not allowed")
-            updated_state["last_private_chat_id"] = int(last_private_text)
-        except Exception:
-            if updated_state.get("last_private_chat_id") not in ("", None):
-                updated_state["last_private_chat_id"] = ""
-
-        normalized_state = json.dumps(updated_state, ensure_ascii=False, sort_keys=True)
-        if normalized_state != original_state:
-            _write_json_atomic(state_path, updated_state)
-            repaired.append("telegram_state")
-            repair_details.append(
-                {
-                    "target": state_path.name,
-                    "action": "normalize_private_chat_targets",
-                    "content": json.dumps(updated_state, ensure_ascii=False, indent=2),
-                }
-            )
-
     mini_app_url = str(os.getenv("TELEGRAM_MINI_APP_URL", "") or "").strip()
     if mini_app_url and not _is_https_url(mini_app_url):
         raise RuntimeError(
@@ -299,6 +269,36 @@ def _check_telegram_policy_and_repair():
             }
         )
         repaired.append("commands")
+
+    current_description = _telegram_api_request(token, "getMyDescription", "GET")
+    current_description_text = (
+        str(current_description.get("description", "") or "")
+        if isinstance(current_description, dict)
+        else ""
+    )
+    if current_description_text != TELEGRAM_BOT_DESCRIPTION:
+        _telegram_api_request(
+            token,
+            "setMyDescription",
+            "POST",
+            {"description": TELEGRAM_BOT_DESCRIPTION},
+        )
+        repaired.append("description")
+
+    current_short_description = _telegram_api_request(token, "getMyShortDescription", "GET")
+    current_short_description_text = (
+        str(current_short_description.get("short_description", "") or "")
+        if isinstance(current_short_description, dict)
+        else ""
+    )
+    if current_short_description_text != TELEGRAM_BOT_SHORT_DESCRIPTION:
+        _telegram_api_request(
+            token,
+            "setMyShortDescription",
+            "POST",
+            {"short_description": TELEGRAM_BOT_SHORT_DESCRIPTION},
+        )
+        repaired.append("short_description")
 
     detail = f"bot=@{bot_info.get('username', '')} long_polling_ready=True commands={len(TELEGRAM_BOT_COMMANDS)}"
     return {
@@ -364,7 +364,7 @@ def _count_peak_delivery_rate(events):
 
 def _check_telegram_watch_risk():
     state_path = data_path(".telegram_state.json")
-    state_payload = _read_json(state_path) or {}
+    state_payload = read_telegram_state_locked()
     events = _collect_recent_telegram_delivery_events(state_payload, window_sec=86400)
 
     counts = {}
@@ -383,29 +383,17 @@ def _check_telegram_watch_risk():
         and str(item.get("chat_id", "") or "").strip()
     }
 
-    if removable_chat_ids and isinstance(state_payload, dict):
-        updated_state = dict(state_payload)
-        notify_ids = _normalize_private_chat_list(updated_state.get("notify_chat_ids", []))
-        filtered_notify = [item for item in notify_ids if item not in removable_chat_ids]
-        changed = notify_ids != filtered_notify
-        if changed:
-            updated_state["notify_chat_ids"] = filtered_notify
-
-        last_private = str(updated_state.get("last_private_chat_id", "") or "").strip()
-        if last_private in removable_chat_ids:
-            updated_state["last_private_chat_id"] = ""
-            changed = True
-
-        if changed:
-            _write_json_atomic(state_path, updated_state)
-            repaired.append("stale_chat_targets")
-            repair_details.append(
-                {
-                    "target": state_path.name,
-                    "action": "remove_blocked_or_invalid_chat_targets",
-                    "content": json.dumps(sorted(removable_chat_ids), ensure_ascii=False),
-                }
-            )
+    if removable_chat_ids:
+        for chat_id in sorted(removable_chat_ids):
+            remove_notification_chat(chat_id)
+        repaired.append("stale_chat_targets")
+        repair_details.append(
+            {
+                "target": state_path.name,
+                "action": "remove_blocked_or_invalid_chat_targets",
+                "content": json.dumps(sorted(removable_chat_ids), ensure_ascii=False),
+            }
+        )
 
     risk_level = "low"
     likely_causes = []
@@ -1286,7 +1274,7 @@ def _check_trade_open_status():
         and str(os.getenv("BINANCE_API_SECRET", "") or "").strip()
     )
 
-    telegram_state = _read_json(data_path(".telegram_state.json")) or {}
+    telegram_state = read_telegram_state_locked()
     follow_enabled = bool(telegram_state.get("follow_mode_enabled", False))
     position = _read_json(data_path("docs", "position.json")) or {}
     position_open = bool(position.get("open", False))
