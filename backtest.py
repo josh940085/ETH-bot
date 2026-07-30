@@ -1920,8 +1920,15 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
                     daily_min_forced = True
                 if final.startswith("觀望"):
                     continue
+            host_logic_mode = ""
+            if isinstance(decision.get("host_opening_logic"), dict):
+                host_logic_mode = str(decision["host_opening_logic"].get("mode") or "")
             if (not daily_min_forced) and (
-                decision["fake_breakout"] and abs(score - 0.5) < 0.22
+                (
+                    decision["fake_breakout"]
+                    and host_logic_mode != "manipulation_reversal"
+                    and abs(score - 0.5) < 0.22
+                )
                 or ("做多" in final and decision["resistance_hits"] >= 2 and score < 0.72)
                 or ("做空" in final and decision["support_hits"] >= 2 and score > 0.28)
             ):

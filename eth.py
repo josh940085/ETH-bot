@@ -10089,6 +10089,167 @@ def _score_breakout_quality(
     }
 
 
+def _build_manipulation_reversal_plan(
+    *,
+    price,
+    atr,
+    df_5m,
+    df_15m,
+    fake_breakout,
+    breakout,
+    breakout_attempt,
+    breakout_quality,
+    sweep_high,
+    sweep_low,
+    absorption,
+    buy_pressure,
+    sell_pressure,
+    btc_change,
+    news_bias,
+    event_risk,
+    derivatives_flow,
+    score,
+    regime,
+):
+    """Build a small contrarian entry only when breakout trap evidence is present."""
+    if not _is_truthy(os.getenv("TRADE_MANIPULATION_REVERSAL_ENABLED", "1")):
+        return None
+    price = max(0.0, _safe_float(price, 0.0))
+    atr_ref = max(_safe_float(atr, 0.0), price * 0.001, 1e-9)
+    if price <= 0 or df_5m is None or df_15m is None or len(df_5m) < 10 or len(df_15m) < 4:
+        return None
+    max_event_risk = max(0, _safe_int(os.getenv("TRADE_MANIPULATION_REVERSAL_MAX_EVENT_RISK", 0), 0))
+    if _safe_int(event_risk, 0) > max_event_risk:
+        return None
+
+    news_threshold = max(
+        0.0,
+        _safe_float(os.getenv("TRADE_MANIPULATION_REVERSAL_NEWS_BLOCK_THRESHOLD", 0.35), 0.35),
+    )
+    min_evidence = max(1, _safe_int(os.getenv("TRADE_MANIPULATION_REVERSAL_MIN_EVIDENCE", 1), 1))
+    max_follow_score = max(
+        0.55,
+        min(0.90, _safe_float(os.getenv("TRADE_MANIPULATION_REVERSAL_MAX_FOLLOW_SCORE", 0.76), 0.76)),
+    )
+    min_follow_score = min(
+        0.45,
+        max(0.10, _safe_float(os.getenv("TRADE_MANIPULATION_REVERSAL_MIN_FOLLOW_SCORE", 0.24), 0.24)),
+    )
+    quality = breakout_quality if isinstance(breakout_quality, dict) else {}
+    quality_score = _safe_float(quality.get("score"), 0.0)
+    required_quality = _safe_float(quality.get("required_score"), 3.0)
+    quality_failed = quality_score <= required_quality - max(
+        0.25,
+        _safe_float(os.getenv("TRADE_MANIPULATION_REVERSAL_QUALITY_FAIL_MARGIN", 0.75), 0.75),
+    )
+    trap_attempt = bool(fake_breakout or sweep_high or sweep_low or (_safe_int(breakout_attempt, 0) != 0 and quality_failed))
+    if not trap_attempt:
+        return None
+    long_cluster_reason = _liquidation_cluster_guard_reason("long", derivatives_flow)
+    short_cluster_reason = _liquidation_cluster_guard_reason("short", derivatives_flow)
+
+    attempt = _safe_int(breakout_attempt, 0)
+    confirmed_breakout = _safe_int(breakout, 0)
+    score_value = _safe_float(score, 0.5)
+    upside_evidence = []
+    if sweep_high:
+        upside_evidence.append("sweep_high")
+    if absorption and not buy_pressure:
+        upside_evidence.append("upside_absorption")
+    if _safe_float(btc_change, 0.0) < 0:
+        upside_evidence.append("btc_divergence_down")
+    if long_cluster_reason:
+        upside_evidence.append("long_liquidation_cluster_guard")
+    if quality_failed and attempt == 1:
+        upside_evidence.append("breakout_quality_failed")
+    if confirmed_breakout == 1 and quality_failed:
+        upside_evidence.append("confirmed_breakout_quality_weak")
+
+    downside_evidence = []
+    if sweep_low:
+        downside_evidence.append("sweep_low")
+    if absorption and not sell_pressure:
+        downside_evidence.append("downside_absorption")
+    if _safe_float(btc_change, 0.0) > 0:
+        downside_evidence.append("btc_divergence_up")
+    if short_cluster_reason:
+        downside_evidence.append("short_liquidation_cluster_guard")
+    if quality_failed and attempt == -1:
+        downside_evidence.append("breakdown_quality_failed")
+    if confirmed_breakout == -1 and quality_failed:
+        downside_evidence.append("confirmed_breakdown_quality_weak")
+
+    direction = ""
+    evidence = []
+    if (
+        (attempt == 1 or confirmed_breakout == 1 or sweep_high)
+        and len(set(upside_evidence)) >= min_evidence
+        and score_value <= max_follow_score
+        and not (news_threshold > 0 and _safe_float(news_bias, 0.0) >= news_threshold)
+    ):
+        direction = "short"
+        evidence = list(dict.fromkeys(upside_evidence))
+    elif (
+        (attempt == -1 or confirmed_breakout == -1 or sweep_low)
+        and len(set(downside_evidence)) >= min_evidence
+        and score_value >= min_follow_score
+        and not (news_threshold > 0 and _safe_float(news_bias, 0.0) <= -news_threshold)
+    ):
+        direction = "long"
+        evidence = list(dict.fromkeys(downside_evidence))
+    if direction not in {"long", "short"}:
+        return None
+
+    recent_high = max(_safe_float(df_5m["high"].tail(8).max(), price), _safe_float(df_15m["high"].tail(4).max(), price))
+    recent_low = min(_safe_float(df_5m["low"].tail(8).min(), price), _safe_float(df_15m["low"].tail(4).min(), price))
+    buffer = max(atr_ref * 0.35, price * 0.0015)
+    rr = max(1.2, _safe_float(os.getenv("TRADE_MANIPULATION_REVERSAL_RR", 1.6), 1.6))
+    if direction == "short":
+        sl = max(recent_high + buffer, price + buffer)
+        risk = max(sl - price, atr_ref * 0.55, price * 0.0015)
+        tp = price - risk * rr
+        final = "🪤 假突破反向做空"
+        planned_score = min(0.26, score_value)
+    else:
+        sl = min(recent_low - buffer, price - buffer)
+        risk = max(price - sl, atr_ref * 0.55, price * 0.0015)
+        tp = price + risk * rr
+        final = "🪤 假跌破反向做多"
+        planned_score = max(0.74, score_value)
+    tp, _required_rate = _ensure_minimum_net_profit_tp(direction, price, tp, hold_hours=8.0)
+    size = _cap_initial_position_size(
+        max(
+            0.01,
+            min(
+                0.05,
+                _safe_float(os.getenv("TRADE_MANIPULATION_REVERSAL_SIZE_RATIO", 0.02), 0.02),
+            ),
+        )
+    )
+    confidence = max(
+        0.55,
+        min(0.82, 0.45 + len(set(evidence)) * 0.08 + max(0.0, required_quality - quality_score) * 0.03),
+    )
+    return {
+        "direction": direction,
+        "final": final,
+        "sl": float(sl),
+        "tp": float(tp),
+        "position_size": float(size),
+        "score": float(max(0.05, min(0.95, planned_score))),
+        "confidence": float(confidence),
+        "evidence": evidence[:8],
+        "host_opening_logic": {
+            "direction": direction,
+            "mode": "manipulation_reversal",
+            "confidence": float(confidence),
+            "edge": round(max(0.0, required_quality - quality_score), 3),
+            "reasons": ["fake_breakout_reversal"] + evidence[:7],
+        },
+        "regime": str(regime or ""),
+    }
+
+
 def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
     """多週期支撐壓力 + K線型態分析，可直接餵入已準備好的 K 線資料。"""
     tf_cfg = tf_cfg or [
@@ -11984,6 +12145,7 @@ def build_trade_signal_snapshot(
     sl = None
     tp = None
     position_size = 0.0
+    manipulation_reversal = {}
     macro_indicator_alignment = {"score": 0.0, "aligned": 0, "against": 0, "reasons": []}
     rr_at_entry = 0.0
     risk_rate = 0.0
@@ -12243,6 +12405,62 @@ def build_trade_signal_snapshot(
             0.05,
         )
 
+    if not multitimeframe_bull_reclaim.get("applied"):
+        reversal_plan = _build_manipulation_reversal_plan(
+            price=entry,
+            atr=atr,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            fake_breakout=fake_breakout,
+            breakout=breakout,
+            breakout_attempt=breakout_attempt,
+            breakout_quality=breakout_quality,
+            sweep_high=sweep_high,
+            sweep_low=sweep_low,
+            absorption=absorption,
+            buy_pressure=buy_pressure,
+            sell_pressure=sell_pressure,
+            btc_change=btc_change,
+            news_bias=news_bias,
+            event_risk=event_risk,
+            derivatives_flow=derivatives_flow,
+            score=score,
+            regime=regime,
+        )
+        current_direction_name = get_signal_direction(final)
+        if reversal_plan and (
+            final.startswith("觀望")
+            or (
+                fake_breakout
+                and current_direction_name in {"long", "short"}
+                and current_direction_name != reversal_plan.get("direction")
+            )
+        ):
+            manipulation_reversal = reversal_plan
+            final = str(reversal_plan["final"])
+            sl = float(reversal_plan["sl"])
+            tp = float(reversal_plan["tp"])
+            position_size = float(reversal_plan["position_size"])
+            score = float(reversal_plan["score"])
+            primary_indicator = "manipulation_reversal"
+            host_opening_logic = dict(reversal_plan["host_opening_logic"])
+            learned_entry_logic = dict(learned_entry_logic)
+            learned_entry_logic["direction"] = str(reversal_plan["direction"])
+            learned_entry_logic["confidence"] = max(
+                _safe_float(learned_entry_logic.get("confidence"), 0.0),
+                _safe_float(reversal_plan.get("confidence"), 0.0),
+            )
+            learned_entry_logic["reasons"] = (
+                list(reversal_plan.get("evidence") or [])
+                + list(learned_entry_logic.get("reasons") or [])
+            )[:8]
+            if reversal_plan["direction"] == "long":
+                ai_long_prob = max(ai_long_prob, _safe_float(reversal_plan.get("confidence"), 0.0))
+                ai_prob = max(ai_prob, score)
+            else:
+                ai_short_prob = max(ai_short_prob, _safe_float(reversal_plan.get("confidence"), 0.0))
+                ai_prob = min(ai_prob, score)
+
     if not final.startswith("觀望"):
         final, sl, tp = auto_fix_trade_plan(final, entry, sl, tp, atr)
     previous_month_adr = {}
@@ -12313,6 +12531,7 @@ def build_trade_signal_snapshot(
             and "做多" in final
             and _is_truthy(os.getenv("TRADE_TIGHTEN_LOW_WINRATE_LONGS", "1"))
             and not content_override.get("applied")
+            and str(host_opening_logic.get("mode") or "") != "manipulation_reversal"
         ):
             long_setup = _safe_float(learned_entry_logic.get("long_setup"), 0.0)
             short_setup = _safe_float(learned_entry_logic.get("short_setup"), 0.0)
@@ -12342,6 +12561,7 @@ def build_trade_signal_snapshot(
             ):
                 final = "觀望（多單壓力未突破）"
         if not final.startswith("觀望"):
+            is_manipulation_reversal_entry = str(host_opening_logic.get("mode") or "") == "manipulation_reversal"
             if "做空" in final:
                 conflict_count = 0
                 if mid_trend == 1:
@@ -12352,7 +12572,11 @@ def build_trade_signal_snapshot(
                     conflict_count += 1
                 if derivatives_pressure > 0.12:
                     conflict_count += 1
-                if conflict_count >= 2 and (score > conflict_short_max_score or net_edge_rate_est < conflict_min_edge_rate):
+                if (
+                    not is_manipulation_reversal_entry
+                    and conflict_count >= 2
+                    and (score > conflict_short_max_score or net_edge_rate_est < conflict_min_edge_rate)
+                ):
                     final = "觀望（空單逆向共振不足）"
             elif "做多" in final:
                 conflict_count = 0
@@ -12364,7 +12588,11 @@ def build_trade_signal_snapshot(
                     conflict_count += 1
                 if derivatives_pressure < -0.12:
                     conflict_count += 1
-                if conflict_count >= 2 and (score < conflict_long_min_score or net_edge_rate_est < conflict_min_edge_rate):
+                if (
+                    not is_manipulation_reversal_entry
+                    and conflict_count >= 2
+                    and (score < conflict_long_min_score or net_edge_rate_est < conflict_min_edge_rate)
+                ):
                     final = "觀望（多單逆向共振不足）"
         if not final.startswith("觀望"):
             direction_name = "long" if "做多" in final else "short"
@@ -12418,6 +12646,7 @@ def build_trade_signal_snapshot(
             if (
                 macro_indicator_alignment.get("hard_block")
                 and not multitimeframe_bull_reclaim.get("applied")
+                and str(host_opening_logic.get("mode") or "") != "manipulation_reversal"
             ):
                 final = "觀望（MLX宏觀指標共振不足）"
                 position_size = 0.0
@@ -12458,6 +12687,8 @@ def build_trade_signal_snapshot(
                 and host_mode in {"resistance_rejection", "breakdown_after_support_tests"}
             ):
                 profile_ok = True
+            elif host_mode == "manipulation_reversal" and direction_name in {"long", "short"}:
+                profile_ok = True
             historical_long_quality_ok = True
             if (
                 profile_ok
@@ -12480,6 +12711,24 @@ def build_trade_signal_snapshot(
                     else "觀望（MLX回測輪廓不佳）"
                 )
                 position_size = 0.0
+
+    if manipulation_reversal and final in {
+        "觀望（多單歷史勝率偏低）",
+        "觀望（多單缺少支撐承接或突破確認）",
+        "觀望（多單壓力未突破）",
+        "觀望（空單逆向共振不足）",
+        "觀望（多單逆向共振不足）",
+        "觀望（MLX宏觀指標共振不足）",
+        "觀望（MLX歷史結構品質不足）",
+        "觀望（MLX回測輪廓不佳）",
+    }:
+        final = str(manipulation_reversal["final"])
+        sl = float(manipulation_reversal["sl"])
+        tp = float(manipulation_reversal["tp"])
+        position_size = float(manipulation_reversal["position_size"])
+        score = float(manipulation_reversal["score"])
+        primary_indicator = "manipulation_reversal"
+        host_opening_logic = dict(manipulation_reversal["host_opening_logic"])
 
     breakout_size_multiplier = 1.0
     breakout_max_position_size = 0.0
@@ -12543,6 +12792,7 @@ def build_trade_signal_snapshot(
         "news_bias": news_bias,
         "event_risk": event_risk,
         "fake_breakout": fake_breakout,
+        "manipulation_reversal": manipulation_reversal,
         "triangle": triangle,
         "fvg_low": fvg_low,
         "fvg_high": fvg_high,
@@ -16196,7 +16446,13 @@ def run_bot():
 
             # ===== 最終過濾 =====
             # ===== 最終安全檢查：拒絕假突破低信心單 =====
-            if not final.startswith("觀望") and not daily_min_trade and fake_breakout and abs(score - 0.5) < 0.22:
+            if (
+                not final.startswith("觀望")
+                and not daily_min_trade
+                and fake_breakout
+                and str(host_opening_logic.get("mode") or "") != "manipulation_reversal"
+                and abs(score - 0.5) < 0.22
+            ):
                 final = "觀望（假突破風控攔截）"
 
             # ===== 多週期壓力/支撐阻擋：靠近關鍵反向區域先觀望 =====
