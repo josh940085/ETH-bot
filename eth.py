@@ -606,12 +606,27 @@ def send_control_panel(chat_id=None):
         return
 
     try:
-        _send_telegram_message(
+        res = _send_telegram_message(
             target,
             _build_control_panel_text(force_refresh=True, chat_id=target),
             include_control_panel=True,
         )
+        _note_telegram_delivery_event(
+            chat_id=target,
+            ok=res is not None and res.status_code == 200,
+            status_code=getattr(res, "status_code", "no-response"),
+            body=getattr(res, "text", ""),
+            error="sendMessage returned no response" if res is None else None,
+            context="eth.send_control_panel",
+        )
     except Exception as e:
+        _note_telegram_delivery_event(
+            chat_id=target,
+            ok=False,
+            status_code="exception",
+            error=e,
+            context="eth.send_control_panel",
+        )
         print(f"⚠️ 發送控制面板失敗: {e}")
 
 
@@ -4655,7 +4670,9 @@ def _estimate_panel_financials(entry_price, size_ratio, lev):
 
 def _sanitize_telegram_text(msg):
     raw = str(msg or "")
-    safe_text = raw.replace("<", "").replace(">", "").replace("&", "and")
+    # Telegram sendMessage is sent without parse_mode here. Preserve ampersands
+    # because signed panel URLs rely on query separators such as &state_url=.
+    safe_text = raw.replace("<", "").replace(">", "")
     fallback_text = raw.replace("<", "").replace(">", "")
     return safe_text, fallback_text
 

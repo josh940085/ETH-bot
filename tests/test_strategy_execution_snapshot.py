@@ -44,6 +44,15 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertIn("state_url=https%3A%2F%2Fpanel.example.com%2Fapi%2Fpanel%2Fstate", url)
         self.assertIn("ws_url=wss%3A%2F%2Fpanel.example.com%2Fws%2Fpanel", url)
 
+    def test_telegram_sanitize_preserves_panel_url_query_separators(self):
+        safe_text, fallback_text = eth._sanitize_telegram_text(
+            "https://example.com/?panel_session=v2.test&state_url=https%3A%2F%2Fpanel.example.com"
+        )
+
+        self.assertIn("&state_url=", safe_text)
+        self.assertNotIn("andstate_url=", safe_text)
+        self.assertEqual(safe_text, fallback_text)
+
     def setUp(self):
         self.panel_state = dict(eth.POSITION_PANEL_STATE)
         self.active_trade = dict(eth.active_trade)
