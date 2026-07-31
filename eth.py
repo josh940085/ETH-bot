@@ -413,6 +413,41 @@ def _create_panel_session(chat_id) -> str:
     return "v2." + encrypted.decode("ascii")
 
 
+def _build_position_panel_external_url(chat_id=None) -> str:
+    """Return a private, time-limited browser URL for the position panel.
+
+    This intentionally does not use Telegram KeyboardButton.web_app. The panel
+    contains crypto trading/account state, so the Telegram chat keeps ordinary
+    bot controls while the richer panel opens as a regular external HTTPS page.
+    """
+    target = _resolve_private_chat_id_for_controls(chat_id)
+    if not target:
+        return ""
+
+    state_url, ws_url, _ = _current_panel_realtime_urls()
+    if not state_url and not ws_url:
+        return ""
+
+    session = _create_panel_session(target)
+    if not session:
+        return ""
+
+    base_url = _normalize_mini_app_url(MINI_APP_URL)
+    if not base_url:
+        return ""
+
+    params = {
+        "panel_session": session,
+    }
+    if state_url:
+        params["state_url"] = state_url
+    if ws_url:
+        params["ws_url"] = ws_url
+
+    separator = "&" if "?" in base_url else "?"
+    return f"{base_url}{separator}{urlencode(params)}"
+
+
 PANEL_REALTIME_PUBLISH_QUEUE = deque(maxlen=1)
 PANEL_REALTIME_PUBLISH_EVENT = threading.Event()
 PANEL_REALTIME_QUEUE_LOCK = threading.Lock()
@@ -513,7 +548,7 @@ def _format_control_panel_usdt(value):
     return f"{_safe_float(value, 0.0):,.2f}"
 
 
-def _build_control_panel_text(force_refresh=False):
+def _build_control_panel_text(force_refresh=False, chat_id=None):
     try:
         _refresh_position_panel_account_state(force=force_refresh, log_on_error=False)
     except Exception:
@@ -552,6 +587,16 @@ def _build_control_panel_text(force_refresh=False):
     else:
         lines.append("📡 目前持倉: 無")
 
+    panel_url = _build_position_panel_external_url(chat_id)
+    if panel_url:
+        lines.extend(
+            [
+                "",
+                "📊 倉位面板（外部 HTTPS 連結，非 Telegram Mini App）:",
+                panel_url,
+            ]
+        )
+
     return "\n".join(lines)
 
 
@@ -563,7 +608,7 @@ def send_control_panel(chat_id=None):
     try:
         _send_telegram_message(
             target,
-            _build_control_panel_text(force_refresh=True),
+            _build_control_panel_text(force_refresh=True, chat_id=target),
             include_control_panel=True,
         )
     except Exception as e:

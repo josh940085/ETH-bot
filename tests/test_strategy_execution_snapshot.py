@@ -22,6 +22,28 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertTrue(buttons)
         self.assertFalse(any("web_app" in button for button in buttons))
 
+    def test_control_panel_text_includes_external_position_panel_link(self):
+        with patch.object(eth, "_refresh_position_panel_account_state"), patch.object(
+            eth, "_build_position_panel_external_url", return_value="https://example.com/panel?panel_session=v2.test"
+        ):
+            text = eth._build_control_panel_text(chat_id=123456)
+
+        self.assertIn("📊 倉位面板", text)
+        self.assertIn("外部 HTTPS 連結", text)
+        self.assertIn("https://example.com/panel?panel_session=v2.test", text)
+
+    def test_position_panel_external_url_uses_session_and_realtime_urls(self):
+        with patch.object(eth, "_resolve_private_chat_id_for_controls", return_value="123456"), patch.object(
+            eth, "_current_panel_realtime_urls",
+            return_value=("https://panel.example.com/api/panel/state", "wss://panel.example.com/ws/panel", ""),
+        ), patch.object(eth, "_create_panel_session", return_value="v2.session"):
+            url = eth._build_position_panel_external_url(chat_id=123456)
+
+        self.assertTrue(url.startswith(eth.MINI_APP_URL))
+        self.assertIn("panel_session=v2.session", url)
+        self.assertIn("state_url=https%3A%2F%2Fpanel.example.com%2Fapi%2Fpanel%2Fstate", url)
+        self.assertIn("ws_url=wss%3A%2F%2Fpanel.example.com%2Fws%2Fpanel", url)
+
     def setUp(self):
         self.panel_state = dict(eth.POSITION_PANEL_STATE)
         self.active_trade = dict(eth.active_trade)
