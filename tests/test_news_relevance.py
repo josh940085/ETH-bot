@@ -81,6 +81,78 @@ class NewsRelevanceTests(unittest.TestCase):
                 self.assertTrue(analysis["correction_applied"])
                 self.assertEqual(analysis["correction_reason"], expected_reason)
 
+    def test_auto_corrects_recent_market_drivers(self):
+        cases = [
+            (
+                "Bitcoin rises as spot Bitcoin ETF inflows extend for a fifth straight day",
+                -1,
+                1,
+                "recent_market_driver_bullish_conflict",
+                0,
+            ),
+            (
+                "Bitcoin climbs as Clarity Act progress lifts crypto market sentiment",
+                -1,
+                1,
+                "recent_market_driver_bullish_conflict",
+                0,
+            ),
+            (
+                "Bitcoin rises as U.S.-Iran diplomacy improves risk appetite",
+                -1,
+                1,
+                "recent_market_driver_bullish_conflict",
+                0,
+            ),
+            (
+                "Bitcoin slips near $63K as spot Bitcoin ETF outflows weaken sentiment",
+                1,
+                -1,
+                "recent_market_driver_bearish_conflict",
+                1,
+            ),
+            (
+                "Crypto selloff deepens after $510 million liquidations",
+                1,
+                -1,
+                "recent_market_driver_bearish_conflict",
+                1,
+            ),
+            (
+                "Bitcoin falls as chip stock sell-off and Fed uncertainty weigh",
+                1,
+                -1,
+                "recent_market_driver_bearish_conflict",
+                1,
+            ),
+            (
+                "Clarity Act delay weighs on Bitcoin sentiment",
+                1,
+                -1,
+                "recent_market_driver_bearish_conflict",
+                1,
+            ),
+            (
+                "Oil spikes as Iran conflict escalates and risk assets fall",
+                1,
+                -1,
+                "recent_market_driver_bearish_conflict",
+                1,
+            ),
+        ]
+        for headline, model_bias, expected_bias, expected_reason, expected_event_risk in cases:
+            with self.subTest(headline=headline):
+                with mock.patch.object(
+                    news,
+                    "predict_news_sentiment_with_confidence",
+                    return_value=(model_bias, 0.91),
+                ):
+                    analysis = news.analyze_news_text(headline, log_result=False)
+                self.assertEqual(analysis["bias"], expected_bias)
+                self.assertEqual(analysis["event_risk"], expected_event_risk)
+                self.assertTrue(analysis["correction_applied"])
+                self.assertEqual(analysis["correction_reason"], expected_reason)
+
     def test_auto_corrects_non_directional_headlines_to_neutral(self):
         headlines = [
             "Here's what happened in crypto today",

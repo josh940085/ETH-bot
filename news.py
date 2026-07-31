@@ -64,7 +64,7 @@ NEWS_LEARNING_BUFFER = data_path("learning_buffer.pkl")
 NEWS_EVAL_PENDING_PATH = data_path("news_eval_pending.pkl")
 NEWS_STATS_CACHE_PATH = data_path("news_stats_cache.json")
 NEWS_PUSH_DEDUPE_PATH = data_path("news_push_dedupe.json")
-NEWS_MODEL_VERSION = 5
+NEWS_MODEL_VERSION = 6
 news_model = news_vectorizer = NEWS_EVAL_PENDING = None
 PREDICTION_ACCURACY_CACHE = {"cache_key": None, "stats": None}
 INCREMENTAL_LEARNING_ENABLED = True
@@ -781,6 +781,9 @@ NEWS_TRAINING_DATA = [
     ("Record accumulation by whales", 1),
     ("Dormant whale wallet moves coins to cold storage", 1),
     ("Bitcoin exchange outflows rise as whales buy", 1),
+    ("Bitcoin rises as spot Bitcoin ETF inflows extend for a fifth straight day", 1),
+    ("Clarity Act progress lifts crypto market sentiment", 1),
+    ("Bitcoin rises as U.S.-Iran diplomacy improves risk appetite", 1),
     ("Positive sentiment in market", 1),
     ("Upgrade launches", 1),
     ("Support for crypto regulation", 1),
@@ -807,6 +810,11 @@ NEWS_TRAINING_DATA = [
     ("Whale dump", -1),
     ("Long-term holders distribute Bitcoin supply", -1),
     ("Exchange inflows rise as large holders sell BTC", -1),
+    ("Bitcoin slips as spot Bitcoin ETF outflows weaken sentiment", -1),
+    ("Crypto selloff deepens after $510 million liquidations", -1),
+    ("Bitcoin falls as chip stock sell-off and Fed uncertainty weigh", -1),
+    ("Clarity Act delay weighs on Bitcoin sentiment", -1),
+    ("Oil spikes as Iran conflict escalates and risk assets fall", -1),
     # 宏觀 / 事件類
     ("Fed raises interest rates", 0),
     ("FOMC meeting decision", 0),
@@ -1025,6 +1033,42 @@ def _semantic_news_bias_correction(text, predicted_bias, ai_confidence):
     )
     if any(re.search(pattern, prepared, flags=re.I) for pattern in bear_negations):
         return bias, confidence, "", 0, False
+
+    recent_market_bullish_patterns = (
+        r"\b(?:bitcoin|btc).{0,50}\b(?:spot )?(?:bitcoin|btc)\s*etfs?\b.{0,70}\b(?:inflows?|net inflows?|buying|demand|fifth straight day|continued inflows?)\b",
+        r"\b(?:spot )?(?:bitcoin|btc)\s*etfs?\b.{0,70}\b(?:inflows?|net inflows?|buying|demand|fifth straight day|continued inflows?)\b.{0,50}\b(?:bitcoin|btc)\b",
+        r"\b(?:clarity act|crypto market structure bill|genius act)\b.{0,80}\b(?:advance(?:s|d)?|progress|hopes?|optimism|passage odds rise|ethics provision agreed)\b",
+        r"\b(?:u\.s\.|us)[- ]iran\b.{0,80}\b(?:diplomacy|pause|ceasefire|hold fire|tensions ease|military escalation delayed)\b",
+        r"\b(?:risk appetite|risk sentiment)\b.{0,60}\b(?:improves?|returns?|rebounds?)\b",
+        r"(?:比特幣|btc).{0,30}(?:etf|ETF).{0,30}(?:流入|淨流入|資金流入|連續買入)",
+        r"(?:clarity act|加密法案|市場結構法案).{0,40}(?:推進|進展|樂觀|通過機率上升)",
+        r"(?:美伊|伊朗).{0,35}(?:外交|停火|降溫|暫停攻擊|延後升級)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in recent_market_bullish_patterns):
+        corrected = bias if bias > 0 else 1
+        reason = "recent_market_driver_bullish" if bias > 0 else "recent_market_driver_bullish_conflict"
+        return corrected, max(confidence, 0.80), reason, 0, True
+
+    recent_market_bearish_patterns = (
+        r"\b(?:bitcoin|btc).{0,55}\b(?:spot )?(?:bitcoin|btc)\s*etfs?\b.{0,75}\b(?:outflows?|net outflows?|flows? pause|inflows? pause|weaken(?:s|ed)? sentiment)\b",
+        r"\b(?:spot )?(?:bitcoin|btc)\s*etfs?\b.{0,75}\b(?:outflows?|net outflows?|flows? pause|inflows? pause|weaken(?:s|ed)? sentiment)\b.{0,55}\b(?:bitcoin|btc|crypto)\b",
+        r"\b(?:crypto|bitcoin|btc).{0,70}\b(?:liquidations?|liquidation cascade|long liquidations?)\b",
+        r"\b(?:liquidations?|liquidation cascade|long liquidations?)\b.{0,70}\b(?:crypto|bitcoin|btc)\b",
+        r"\b(?:chip|chipmaker|semiconductor|tech|nasdaq).{0,70}\b(?:sell[- ]off|plunge(?:s|d)?|tumble(?:s|d)?|slide(?:s|d)?|rout)\b",
+        r"\b(?:fed|fomc|powell).{0,70}\b(?:uncertainty|hawkish|higher for longer|rate hike|policy risk)\b",
+        r"\b(?:clarity act|crypto market structure bill|genius act)\b.{0,90}\b(?:delay(?:s|ed)?|stall(?:s|ed)?|obstacle|opposition|hopes? fade|unlikely|could flop|deadline looms)\b",
+        r"\b(?:iran|israel|middle east|hormuz).{0,80}\b(?:escalat(?:e|es|ed|ion)|attack(?:s|ed)?|strike(?:s)?|oil (?:spikes?|surges?|jumps?)|crude (?:spikes?|surges?|jumps?))\b",
+        r"(?:比特幣|btc|加密市場).{0,35}(?:etf|ETF).{0,35}(?:流出|淨流出|資金流出|流入暫停)",
+        r"(?:比特幣|btc|加密市場).{0,35}(?:清算|爆倉|多單清算)",
+        r"(?:晶片|半導體|科技股|nasdaq).{0,30}(?:賣壓|重挫|暴跌|下跌)",
+        r"(?:fed|fomc|鮑爾|聯準會).{0,35}(?:不確定|鷹派|升息|利率風險)",
+        r"(?:clarity act|加密法案|市場結構法案).{0,45}(?:延宕|受阻|拖延|樂觀降溫|通過機率下降)",
+        r"(?:伊朗|中東|霍爾木茲).{0,40}(?:升級|攻擊|油價飆升|油價上漲)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in recent_market_bearish_patterns):
+        corrected = bias if bias < 0 else -1
+        reason = "recent_market_driver_bearish" if bias < 0 else "recent_market_driver_bearish_conflict"
+        return corrected, max(confidence, 0.80), reason, 1, True
 
     whale_bullish_patterns = (
         r"\b(?:bitcoin|btc).{0,30}\bwhales?\b.{0,45}\b(?:accumulat(?:e|es|ed|ion|ing)|buy(?:s|ing)?|add(?:s|ed|ing)?|withdraw(?:s|n|al|als)?|cold storage)\b",
