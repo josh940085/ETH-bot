@@ -184,6 +184,61 @@ class LowFlat24hBacktestTests(unittest.TestCase):
             )
         )
 
+    def test_low_flat_strict_quality_requires_rr_direction_macro_and_edge(self):
+        quality = {
+            "rr_at_entry": 2.1,
+            "event_risk": 1,
+            "ai_long_prob": 0.66,
+            "ai_short_prob": 0.4,
+            "macro_bias": 0.2,
+            "net_edge_rate_est_pct": 0.25,
+            "total_trade_cost_rate_est_pct": 0.1,
+        }
+        self.assertTrue(backtest._low_flat_strict_quality_allows_entry(quality, "long"))
+
+        weak_rr = dict(quality, rr_at_entry=1.9)
+        self.assertFalse(backtest._low_flat_strict_quality_allows_entry(weak_rr, "long"))
+
+        weak_prob = dict(quality, ai_long_prob=0.64)
+        self.assertFalse(backtest._low_flat_strict_quality_allows_entry(weak_prob, "long"))
+
+        macro_against = dict(quality, macro_bias=-0.1)
+        self.assertFalse(backtest._low_flat_strict_quality_allows_entry(macro_against, "long"))
+
+        fee_eats_edge = dict(quality, net_edge_rate_est_pct=0.05)
+        self.assertFalse(backtest._low_flat_strict_quality_allows_entry(fee_eats_edge, "long"))
+
+    def test_low_flat_strict_quality_supports_short_direction(self):
+        quality = {
+            "rr_at_entry": 2.0,
+            "event_risk": 1,
+            "ai_long_prob": 0.4,
+            "ai_short_prob": 0.58,
+            "macro_bias": -0.2,
+            "net_edge_rate_est_pct": 0.2,
+            "total_trade_cost_rate_est_pct": 0.1,
+        }
+
+        self.assertTrue(backtest._low_flat_strict_quality_allows_entry(quality, "short"))
+        self.assertFalse(
+            backtest._low_flat_strict_quality_allows_entry(dict(quality, macro_bias=0.1), "short")
+        )
+
+    def test_forced_max_hold_caps_existing_trade_limit(self):
+        trade = {"max_hold_sec": 48 * 3600.0}
+
+        capped = backtest._apply_forced_max_hold(trade, force_max_hold_hours=24.0)
+
+        self.assertEqual(capped["max_hold_sec"], 24 * 3600.0)
+        self.assertEqual(trade["max_hold_sec"], 48 * 3600.0)
+
+    def test_forced_max_hold_keeps_shorter_existing_trade_limit(self):
+        trade = {"max_hold_sec": 6 * 3600.0}
+
+        capped = backtest._apply_forced_max_hold(trade, force_max_hold_hours=24.0)
+
+        self.assertEqual(capped["max_hold_sec"], 6 * 3600.0)
+
     def test_low_flat_quality_size_allows_only_bounded_high_reward_setups(self):
         quality = {
             "risk_rate": 0.012,

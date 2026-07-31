@@ -91,6 +91,20 @@ def _parse_args():
         action="store_true",
         help="Backtest an offline candidate that reduces flat time and force-closes every trade within 24h.",
     )
+    parser.add_argument(
+        "--low-flat-strict-quality",
+        action="store_true",
+        help=(
+            "Apply stricter offline quality gates to low-flat-24h entries: "
+            "RR, direction probability, macro alignment, event risk, and cost-adjusted edge."
+        ),
+    )
+    parser.add_argument(
+        "--force-max-hold-hours",
+        type=float,
+        default=0.0,
+        help="Offline-only cap that force-closes every replayed trade after this many hours.",
+    )
     return parser.parse_args()
 
 
@@ -1023,6 +1037,83 @@ def _low_flat_news_allows_entry(decision, direction, daily_min_forced=False):
     return True
 
 
+def _low_flat_strict_quality_allows_entry(decision, direction):
+    min_rr = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_STRICT_MIN_RR", 2.0), 2.0),
+    )
+    rr_at_entry = eth._safe_float(decision.get("rr_at_entry"), 0.0)
+    if rr_at_entry < min_rr:
+        return False
+
+    max_event_risk = max(
+        0,
+        eth._safe_int(os.getenv("BACKTEST_LOW_FLAT_STRICT_MAX_EVENT_RISK", 1), 1),
+    )
+    event_risk = eth._safe_int(decision.get("event_risk"), 0)
+    if event_risk > max_event_risk:
+        return False
+
+    direction = str(direction or "").lower()
+    min_long_prob = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_STRICT_MIN_LONG_PROB", 0.65), 0.65),
+    )
+    min_short_prob = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_STRICT_MIN_SHORT_PROB", 0.58), 0.58),
+    )
+    if direction == "long":
+        if eth._safe_float(decision.get("ai_long_prob"), 0.0) < min_long_prob:
+            return False
+    elif direction == "short":
+        if eth._safe_float(decision.get("ai_short_prob"), 0.0) < min_short_prob:
+            return False
+    else:
+        return False
+
+    macro_bias = eth._safe_float(decision.get("macro_bias"), 0.0)
+    min_macro_alignment = eth._safe_float(
+        os.getenv("BACKTEST_LOW_FLAT_STRICT_MIN_MACRO_ALIGNMENT", 0.0),
+        0.0,
+    )
+    if direction == "long" and macro_bias < min_macro_alignment:
+        return False
+    if direction == "short" and macro_bias > -min_macro_alignment:
+        return False
+
+    edge_rate_pct = eth._safe_float(decision.get("net_edge_rate_est_pct"), None)
+    if edge_rate_pct is None:
+        edge_rate_pct = eth._safe_float(decision.get("net_edge_rate_est"), 0.0) * 100.0
+    cost_rate_pct = eth._safe_float(decision.get("total_trade_cost_rate_est_pct"), 0.0)
+    if cost_rate_pct <= 0:
+        fee_pct = eth._safe_float(decision.get("fee_round_trip_rate_pct"), 0.1)
+        funding_pct = abs(eth._safe_float(decision.get("funding_cost_rate_est_pct"), 0.0))
+        cost_rate_pct = fee_pct + funding_pct
+    min_edge_cost_mult = max(
+        0.0,
+        eth._safe_float(os.getenv("BACKTEST_LOW_FLAT_STRICT_MIN_EDGE_COST_MULT", 1.0), 1.0),
+    )
+    if edge_rate_pct < cost_rate_pct * min_edge_cost_mult:
+        return False
+
+    return True
+
+
+def _apply_forced_max_hold(open_trade, force_max_hold_hours=0.0):
+    hours = max(0.0, eth._safe_float(force_max_hold_hours, 0.0))
+    if hours <= 0 or not isinstance(open_trade, dict):
+        return open_trade
+    capped = dict(open_trade)
+    forced_sec = hours * 3600.0
+    current_sec = eth._safe_float(capped.get("max_hold_sec"), 0.0)
+    if current_sec > 0:
+        capped["max_hold_sec"] = min(current_sec, forced_sec)
+    else:
+        capped["max_hold_sec"] = forced_sec
+    return capped
+
+
 def _low_flat_quality_size(decision, default_size=0.001):
     defensive_size = max(0.001, eth._safe_float(default_size, 0.001))
     if not is_truthy(os.getenv("BACKTEST_LOW_FLAT_QUALITY_SIZE_ENABLED", "1")):
@@ -1640,7 +1731,17 @@ def _close_trade(open_trade, exit_price, exit_reason, ts, equity):
     }, learning_sample
 
 
-def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", invert_signals=False, low_flat_24h=False):
+def run_backtest(
+    symbol,
+    start_dt,
+    end_dt,
+    warmup_bars,
+    data_source="auto",
+    invert_signals=False,
+    low_flat_24h=False,
+    low_flat_strict_quality=False,
+    force_max_hold_hours=0.0,
+):
     base_5m = fetch_futures_klines(
         symbol=symbol,
         interval="5m",
@@ -1944,7 +2045,10 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
                 direction, final, decision = _invert_entry_signal(direction, final, entry, decision)
             if low_flat_24h and not _low_flat_news_allows_entry(decision, direction, daily_min_forced=daily_min_forced):
                 continue
+            if low_flat_24h and low_flat_strict_quality and not _low_flat_strict_quality_allows_entry(decision, direction):
+                continue
             open_trade = _build_open_trade(ts, direction, final, entry, score, decision)
+            open_trade = _apply_forced_max_hold(open_trade, force_max_hold_hours=force_max_hold_hours)
             if low_flat_24h:
                 defensive_size = max(
                     0.001,
@@ -1987,7 +2091,12 @@ def run_backtest(symbol, start_dt, end_dt, warmup_bars, data_source="auto", inve
     )
     summary["historical_macro_context"] = macro_context.summary()
     summary["signal_direction_mode"] = "inverted" if invert_signals else "normal"
-    summary["strategy_candidate"] = "low_flat_24h" if low_flat_24h else "baseline"
+    if low_flat_24h and low_flat_strict_quality:
+        summary["strategy_candidate"] = "low_flat_24h_strict_quality"
+    elif (not low_flat_24h) and eth._safe_float(force_max_hold_hours, 0.0) > 0:
+        summary["strategy_candidate"] = f"baseline_max_hold_{eth._safe_float(force_max_hold_hours, 0.0):g}h"
+    else:
+        summary["strategy_candidate"] = "low_flat_24h" if low_flat_24h else "baseline"
     return base_5m, trades, summary, learning_samples
 
 
@@ -2002,6 +2111,8 @@ def main():
         data_source=args.data_source,
         invert_signals=args.invert_signals,
         low_flat_24h=args.low_flat_24h,
+        low_flat_strict_quality=args.low_flat_strict_quality,
+        force_max_hold_hours=args.force_max_hold_hours,
     )
 
     print("Backtest Summary")
