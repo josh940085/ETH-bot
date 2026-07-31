@@ -42,6 +42,45 @@ class NewsRelevanceTests(unittest.TestCase):
                 )
                 self.assertIn("🔧 自動修正:", message)
 
+    def test_auto_corrects_bitcoin_whale_accumulation_and_distribution(self):
+        cases = [
+            (
+                "Bitcoin whales accumulate as exchange outflows rise",
+                -1,
+                1,
+                "bitcoin_whale_accumulation_conflict",
+            ),
+            (
+                "BTC whale deposits 5,000 Bitcoin to Binance before selloff",
+                1,
+                -1,
+                "bitcoin_whale_distribution_conflict",
+            ),
+            (
+                "比特幣巨鯨持續累積並轉出交易所",
+                -1,
+                1,
+                "bitcoin_whale_accumulation_conflict",
+            ),
+            (
+                "巨鯨大額比特幣轉入交易所",
+                1,
+                -1,
+                "bitcoin_whale_distribution_conflict",
+            ),
+        ]
+        for headline, model_bias, expected_bias, expected_reason in cases:
+            with self.subTest(headline=headline):
+                with mock.patch.object(
+                    news,
+                    "predict_news_sentiment_with_confidence",
+                    return_value=(model_bias, 0.91),
+                ):
+                    analysis = news.analyze_news_text(headline, log_result=False)
+                self.assertEqual(analysis["bias"], expected_bias)
+                self.assertTrue(analysis["correction_applied"])
+                self.assertEqual(analysis["correction_reason"], expected_reason)
+
     def test_auto_corrects_non_directional_headlines_to_neutral(self):
         headlines = [
             "Here's what happened in crypto today",
@@ -100,6 +139,10 @@ class NewsRelevanceTests(unittest.TestCase):
         expected = {
             "Bitcoin turns lower as soft U.S. inflation data is offset by Iran tensions": "crypto",
             "Ethereum ETF inflows hit a record high": "crypto",
+            "Bitcoin whales accumulate as exchange balances fall": "crypto",
+            "BTC whale deposits 5,000 Bitcoin to Binance before selloff": "crypto",
+            "Dormant wallet moves Bitcoin to cold storage": "crypto",
+            "巨鯨大額比特幣轉入交易所": "crypto",
             "US CPI rises less than expected": "macro",
             "Fed signals rates may stay higher as inflation persists": "macro",
             "ECB cuts interest rates as European economy slows": "central_bank",

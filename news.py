@@ -64,7 +64,7 @@ NEWS_LEARNING_BUFFER = data_path("learning_buffer.pkl")
 NEWS_EVAL_PENDING_PATH = data_path("news_eval_pending.pkl")
 NEWS_STATS_CACHE_PATH = data_path("news_stats_cache.json")
 NEWS_PUSH_DEDUPE_PATH = data_path("news_push_dedupe.json")
-NEWS_MODEL_VERSION = 4
+NEWS_MODEL_VERSION = 5
 news_model = news_vectorizer = NEWS_EVAL_PENDING = None
 PREDICTION_ACCURACY_CACHE = {"cache_key": None, "stats": None}
 INCREMENTAL_LEARNING_ENABLED = True
@@ -227,8 +227,16 @@ def _local_translate_news_fallback(text):
         ("US Dollar", "美元"),
         ("dollar index", "美元指數"),
         ("Bitcoin", "比特幣"),
+        ("Bitcoin whale", "比特幣巨鯨"),
+        ("whale", "巨鯨"),
         ("Ethereum", "以太幣"),
         ("crypto", "加密貨幣"),
+        ("on-chain", "鏈上"),
+        ("wallet", "錢包"),
+        ("accumulation", "累積買入"),
+        ("accumulates", "累積買入"),
+        ("exchange inflow", "交易所流入"),
+        ("exchange outflow", "交易所流出"),
         ("ETF", "ETF"),
         ("approved", "獲批准"),
         ("approval", "批准"),
@@ -402,6 +410,13 @@ def _news_relevance_reason(text: str) -> str:
         "bitcoin etf", "ethereum etf", "on-chain", "hash rate", "halving", "altcoin",
         "binance", "coinbase", "kraken", "bybit", "okx", "deribit", "grayscale",
         "microstrategy", "exchange hack", "smart contract", "layer 2", "layer2",
+        "whale", "whales", "bitcoin whale", "btc whale", "satoshi-era wallet",
+        "dormant wallet", "large holder", "large holders", "long-term holder",
+        "long-term holders", "mega wallet", "wallet accumulation", "exchange inflow",
+        "exchange inflows", "exchange outflow", "exchange outflows", "exchange deposit",
+        "exchange deposits", "exchange withdrawal", "exchange withdrawals",
+        "鏈上", "巨鯨", "大戶", "比特幣大戶", "大額轉帳", "交易所流入", "交易所流出",
+        "錢包異動", "長期持有者",
     ])
     if direct_crypto:
         return "crypto"
@@ -754,12 +769,18 @@ NEWS_TRAINING_DATA = [
     ("New partnership for Bitcoin announced", 2),
     ("Crypto ETF inflow record high", 2),
     ("Spot Bitcoin ETF approval", 2),
+    ("Bitcoin whales accumulate as exchange balances fall", 2),
+    ("Long-term holders withdraw Bitcoin from exchanges", 2),
+    ("Large holders add BTC in record accumulation", 2),
+    ("比特幣巨鯨持續累積 交易所餘額下降", 2),
     # 利多 - 弱信號
     ("Crypto market rallies higher", 1),
     ("Bitcoin surge", 1),
     ("Ethereum listing on exchange", 1),
     ("Adoption increases", 1),
     ("Record accumulation by whales", 1),
+    ("Dormant whale wallet moves coins to cold storage", 1),
+    ("Bitcoin exchange outflows rise as whales buy", 1),
     ("Positive sentiment in market", 1),
     ("Upgrade launches", 1),
     ("Support for crypto regulation", 1),
@@ -773,6 +794,9 @@ NEWS_TRAINING_DATA = [
     ("Investigation fraud charges", -2),
     ("Exchange suspends withdrawals", -2),
     ("Regulatory ban announced", -2),
+    ("Bitcoin whale deposits large BTC stack to Binance", -2),
+    ("Whale sends thousands of BTC to exchange before selloff", -2),
+    ("巨鯨大額比特幣轉入交易所", -2),
     # 利空 - 弱信號
     ("Crypto market drops lower", -1),
     ("Sell-off in Bitcoin", -1),
@@ -781,6 +805,8 @@ NEWS_TRAINING_DATA = [
     ("Bearish sentiment market", -1),
     ("Price decline", -1),
     ("Whale dump", -1),
+    ("Long-term holders distribute Bitcoin supply", -1),
+    ("Exchange inflows rise as large holders sell BTC", -1),
     # 宏觀 / 事件類
     ("Fed raises interest rates", 0),
     ("FOMC meeting decision", 0),
@@ -912,12 +938,16 @@ def _keyword_bias_score(text):
     bull_words = [
         "approval", "approved", "etf", "inflow", "surge", "rally", "breakout",
         "partnership", "adoption", "upgrade", "listing", "launch", "buyback",
-        "accumulation", "institutional", "rate cut", "stimulus"
+        "accumulation", "accumulate", "accumulates", "institutional", "rate cut",
+        "stimulus", "exchange outflow", "withdrawal from exchange", "cold storage",
+        "long-term holder buying", "whale buys", "whales buy"
     ]
     bear_words = [
         "hack", "exploit", "lawsuit", "ban", "fraud", "bankruptcy", "delist",
         "outflow", "dump", "sell-off", "crash", "plunge", "investigation",
-        "sanction", "rate hike", "liquidation", "withdrawal halt"
+        "sanction", "rate hike", "liquidation", "withdrawal halt",
+        "exchange inflow", "deposit to exchange", "deposits to exchange",
+        "whale dump", "whales sell", "long-term holder distribution"
     ]
 
     score = 0
@@ -995,6 +1025,35 @@ def _semantic_news_bias_correction(text, predicted_bias, ai_confidence):
     )
     if any(re.search(pattern, prepared, flags=re.I) for pattern in bear_negations):
         return bias, confidence, "", 0, False
+
+    whale_bullish_patterns = (
+        r"\b(?:bitcoin|btc).{0,30}\bwhales?\b.{0,45}\b(?:accumulat(?:e|es|ed|ion|ing)|buy(?:s|ing)?|add(?:s|ed|ing)?|withdraw(?:s|n|al|als)?|cold storage)\b",
+        r"\bwhales?\b.{0,45}\b(?:accumulat(?:e|es|ed|ion|ing)|buy(?:s|ing)?|add(?:s|ed|ing)?|withdraw(?:s|n|al|als)?|cold storage)\b.{0,30}\b(?:bitcoin|btc)\b",
+        r"\b(?:exchange|exchanges).{0,20}\boutflows?\b.{0,35}\b(?:bitcoin|btc|whales?|holders?)\b",
+        r"\b(?:long[- ]term holders?|large holders?|satoshi[- ]era wallets?|dormant wallets?)\b.{0,50}\b(?:accumulat(?:e|es|ed|ion|ing)|buy(?:s|ing)?|add(?:s|ed|ing)?|withdraw(?:s|n|al|als)?)\b",
+        r"(?:比特幣|btc).{0,18}(?:巨鯨|大戶|長期持有者).{0,24}(?:累積|增持|買入|買進|提領|轉出交易所|冷錢包)",
+        r"(?:巨鯨|大戶|長期持有者).{0,24}(?:累積|增持|買入|買進|提領|轉出交易所|冷錢包).{0,18}(?:比特幣|btc)",
+        r"(?:交易所流出|交易所餘額下降).{0,24}(?:比特幣|btc|巨鯨|大戶)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in whale_bullish_patterns):
+        corrected = bias if bias > 0 else 1
+        reason = "bitcoin_whale_accumulation_bullish" if bias > 0 else "bitcoin_whale_accumulation_conflict"
+        return corrected, max(confidence, 0.78), reason, 0, True
+
+    whale_bearish_patterns = (
+        r"\b(?:bitcoin|btc).{0,30}\bwhales?\b.{0,45}\b(?:dump(?:s|ed|ing)?|sell(?:s|ing)?|distribut(?:e|es|ed|ion|ing)|deposit(?:s|ed|ing)?|send(?:s|ing)? .{0,18}(?:exchange|binance|coinbase|kraken|okx|bybit))\b",
+        r"\bwhales?\b.{0,45}\b(?:dump(?:s|ed|ing)?|sell(?:s|ing)?|distribut(?:e|es|ed|ion|ing)|deposit(?:s|ed|ing)?|send(?:s|ing)? .{0,18}(?:exchange|binance|coinbase|kraken|okx|bybit))\b.{0,30}\b(?:bitcoin|btc)\b",
+        r"\b(?:exchange|exchanges).{0,20}\binflows?\b.{0,35}\b(?:bitcoin|btc|whales?|holders?)\b",
+        r"\b(?:long[- ]term holders?|large holders?|satoshi[- ]era wallets?|dormant wallets?)\b.{0,50}\b(?:sell(?:s|ing)?|distribut(?:e|es|ed|ion|ing)|deposit(?:s|ed|ing)?)\b",
+        r"(?:比特幣|btc).{0,18}(?:巨鯨|大戶|長期持有者).{0,24}(?:拋售|賣出|賣壓|派發|轉入交易所|流入交易所)",
+        r"(?:巨鯨|大戶|長期持有者).{0,24}(?:拋售|賣出|賣壓|派發|轉入交易所|流入交易所).{0,18}(?:比特幣|btc)",
+        r"(?:巨鯨|大戶|長期持有者).{0,18}(?:比特幣|btc).{0,24}(?:拋售|賣出|賣壓|派發|轉入交易所|流入交易所)",
+        r"(?:交易所流入).{0,24}(?:比特幣|btc|巨鯨|大戶)",
+    )
+    if any(re.search(pattern, prepared, flags=re.I) for pattern in whale_bearish_patterns):
+        corrected = bias if bias < 0 else -1
+        reason = "bitcoin_whale_distribution_bearish" if bias < 0 else "bitcoin_whale_distribution_conflict"
+        return corrected, max(confidence, 0.78), reason, 1, True
 
     bearish_patterns = (
         r"\b(?:stock|crypto|bitcoin|ethereum|market).{0,45}\bcrash (?:likelier|more likely)\b",
@@ -1348,6 +1407,10 @@ def build_news_message(news_text, now_time=None, analysis=None):
         "semantic_bearish_confirmation": "確認偏空語意",
         "semantic_bullish_conflict": "修正為偏多",
         "semantic_bullish_confirmation": "確認偏多語意",
+        "bitcoin_whale_accumulation_conflict": "比特幣大戶累積，修正為偏多",
+        "bitcoin_whale_accumulation_bullish": "確認比特幣大戶累積偏多",
+        "bitcoin_whale_distribution_conflict": "比特幣大戶轉入交易所／派發，修正為偏空",
+        "bitcoin_whale_distribution_bearish": "確認比特幣大戶派發偏空",
         "low_accuracy_neutral_fallback": "低準確率保護，降為中性",
     }
     correction_line = (
