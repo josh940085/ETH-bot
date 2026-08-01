@@ -2514,6 +2514,12 @@
     const compound = Number(summary.compound_return_pct);
     const totalTrades = yearly.reduce((acc, row) => acc + (Number(row.trades) || 0), 0);
     const updatedText = Number(summary.updated_at) > 0 ? ts_str(Number(summary.updated_at)) : "-";
+    const strategyText = summary.strategy ? String(summary.strategy) : "-";
+    const scanStats = summary.source === "monthly10_scan"
+      ? `<span class="table-pill">月均 ${renderReturnCell(summary.avg_month_pct)}</span>
+         <span class="table-pill">月中位 ${renderReturnCell(summary.median_month_pct)}</span>
+         <span class="table-pill">≥10% 月 ${Number(summary.months_ge_10 || 0)}/${Number(summary.months || 0)}</span>`
+      : "";
     const yearlyRows = yearly.map((row) => {
       const covered = Number(row.covered_days) || 0;
       const expected = Number(row.expected_days) || 0;
@@ -2559,9 +2565,11 @@
   <div class="card table-card">
     <div class="card-title">歷史回測</div>
     <div class="table-summary-row">
+      <span class="table-pill">策略 ${escapeHtml(strategyText)}</span>
       <span class="table-pill">複合報酬 ${renderReturnCell(compound)}</span>
       <span class="table-pill">交易 ${totalTrades}</span>
       <span class="table-pill">更新 ${updatedText}</span>
+      ${scanStats}
     </div>
     <div class="table-scroll">
       <table class="data-table">

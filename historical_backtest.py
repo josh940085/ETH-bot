@@ -68,6 +68,25 @@ def _aggregate_metrics(period_metrics):
     }
 
 
+def _truthy_env(name, default="0"):
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _historical_strategy_flags():
+    flags = []
+    if _truthy_env("HISTORICAL_BACKTEST_DONCHIAN_REGIME", os.getenv("TRADE_DONCHIAN_REGIME_ENABLED", "0")):
+        flags.append("--donchian-regime")
+    if _truthy_env("HISTORICAL_BACKTEST_LOW_FLAT_24H", "0"):
+        flags.append("--low-flat-24h")
+    return flags
+
+
+def _summary_strategy_name(payload):
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("strategy_candidate") or payload.get("strategy") or "").strip()
+
+
 def _evaluate_candidate(candidate_summaries, baseline_summaries, min_return_improvement_pct=0.0):
     labels = [period[0] for period in PERIODS]
     if not baseline_summaries:
@@ -95,6 +114,11 @@ def _evaluate_candidate(candidate_summaries, baseline_summaries, min_return_impr
     baseline_metrics = {label: _summary_metrics(baseline_summaries[label]) for label in labels}
     candidate_total = _aggregate_metrics(candidate_metrics)
     baseline_total = _aggregate_metrics(baseline_metrics)
+    candidate_strategy_names = sorted({_summary_strategy_name(candidate_summaries.get(label, {})) for label in labels})
+    baseline_strategy_names = sorted({_summary_strategy_name(baseline_summaries.get(label, {})) for label in labels})
+    candidate_strategy_names = [name for name in candidate_strategy_names if name]
+    baseline_strategy_names = [name for name in baseline_strategy_names if name]
+    strategy_switched = bool(candidate_strategy_names and candidate_strategy_names != baseline_strategy_names)
     min_gain = max(0.0, float(min_return_improvement_pct))
     return_improved = candidate_total["compound_return_pct"] > baseline_total["compound_return_pct"] + min_gain
     total_trades_preserved = candidate_total["trades"] >= baseline_total["trades"]
@@ -110,22 +134,27 @@ def _evaluate_candidate(candidate_summaries, baseline_summaries, min_return_impr
             "trade_count_preserved": count_ok,
         }
 
-    accepted = return_improved and total_trades_preserved and period_trades_preserved
+    accepted = strategy_switched or (return_improved and total_trades_preserved and period_trades_preserved)
     reasons = []
-    if not return_improved:
+    if strategy_switched:
+        reasons.append("策略切換，發布新正式回測資料")
+    if not strategy_switched and not return_improved:
         reasons.append("整體複利報酬未提高")
-    if not total_trades_preserved:
+    if not strategy_switched and not total_trades_preserved:
         reasons.append("總單數下降")
-    if not period_trades_preserved:
+    if not strategy_switched and not period_trades_preserved:
         reasons.append("至少一個年度單數下降")
     return {
         "accepted": accepted,
         "bootstrap": False,
-        "reason": "符合報酬增加且單數不下降" if accepted else "、".join(reasons),
+        "reason": "、".join(reasons) if reasons else "符合報酬增加且單數不下降",
         "minimum_return_improvement_pct": min_gain,
         "return_improved": return_improved,
         "total_trade_count_preserved": total_trades_preserved,
         "all_period_trade_counts_preserved": period_trades_preserved,
+        "strategy_switched": strategy_switched,
+        "candidate_strategy_names": candidate_strategy_names,
+        "baseline_strategy_names": baseline_strategy_names,
         "candidate": candidate_total,
         "baseline": baseline_total,
         "return_delta_pct": candidate_total["compound_return_pct"] - baseline_total["compound_return_pct"],
@@ -159,8 +188,7 @@ def main():
                 "--summary-out", str(summary_temp),
                 "--trades-out", str(trades_temp),
             ]
-            if str(os.getenv("HISTORICAL_BACKTEST_LOW_FLAT_24H", "0")).strip().lower() in {"1", "true", "yes", "on"}:
-                cmd.append("--low-flat-24h")
+            cmd.extend(_historical_strategy_flags())
             print(f"📚 歷史回測 {label}: {' '.join(cmd)}", flush=True)
             result = subprocess.run(cmd, cwd=str(REPO_DIR), env=os.environ.copy(), check=False)
             period_result = {"period": label, "start": start, "end": end, "exit_code": result.returncode}

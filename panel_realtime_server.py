@@ -647,6 +647,10 @@ def _panel_backtest_data_dir() -> Path:
     return data_dir / "backtests"
 
 
+def _panel_scan_data_dir() -> Path:
+    return _panel_backtest_data_dir() / "monthly10_scan"
+
+
 def _safe_json_file(path: Path) -> dict:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -738,6 +742,95 @@ def _aggregate_trade_source_returns(trades_path: Path) -> dict:
     }
 
 
+def _build_donchian_scan_panel_summary() -> dict:
+    if str(os.getenv("PANEL_BACKTEST_SCAN_SUMMARY_ENABLED", "1")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return {}
+    if str(os.getenv("TRADE_DONCHIAN_REGIME_ENABLED", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return {}
+    scan_path = _panel_scan_data_dir() / "long_short_regime_scan_2022_2026h1.json"
+    try:
+        rows = json.loads(scan_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(rows, list):
+        return {}
+
+    target_name = str(os.getenv("PANEL_BACKTEST_SCAN_STRATEGY", "Don72_LS_MA10_50") or "Don72_LS_MA10_50")
+    target_tv = _safe_float_value(os.getenv("PANEL_BACKTEST_SCAN_TV", os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 1.0)), 1.0)
+    target_lev = _safe_int_value(os.getenv("PANEL_BACKTEST_SCAN_MAXLEV", os.getenv("COPY_TRADE_LEVERAGE", 5)), 5)
+    candidates = [
+        item
+        for item in rows
+        if isinstance(item, dict)
+        and str(item.get("name") or "") == target_name
+        and abs(_safe_float_value(item.get("tv"), -1.0) - target_tv) < 1e-9
+        and _safe_int_value(item.get("maxlev"), 0) == target_lev
+    ]
+    if not candidates:
+        return {}
+    item = candidates[0]
+    years = item.get("years") if isinstance(item.get("years"), dict) else {}
+    month_weights = {"2022": 12, "2023": 12, "2024": 12, "2025": 12, "2026": 7}
+    total_weight = max(1, sum(month_weights.get(str(year), 12) for year in years))
+    total_trades = _safe_int_value(item.get("trades"), 0)
+    yearly = []
+    allocated = 0
+    sorted_years = sorted(years)
+    for index, year in enumerate(sorted_years):
+        weight = month_weights.get(str(year), 12)
+        trades = (
+            max(0, total_trades - allocated)
+            if index == len(sorted_years) - 1
+            else int(round(total_trades * weight / total_weight))
+        )
+        allocated += trades
+        yearly.append(
+            {
+                "period": "2026H1" if str(year) == "2026" else str(year),
+                "label": "2026H1" if str(year) == "2026" else str(year),
+                "market_label": "Don72 掃描",
+                "summary_file": scan_path.name,
+                "trades_file": "",
+                "strategy_candidate": target_name,
+                "trades": trades,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": 0.0,
+                "total_return_pct": _safe_float_value(years.get(year), 0.0),
+                "profit_factor": 0.0,
+                "max_drawdown_pct": _safe_float_value(item.get("max_dd_pct"), 0.0),
+                "long_trades": 0,
+                "short_trades": 0,
+                "covered_days": 0,
+                "expected_days": 0,
+                "missing_days": 0,
+                "daily_min_trades": 0,
+                "daily_min": _finish_return_bucket(_empty_return_bucket()),
+                "other": {"trades": trades, "wins": 0, "win_rate": 0.0, "return_pct": _safe_float_value(years.get(year), 0.0)},
+            }
+        )
+    try:
+        updated_at = int(scan_path.stat().st_mtime)
+    except Exception:
+        updated_at = 0
+    return {
+        "ok": True,
+        "ts": int(time.time()),
+        "updated_at": updated_at,
+        "strategy": f"{target_name} tv={target_tv:g} maxlev={target_lev}",
+        "source": "monthly10_scan",
+        "compound_return_pct": round(_safe_float_value(item.get("total_pct"), 0.0), 4),
+        "avg_month_pct": round(_safe_float_value(item.get("avg_month_pct"), 0.0), 4),
+        "median_month_pct": round(_safe_float_value(item.get("median_month_pct"), 0.0), 4),
+        "best_month_pct": round(_safe_float_value(item.get("best_month_pct"), 0.0), 4),
+        "worst_month_pct": round(_safe_float_value(item.get("worst_month_pct"), 0.0), 4),
+        "months_ge_10": _safe_int_value(item.get("months_ge_10"), 0),
+        "months": _safe_int_value(item.get("months"), 0),
+        "yearly": yearly,
+        "monthly": [],
+    }
+
+
 def _aggregate_monthly_backtests(trades_path: Path, period: str) -> list[dict]:
     if not trades_path.exists():
         return []
@@ -815,11 +908,16 @@ def _aggregate_monthly_backtests(trades_path: Path, period: str) -> list[dict]:
 
 
 def _build_backtest_panel_summary() -> dict:
+    scan_summary = _build_donchian_scan_panel_summary()
+    if scan_summary:
+        return scan_summary
+
     backtest_dir = _panel_backtest_data_dir()
     yearly_rows = []
     monthly_rows = []
     compound_equity = 1.0
     newest_mtime = 0.0
+    strategy_counts = Counter()
 
     for artifact in BACKTEST_PANEL_ARTIFACTS:
         summary_path = backtest_dir / artifact["summary"]
@@ -829,6 +927,9 @@ def _build_backtest_panel_summary() -> dict:
             continue
 
         total_return_pct = _safe_float_value(summary.get("total_return_pct"), 0.0)
+        strategy_candidate = str(summary.get("strategy_candidate") or summary.get("strategy") or "").strip()
+        if strategy_candidate:
+            strategy_counts[strategy_candidate] += 1
         compound_equity *= 1.0 + (total_return_pct / 100.0)
         coverage = summary.get("trade_day_coverage") if isinstance(summary.get("trade_day_coverage"), dict) else {}
         source_returns = _aggregate_trade_source_returns(trades_path)
@@ -845,6 +946,7 @@ def _build_backtest_panel_summary() -> dict:
                 "market_label": artifact["market_label"],
                 "summary_file": artifact["summary"],
                 "trades_file": artifact["trades"],
+                "strategy_candidate": strategy_candidate,
                 "trades": _safe_int_value(summary.get("trades"), 0),
                 "wins": _safe_int_value(summary.get("wins"), 0),
                 "losses": _safe_int_value(summary.get("losses"), 0),
@@ -868,7 +970,7 @@ def _build_backtest_panel_summary() -> dict:
         "ok": True,
         "ts": int(time.time()),
         "updated_at": int(newest_mtime) if newest_mtime > 0 else 0,
-        "strategy": "market_profile_monthly",
+        "strategy": _dominant_counter_value(strategy_counts, "unknown"),
         "compound_return_pct": round((compound_equity - 1.0) * 100.0, 4),
         "yearly": yearly_rows,
         "monthly": monthly_rows,
