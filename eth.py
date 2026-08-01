@@ -10385,8 +10385,8 @@ def _build_donchian_regime_plan(
         max(
             0.001,
             min(
-                0.06,
-                _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 0.02), 0.02),
+                0.60,
+                _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 0.60), 0.60),
             ),
         )
     )

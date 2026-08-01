@@ -88,6 +88,30 @@ class DonchianRegimeTests(unittest.TestCase):
 
         self.assertIsNone(plan)
 
+    def test_candidate_allows_scanned_tv_point_six_size(self):
+        df_1h = _hourly_frame()
+        completed_high = float(df_1h.iloc[:-1]["high"].tail(72).max())
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DONCHIAN_REGIME_ENABLED": "1",
+                "TRADE_DONCHIAN_REGIME_SIZE_RATIO": "0.60",
+                "TRADE_INITIAL_MAX_OPEN_SIZE_RATIO": "0.80",
+                "TRADE_MAX_OPEN_SIZE_RATIO": "0.80",
+            },
+        ):
+            plan = eth._build_donchian_regime_plan(
+                price=completed_high + 1.0,
+                df_1h=df_1h,
+                df_1d=_daily_frame(bull=True),
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["position_size"], 0.60)
+
     def test_disabled_candidate_returns_none(self):
         df_1h = _hourly_frame()
         completed_high = float(df_1h.iloc[:-1]["high"].tail(72).max())
