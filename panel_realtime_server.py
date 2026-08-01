@@ -747,7 +747,10 @@ def _build_donchian_scan_panel_summary() -> dict:
         return {}
     if str(os.getenv("TRADE_DONCHIAN_REGIME_ENABLED", "0")).strip().lower() not in {"1", "true", "yes", "on"}:
         return {}
-    scan_path = _panel_scan_data_dir() / "long_short_regime_scan_2022_2026h1.json"
+    scan_file = str(os.getenv("PANEL_BACKTEST_SCAN_FILE", "long_short_regime_scan_2022_2026h1.json") or "").strip()
+    if not scan_file:
+        scan_file = "long_short_regime_scan_2022_2026h1.json"
+    scan_path = _panel_scan_data_dir() / Path(scan_file).name
     try:
         rows = json.loads(scan_path.read_text(encoding="utf-8"))
     except Exception:
@@ -756,14 +759,15 @@ def _build_donchian_scan_panel_summary() -> dict:
         return {}
 
     target_name = str(os.getenv("PANEL_BACKTEST_SCAN_STRATEGY", "Don72_LS_MA10_50") or "Don72_LS_MA10_50")
-    target_tv = _safe_float_value(os.getenv("PANEL_BACKTEST_SCAN_TV", os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 1.0)), 1.0)
+    target_risk_raw = os.getenv("PANEL_BACKTEST_SCAN_TARGET_VOL", os.getenv("PANEL_BACKTEST_SCAN_TV", os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 1.0)))
+    target_risk = _safe_float_value(target_risk_raw, 1.0)
     target_lev = _safe_int_value(os.getenv("PANEL_BACKTEST_SCAN_MAXLEV", os.getenv("COPY_TRADE_LEVERAGE", 5)), 5)
     candidates = [
         item
         for item in rows
         if isinstance(item, dict)
         and str(item.get("name") or "") == target_name
-        and abs(_safe_float_value(item.get("tv"), -1.0) - target_tv) < 1e-9
+        and abs(_safe_float_value(item.get("target_vol", item.get("tv")), -1.0) - target_risk) < 1e-9
         and _safe_int_value(item.get("maxlev"), 0) == target_lev
     ]
     if not candidates:
@@ -788,7 +792,7 @@ def _build_donchian_scan_panel_summary() -> dict:
             {
                 "period": "2026H1" if str(year) == "2026" else str(year),
                 "label": "2026H1" if str(year) == "2026" else str(year),
-                "market_label": "Don72 掃描",
+                "market_label": f"{target_name} 掃描",
                 "summary_file": scan_path.name,
                 "trades_file": "",
                 "strategy_candidate": target_name,
@@ -817,8 +821,8 @@ def _build_donchian_scan_panel_summary() -> dict:
         "ok": True,
         "ts": int(time.time()),
         "updated_at": updated_at,
-        "strategy": f"{target_name} tv={target_tv:g} maxlev={target_lev}",
-        "source": "monthly10_scan",
+        "strategy": f"{target_name} risk={target_risk:g} maxlev={target_lev}",
+        "source": f"monthly10_scan/{scan_path.name}",
         "compound_return_pct": round(_safe_float_value(item.get("total_pct"), 0.0), 4),
         "avg_month_pct": round(_safe_float_value(item.get("avg_month_pct"), 0.0), 4),
         "median_month_pct": round(_safe_float_value(item.get("median_month_pct"), 0.0), 4),
