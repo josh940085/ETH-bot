@@ -10381,14 +10381,12 @@ def _build_donchian_regime_plan(
     atr_ref = max(_safe_float(true_range.tail(14).mean(), 0.0), price * 0.0012, 1e-9)
     stop_atr = max(0.7, _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_STOP_ATR", 1.2), 1.2))
     rr = max(1.8, _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_RR", 2.2), 2.2))
-    size = _cap_initial_position_size(
-        max(
-            0.001,
-            min(
-                0.60,
-                _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 0.60), 0.60),
-            ),
-        )
+    size = max(
+        0.001,
+        min(
+            1.0,
+            _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 1.0), 1.0),
+        ),
     )
     buffer = max(atr_ref * 0.10, price * 0.0003)
     if direction == "long":

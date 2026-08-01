@@ -112,6 +112,63 @@ class DonchianRegimeTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual(plan["position_size"], 0.60)
 
+    def test_candidate_defaults_to_full_available_asset_ratio(self):
+        df_1h = _hourly_frame()
+        completed_high = float(df_1h.iloc[:-1]["high"].tail(72).max())
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DONCHIAN_REGIME_ENABLED": "1",
+                "TRADE_DONCHIAN_REGIME_SIZE_RATIO": "1.00",
+                "TRADE_INITIAL_MAX_OPEN_SIZE_RATIO": "0.55",
+                "TRADE_MAX_OPEN_SIZE_RATIO": "0.80",
+            },
+        ):
+            plan = eth._build_donchian_regime_plan(
+                price=completed_high + 1.0,
+                df_1h=df_1h,
+                df_1d=_daily_frame(bull=True),
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["position_size"], 1.00)
+
+    def test_full_asset_ratio_qty_uses_actual_available_balance_with_minimum(self):
+        with (
+            patch.object(eth, "_get_binance_available_balance", return_value=100.0),
+            patch.object(eth, "WS_PRICE", 100_000.0),
+            patch.dict(
+                os.environ,
+                {
+                    "COPY_TRADE_BALANCE_USAGE_CAP": "1.00",
+                    "COPY_TRADE_NOTIONAL_SAFETY": "1.00",
+                    "COPY_TRADE_LEVERAGE": "5",
+                },
+            ),
+        ):
+            qty = eth._calc_copy_trade_qty(1.0, leverage=5, asset_price=100_000.0)
+
+        self.assertEqual(qty, 0.005)
+
+        with (
+            patch.object(eth, "_get_binance_available_balance", return_value=1.0),
+            patch.object(eth, "WS_PRICE", 100_000.0),
+            patch.dict(
+                os.environ,
+                {
+                    "COPY_TRADE_BALANCE_USAGE_CAP": "1.00",
+                    "COPY_TRADE_NOTIONAL_SAFETY": "1.00",
+                    "COPY_TRADE_LEVERAGE": "5",
+                },
+            ),
+        ):
+            min_qty = eth._calc_copy_trade_qty(1.0, leverage=5, asset_price=100_000.0)
+
+        self.assertEqual(min_qty, 0.001)
+
     def test_disabled_candidate_returns_none(self):
         df_1h = _hourly_frame()
         completed_high = float(df_1h.iloc[:-1]["high"].tail(72).max())
