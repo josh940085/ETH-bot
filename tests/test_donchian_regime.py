@@ -60,6 +60,15 @@ def _trend_hourly_frame():
     return pd.DataFrame(rows, index=idx)
 
 
+def _ma_momentum_hourly_frame(bull=True):
+    idx = pd.date_range("2026-01-01", periods=220, freq="1h", tz="UTC")
+    rows = []
+    for i in range(220):
+        close = 100.0 + i * 0.18 if bull else 150.0 - i * 0.16
+        rows.append({"open": close - 0.05, "high": close + 0.35, "low": close - 0.35, "close": close, "volume": 1.0})
+    return pd.DataFrame(rows, index=idx)
+
+
 class DonchianRegimeTests(unittest.TestCase):
     def test_bull_daily_regime_and_donchian_breakout_builds_long(self):
         df_1h = _hourly_frame()
@@ -251,6 +260,63 @@ class DonchianRegimeTests(unittest.TestCase):
             min_qty = eth._calc_copy_trade_qty(1.0, leverage=5, asset_price=100_000.0)
 
         self.assertEqual(min_qty, 0.001)
+
+    def test_ma_momentum_candidate_builds_long_with_full_asset_size(self):
+        df_1h = _ma_momentum_hourly_frame(bull=True)
+        price = float(df_1h.iloc[-1]["close"]) + 0.5
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_MA_MOMENTUM_REGIME_ENABLED": "1",
+                "TRADE_MA_MOMENTUM_SIZE_RATIO": "1.00",
+                "TRADE_DONCHIAN_MARKET_STATE_FILTER_ENABLED": "1",
+            },
+        ):
+            plan = eth._build_ma_momentum_regime_plan(
+                price=price,
+                df_1h=df_1h,
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["direction"], "long")
+        self.assertEqual(plan["host_opening_logic"]["mode"], "ma24_120_mom60_10")
+        self.assertEqual(plan["position_size"], 1.00)
+        self.assertGreater(plan["tp"], price)
+        self.assertLess(plan["sl"], price)
+
+    def test_ma_momentum_candidate_builds_short(self):
+        df_1h = _ma_momentum_hourly_frame(bull=False)
+        price = float(df_1h.iloc[-1]["close"]) - 0.5
+
+        with patch.dict(os.environ, {"TRADE_MA_MOMENTUM_REGIME_ENABLED": "1"}):
+            plan = eth._build_ma_momentum_regime_plan(
+                price=price,
+                df_1h=df_1h,
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["direction"], "short")
+        self.assertLess(plan["tp"], price)
+        self.assertGreater(plan["sl"], price)
+
+    def test_ma_momentum_news_against_direction_blocks_candidate(self):
+        df_1h = _ma_momentum_hourly_frame(bull=True)
+        price = float(df_1h.iloc[-1]["close"]) + 0.5
+
+        with patch.dict(os.environ, {"TRADE_MA_MOMENTUM_REGIME_ENABLED": "1"}):
+            plan = eth._build_ma_momentum_regime_plan(
+                price=price,
+                df_1h=df_1h,
+                news_bias=-0.8,
+                event_risk=0,
+            )
+
+        self.assertIsNone(plan)
 
     def test_disabled_candidate_returns_none(self):
         df_1h = _hourly_frame()

@@ -10564,6 +10564,151 @@ def _build_donchian_regime_plan(
     }
 
 
+def _build_ma_momentum_regime_plan(
+    *,
+    price,
+    df_1h,
+    news_bias=0.0,
+    event_risk=0,
+):
+    """Build the MA24/MA120 + Mom60/10 live candidate selected by the scan panel.
+
+    The original scan artifact only stores the candidate name and results, not
+    the generator formula.  The live implementation therefore keeps the rule
+    explicit and auditable: hourly MA24/MA120 trend direction plus aligned
+    60-hour and 10-hour momentum.  Existing news, event-risk, market-state and
+    net-TP safeguards remain in force.
+    """
+    if not _is_truthy(os.getenv("TRADE_MA_MOMENTUM_REGIME_ENABLED", "0")):
+        return None
+
+    price = max(0.0, _safe_float(price, 0.0))
+    if price <= 0 or df_1h is None:
+        return None
+    if any(col not in df_1h for col in ("high", "low", "close")):
+        return None
+
+    ma_fast_len = max(3, _safe_int(os.getenv("TRADE_MA_MOMENTUM_FAST_HOURS", 24), 24))
+    ma_slow_len = max(ma_fast_len + 1, _safe_int(os.getenv("TRADE_MA_MOMENTUM_SLOW_HOURS", 120), 120))
+    mom_slow_len = max(2, _safe_int(os.getenv("TRADE_MA_MOMENTUM_SLOW_MOM_HOURS", 60), 60))
+    mom_fast_len = max(1, _safe_int(os.getenv("TRADE_MA_MOMENTUM_FAST_MOM_HOURS", 10), 10))
+    required_1h = max(ma_slow_len + 1, mom_slow_len + 2, mom_fast_len + 2, 130)
+    if len(df_1h) < required_1h + 1:
+        return None
+
+    max_event_risk = max(0, _safe_int(os.getenv("TRADE_MA_MOMENTUM_MAX_EVENT_RISK", os.getenv("TRADE_DONCHIAN_REGIME_MAX_EVENT_RISK", 0)), 0))
+    if _safe_int(event_risk, 0) > max_event_risk:
+        return None
+
+    completed_1h = df_1h.iloc[:-1] if len(df_1h) > required_1h else df_1h
+    if len(completed_1h) < required_1h:
+        return None
+    closes = pd.to_numeric(completed_1h["close"], errors="coerce")
+    highs = pd.to_numeric(completed_1h["high"], errors="coerce")
+    lows = pd.to_numeric(completed_1h["low"], errors="coerce")
+    if closes.tail(required_1h).isna().any() or highs.tail(24).isna().any() or lows.tail(24).isna().any():
+        return None
+
+    ma_fast = _safe_float(closes.tail(ma_fast_len).mean(), 0.0)
+    ma_slow = _safe_float(closes.tail(ma_slow_len).mean(), 0.0)
+    ref_slow = _safe_float(closes.iloc[-mom_slow_len - 1], 0.0)
+    ref_fast = _safe_float(closes.iloc[-mom_fast_len - 1], 0.0)
+    last_close = _safe_float(closes.iloc[-1], 0.0)
+    if ma_fast <= 0 or ma_slow <= 0 or ref_slow <= 0 or ref_fast <= 0 or last_close <= 0:
+        return None
+
+    mom_slow = last_close / ref_slow - 1.0
+    mom_fast = last_close / ref_fast - 1.0
+    min_mom_slow = max(0.0, _safe_float(os.getenv("TRADE_MA_MOMENTUM_MIN_SLOW_MOM", 0.0010), 0.0010))
+    min_mom_fast = max(0.0, _safe_float(os.getenv("TRADE_MA_MOMENTUM_MIN_FAST_MOM", 0.0005), 0.0005))
+    news_block = max(
+        0.0,
+        _safe_float(
+            os.getenv("TRADE_MA_MOMENTUM_NEWS_BLOCK_THRESHOLD", os.getenv("TRADE_DONCHIAN_REGIME_NEWS_BLOCK_THRESHOLD", 0.45)),
+            0.45,
+        ),
+    )
+
+    direction = ""
+    if ma_fast > ma_slow and mom_slow >= min_mom_slow and mom_fast >= min_mom_fast:
+        if news_block > 0 and _safe_float(news_bias, 0.0) <= -news_block:
+            return None
+        direction = "long"
+    elif ma_fast < ma_slow and mom_slow <= -min_mom_slow and mom_fast <= -min_mom_fast:
+        if news_block > 0 and _safe_float(news_bias, 0.0) >= news_block:
+            return None
+        direction = "short"
+    if direction not in {"long", "short"}:
+        return None
+
+    market_state = _score_recent_donchian_market_state(df_1h, direction=direction, current_price=price)
+    if str(market_state.get("action") or "allow") == "block":
+        return None
+
+    recent = completed_1h.tail(max(30, min(ma_slow_len, 120))).copy()
+    prev_close = recent["close"].shift(1)
+    true_range = pd.concat(
+        [
+            (recent["high"] - recent["low"]).abs(),
+            (recent["high"] - prev_close).abs(),
+            (recent["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr_ref = max(_safe_float(true_range.tail(14).mean(), 0.0), price * 0.0012, 1e-9)
+    stop_atr = max(0.7, _safe_float(os.getenv("TRADE_MA_MOMENTUM_STOP_ATR", os.getenv("TRADE_DONCHIAN_REGIME_STOP_ATR", 1.2)), 1.2))
+    rr = max(1.8, _safe_float(os.getenv("TRADE_MA_MOMENTUM_RR", os.getenv("TRADE_DONCHIAN_REGIME_RR", 2.2)), 2.2))
+    size = max(0.001, min(1.0, _safe_float(os.getenv("TRADE_MA_MOMENTUM_SIZE_RATIO", os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 1.0)), 1.0)))
+    size *= max(0.0, min(1.0, _safe_float(market_state.get("size_multiplier"), 1.0)))
+
+    buffer = max(atr_ref * 0.10, price * 0.0003)
+    if direction == "long":
+        structural_sl = min(_safe_float(lows.tail(24).min(), price), price - buffer)
+        risk = max(price - structural_sl, atr_ref * stop_atr, price * 0.0015)
+        sl = price - risk
+        tp = price + risk * rr
+        score = 0.76
+        final = "📈 MA24/120動能做多"
+    else:
+        structural_sl = max(_safe_float(highs.tail(24).max(), price), price + buffer)
+        risk = max(structural_sl - price, atr_ref * stop_atr, price * 0.0015)
+        sl = price + risk
+        tp = price - risk * rr
+        score = 0.24
+        final = "📉 MA24/120動能做空"
+    tp, required_rate = _ensure_minimum_net_profit_tp(direction, price, tp, hold_hours=24.0)
+    trend_edge = abs(ma_fast - ma_slow) / max(ma_slow, 1e-9)
+    momentum_edge = min(0.08, abs(mom_slow)) + min(0.04, abs(mom_fast))
+    confidence = max(0.58, min(0.82, 0.58 + trend_edge * 3.0 + momentum_edge))
+    return {
+        "direction": direction,
+        "final": final,
+        "sl": float(sl),
+        "tp": float(tp),
+        "position_size": float(size),
+        "score": float(score),
+        "confidence": float(confidence),
+        "required_net_tp_rate": float(required_rate),
+        "ma_fast": float(ma_fast),
+        "ma_slow": float(ma_slow),
+        "mom_slow": float(mom_slow),
+        "mom_fast": float(mom_fast),
+        "market_state_filter": market_state,
+        "host_opening_logic": {
+            "direction": direction,
+            "mode": "ma24_120_mom60_10",
+            "confidence": float(confidence),
+            "edge": round(trend_edge + momentum_edge, 5),
+            "reasons": [
+                f"ma{ma_fast_len}_{ma_fast:.2f}_{'above' if direction == 'long' else 'below'}_ma{ma_slow_len}_{ma_slow:.2f}",
+                f"mom{mom_slow_len}_{mom_slow*100:.2f}%",
+                f"mom{mom_fast_len}_{mom_fast*100:.2f}%",
+                f"tp_cost_floor>={required_rate*100:.3f}%",
+            ] + list(market_state.get("reasons") or [])[:5],
+        },
+    }
+
+
 def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
     """多週期支撐壓力 + K線型態分析，可直接餵入已準備好的 K 線資料。"""
     tf_cfg = tf_cfg or [
@@ -12723,6 +12868,40 @@ def build_trade_signal_snapshot(
             ),
             0.05,
         )
+
+    if final.startswith("觀望"):
+        ma_momentum_plan = _build_ma_momentum_regime_plan(
+            price=entry,
+            df_1h=df_1h,
+            news_bias=news_bias,
+            event_risk=event_risk,
+        )
+        if ma_momentum_plan:
+            final = str(ma_momentum_plan["final"])
+            sl = float(ma_momentum_plan["sl"])
+            tp = float(ma_momentum_plan["tp"])
+            position_size = float(ma_momentum_plan["position_size"])
+            score = float(ma_momentum_plan["score"])
+            donchian_market_state = dict(ma_momentum_plan.get("market_state_filter") or {})
+            primary_indicator = "ma24_120_mom60_10"
+            host_opening_logic = dict(ma_momentum_plan["host_opening_logic"])
+            host_logic_applied = True
+            learned_entry_logic = dict(learned_entry_logic)
+            learned_entry_logic["direction"] = str(ma_momentum_plan["direction"])
+            learned_entry_logic["confidence"] = max(
+                _safe_float(learned_entry_logic.get("confidence"), 0.0),
+                _safe_float(ma_momentum_plan.get("confidence"), 0.0),
+            )
+            learned_entry_logic["reasons"] = (
+                list(host_opening_logic.get("reasons") or [])
+                + list(learned_entry_logic.get("reasons") or [])
+            )[:8]
+            if ma_momentum_plan["direction"] == "long":
+                ai_long_prob = max(ai_long_prob, _safe_float(ma_momentum_plan.get("confidence"), 0.0))
+                ai_prob = max(ai_prob, score)
+            else:
+                ai_short_prob = max(ai_short_prob, _safe_float(ma_momentum_plan.get("confidence"), 0.0))
+                ai_prob = min(ai_prob, score)
 
     if final.startswith("觀望"):
         donchian_plan = _build_donchian_regime_plan(
