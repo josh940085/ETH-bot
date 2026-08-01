@@ -6022,6 +6022,7 @@ def sync_position_panel(current_price=None):
             "strategy_reclaim_gate": dict(POSITION_PANEL_STATE.get("strategy_reclaim_gate") or {}),
             "strategy_breakout": dict(POSITION_PANEL_STATE.get("strategy_breakout") or {}),
             "strategy_host_logic": dict(POSITION_PANEL_STATE.get("strategy_host_logic") or {}),
+            "strategy_donchian_market_state": dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {}),
             "strategy_macro_alignment": dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {}),
             "strategy_context": dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
@@ -10312,6 +10313,128 @@ def _build_manipulation_reversal_plan(
     }
 
 
+def _score_recent_donchian_market_state(df_1h, *, direction="", current_price=0.0):
+    """Score recent 1H market state for Donchian entries.
+
+    The filter is intentionally short-horizon: daily MA10/50 defines the broad
+    regime, while this catches 7-14 day chop/fake-breakout environments like
+    high-level ranges before they burn a full MA window.
+    """
+    if not _is_truthy(os.getenv("TRADE_DONCHIAN_MARKET_STATE_FILTER_ENABLED", "1")):
+        return {"state": "filter_disabled", "action": "allow", "size_multiplier": 1.0, "reasons": []}
+    if df_1h is None or len(df_1h) < 96 or any(col not in df_1h for col in ("high", "low", "close")):
+        return {"state": "insufficient_data", "action": "allow", "size_multiplier": 1.0, "reasons": ["market_state_insufficient_1h"]}
+
+    completed = df_1h.iloc[:-1].copy() if len(df_1h) > 120 else df_1h.copy()
+    max_hours = max(120, _safe_int(os.getenv("TRADE_DONCHIAN_MARKET_STATE_LOOKBACK_HOURS", 336), 336))
+    min_hours = max(72, _safe_int(os.getenv("TRADE_DONCHIAN_MARKET_STATE_MIN_HOURS", 120), 120))
+    window = completed.tail(min(max_hours, len(completed))).copy()
+    if len(window) < min_hours:
+        return {"state": "insufficient_data", "action": "allow", "size_multiplier": 1.0, "reasons": ["market_state_waiting_for_14d_window"]}
+
+    closes = pd.to_numeric(window["close"], errors="coerce").dropna()
+    highs = pd.to_numeric(window["high"], errors="coerce")
+    lows = pd.to_numeric(window["low"], errors="coerce")
+    if len(closes) < min_hours or highs.isna().all() or lows.isna().all():
+        return {"state": "insufficient_data", "action": "allow", "size_multiplier": 1.0, "reasons": ["market_state_invalid_1h"]}
+
+    net_move = abs(_safe_float(closes.iloc[-1], 0.0) - _safe_float(closes.iloc[0], 0.0))
+    path_move = max(_safe_float(closes.diff().abs().sum(), 0.0), 1e-9)
+    trend_efficiency = max(0.0, min(1.0, net_move / path_move))
+    price_ref = max(_safe_float(current_price, _safe_float(closes.iloc[-1], 0.0)), 1e-9)
+    range_rate = max(0.0, (_safe_float(highs.max(), price_ref) - _safe_float(lows.min(), price_ref)) / price_ref)
+
+    channel = max(24, min(72, _safe_int(os.getenv("TRADE_DONCHIAN_MARKET_STATE_EVENT_CHANNEL_HOURS", 72), 72)))
+    horizon = max(4, min(24, _safe_int(os.getenv("TRADE_DONCHIAN_MARKET_STATE_CONFIRM_HOURS", 12), 12)))
+    atr_proxy = max(
+        _safe_float((highs - lows).tail(24).mean(), 0.0),
+        price_ref * 0.001,
+        1e-9,
+    )
+    success_move = max(
+        atr_proxy * _safe_float(os.getenv("TRADE_DONCHIAN_MARKET_STATE_SUCCESS_ATR", 0.8), 0.8),
+        price_ref * _safe_float(os.getenv("TRADE_DONCHIAN_MARKET_STATE_SUCCESS_RATE", 0.0025), 0.0025),
+    )
+    events = 0
+    failures = 0
+    successes = 0
+    closes_series = pd.to_numeric(window["close"], errors="coerce")
+    for idx in range(channel, max(channel, len(window) - horizon)):
+        prev = window.iloc[idx - channel:idx]
+        future = window.iloc[idx + 1:idx + 1 + horizon]
+        if future.empty:
+            continue
+        close_now = _safe_float(window["close"].iloc[idx], 0.0)
+        prev_high = _safe_float(prev["high"].max(), 0.0)
+        prev_low = _safe_float(prev["low"].min(), 0.0)
+        if close_now <= 0 or prev_high <= 0 or prev_low <= 0:
+            continue
+        event_direction = ""
+        level = 0.0
+        if close_now > prev_high:
+            event_direction = "long"
+            level = prev_high
+        elif close_now < prev_low:
+            event_direction = "short"
+            level = prev_low
+        if direction in {"long", "short"} and event_direction and event_direction != direction:
+            continue
+        if event_direction not in {"long", "short"}:
+            continue
+        events += 1
+        if event_direction == "long":
+            favorable = _safe_float(future["high"].max(), close_now) - close_now
+            returned_inside = _safe_float(future["close"].iloc[-1], close_now) < level
+        else:
+            favorable = close_now - _safe_float(future["low"].min(), close_now)
+            returned_inside = _safe_float(future["close"].iloc[-1], close_now) > level
+        if favorable >= success_move and not returned_inside:
+            successes += 1
+        elif returned_inside:
+            failures += 1
+
+    fake_rate = failures / events if events else 0.0
+    success_rate = successes / events if events else 0.0
+    chop_score = max(0.0, min(1.0, 1.0 - trend_efficiency))
+    high_fake = events >= max(2, _safe_int(os.getenv("TRADE_DONCHIAN_MARKET_STATE_MIN_EVENTS", 3), 3)) and fake_rate >= _safe_float(os.getenv("TRADE_DONCHIAN_MARKET_STATE_HIGH_FAKE_RATE", 0.55), 0.55)
+    extreme_fake = high_fake and fake_rate >= _safe_float(os.getenv("TRADE_DONCHIAN_MARKET_STATE_BLOCK_FAKE_RATE", 0.70), 0.70)
+    choppy = chop_score >= _safe_float(os.getenv("TRADE_DONCHIAN_MARKET_STATE_CHOP_SCORE", 0.82), 0.82)
+    trending = trend_efficiency >= _safe_float(os.getenv("TRADE_DONCHIAN_MARKET_STATE_TREND_EFFICIENCY", 0.22), 0.22) and success_rate >= max(0.30, fake_rate)
+
+    state = "trend" if trending else "fake_breakout_high" if high_fake else "chop" if choppy else "mixed"
+    action = "allow"
+    size_multiplier = 1.0
+    if extreme_fake and choppy:
+        action = "block"
+        size_multiplier = 0.0
+    elif high_fake or choppy:
+        action = "reduce"
+        size_multiplier = max(
+            0.05,
+            min(0.80, _safe_float(os.getenv("TRADE_DONCHIAN_MARKET_STATE_CHOP_SIZE_MULT", 0.35), 0.35)),
+        )
+
+    return {
+        "state": state,
+        "action": action,
+        "size_multiplier": float(size_multiplier),
+        "lookback_hours": int(len(window)),
+        "events": int(events),
+        "fake_rate": round(fake_rate, 4),
+        "success_rate": round(success_rate, 4),
+        "trend_efficiency": round(trend_efficiency, 4),
+        "chop_score": round(chop_score, 4),
+        "range_rate": round(range_rate, 5),
+        "reasons": [
+            f"market_state={state}",
+            f"fake_rate={fake_rate:.2f}/{events}",
+            f"success_rate={success_rate:.2f}",
+            f"trend_eff={trend_efficiency:.2f}",
+            f"action={action}",
+        ],
+    }
+
+
 def _build_donchian_regime_plan(
     *,
     price,
@@ -10368,6 +10491,10 @@ def _build_donchian_regime_plan(
     if direction not in {"long", "short"}:
         return None
 
+    market_state = _score_recent_donchian_market_state(df_1h, direction=direction, current_price=price)
+    if str(market_state.get("action") or "allow") == "block":
+        return None
+
     recent = completed_1h.tail(max(15, min(lookback, 72))).copy()
     prev_close = recent["close"].shift(1)
     true_range = pd.concat(
@@ -10388,6 +10515,7 @@ def _build_donchian_regime_plan(
             _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 1.0), 1.0),
         ),
     )
+    size *= max(0.0, min(1.0, _safe_float(market_state.get("size_multiplier"), 1.0)))
     buffer = max(atr_ref * 0.10, price * 0.0003)
     if direction == "long":
         structural_sl = min(_safe_float(completed_1h["low"].tail(12).min(), price), price - buffer)
@@ -10421,6 +10549,7 @@ def _build_donchian_regime_plan(
         "donchian_low": float(don_low),
         "daily_ma_fast": float(ma_fast),
         "daily_ma_slow": float(ma_slow),
+        "market_state_filter": market_state,
         "host_opening_logic": {
             "direction": direction,
             "mode": "don72_ls_ma10_50",
@@ -10430,7 +10559,7 @@ def _build_donchian_regime_plan(
                 f"daily_ma{ma_fast_len}_{ma_fast:.2f}_{'above' if regime_name == 'bull' else 'below'}_ma{ma_slow_len}_{ma_slow:.2f}",
                 f"donchian_{lookback}h_{'high' if direction == 'long' else 'low'}_break",
                 f"tp_cost_floor>={required_rate*100:.3f}%",
-            ],
+            ] + list(market_state.get("reasons") or [])[:5],
         },
     }
 
@@ -12331,6 +12460,11 @@ def build_trade_signal_snapshot(
     tp = None
     position_size = 0.0
     manipulation_reversal = {}
+    donchian_market_state = _score_recent_donchian_market_state(
+        df_1h,
+        direction="",
+        current_price=entry,
+    ) if _is_truthy(os.getenv("TRADE_DONCHIAN_REGIME_ENABLED", "0")) else {}
     macro_indicator_alignment = {"score": 0.0, "aligned": 0, "against": 0, "reasons": []}
     rr_at_entry = 0.0
     risk_rate = 0.0
@@ -12604,6 +12738,7 @@ def build_trade_signal_snapshot(
             tp = float(donchian_plan["tp"])
             position_size = float(donchian_plan["position_size"])
             score = float(donchian_plan["score"])
+            donchian_market_state = dict(donchian_plan.get("market_state_filter") or {})
             primary_indicator = "don72_ls_ma10_50"
             host_opening_logic = dict(donchian_plan["host_opening_logic"])
             host_logic_applied = True
@@ -13014,6 +13149,7 @@ def build_trade_signal_snapshot(
         "event_risk": event_risk,
         "fake_breakout": fake_breakout,
         "manipulation_reversal": manipulation_reversal,
+        "donchian_market_state": donchian_market_state,
         "triangle": triangle,
         "fvg_low": fvg_low,
         "fvg_high": fvg_high,
@@ -15511,7 +15647,7 @@ def run_bot():
             df_1w = get_kline("1w", 110)
             df_1d = get_kline("1d", 370)
             df_4h = get_kline("4h", 200)
-            df_1h = get_kline("1h", 170)
+            df_1h = get_kline("1h", 370)
 
             # ===== Market Regime =====
             regime = detect_market_regime(df_1h, df_4h)
@@ -16325,6 +16461,11 @@ def run_bot():
             host_opening_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
             host_logic_applied = bool(decision.get("host_logic_applied", False))
             learned_entry_logic = decision.get("learned_entry_logic") if isinstance(decision.get("learned_entry_logic"), dict) else {}
+            POSITION_PANEL_STATE["strategy_donchian_market_state"] = (
+                dict(decision.get("donchian_market_state"))
+                if isinstance(decision.get("donchian_market_state"), dict)
+                else {}
+            )
             entry = price
             daily_min_trade = _daily_min_trade_due()
             daily_plan = {}

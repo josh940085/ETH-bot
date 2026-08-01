@@ -35,6 +35,31 @@ def _daily_frame(bull=True):
     return pd.DataFrame(rows, index=idx)
 
 
+def _fake_breakout_hourly_frame():
+    idx = pd.date_range("2026-01-01", periods=220, freq="1h", tz="UTC")
+    rows = []
+    spike = 106.0
+    for i in range(220):
+        if i >= 80 and i % 20 == 0:
+            close = spike
+            spike += 1.0
+        elif i >= 80 and i % 20 in {1, 2, 3, 4, 5, 6}:
+            close = 100.0 + (i % 3) * 0.2
+        else:
+            close = 100.0 + ((i % 10) - 5) * 0.15
+        rows.append({"open": close, "high": close + 0.2, "low": close - 0.2, "close": close, "volume": 1.0})
+    return pd.DataFrame(rows, index=idx)
+
+
+def _trend_hourly_frame():
+    idx = pd.date_range("2026-01-01", periods=220, freq="1h", tz="UTC")
+    rows = []
+    for i in range(220):
+        close = 100.0 + i * 0.12
+        rows.append({"open": close - 0.05, "high": close + 0.2, "low": close - 0.1, "close": close, "volume": 1.0})
+    return pd.DataFrame(rows, index=idx)
+
+
 class DonchianRegimeTests(unittest.TestCase):
     def test_bull_daily_regime_and_donchian_breakout_builds_long(self):
         df_1h = _hourly_frame()
@@ -135,6 +160,64 @@ class DonchianRegimeTests(unittest.TestCase):
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan["position_size"], 1.00)
+
+    def test_recent_fake_breakout_market_state_blocks_donchian_entry(self):
+        df_1h = _fake_breakout_hourly_frame()
+        completed_high = float(df_1h.iloc[:-1]["high"].tail(72).max())
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DONCHIAN_REGIME_ENABLED": "1",
+                "TRADE_DONCHIAN_MARKET_STATE_FILTER_ENABLED": "1",
+            },
+        ):
+            state = eth._score_recent_donchian_market_state(
+                df_1h,
+                direction="long",
+                current_price=completed_high + 1.0,
+            )
+            plan = eth._build_donchian_regime_plan(
+                price=completed_high + 1.0,
+                df_1h=df_1h,
+                df_1d=_daily_frame(bull=True),
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertEqual(state["action"], "block")
+        self.assertGreaterEqual(state["fake_rate"], 0.70)
+        self.assertIsNone(plan)
+
+    def test_recent_trend_market_state_keeps_full_donchian_size(self):
+        df_1h = _trend_hourly_frame()
+        completed_high = float(df_1h.iloc[:-1]["high"].tail(72).max())
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DONCHIAN_REGIME_ENABLED": "1",
+                "TRADE_DONCHIAN_REGIME_SIZE_RATIO": "1.00",
+                "TRADE_DONCHIAN_MARKET_STATE_FILTER_ENABLED": "1",
+            },
+        ):
+            state = eth._score_recent_donchian_market_state(
+                df_1h,
+                direction="long",
+                current_price=completed_high + 1.0,
+            )
+            plan = eth._build_donchian_regime_plan(
+                price=completed_high + 1.0,
+                df_1h=df_1h,
+                df_1d=_daily_frame(bull=True),
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertEqual(state["action"], "allow")
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["position_size"], 1.00)
+        self.assertEqual(plan["market_state_filter"]["action"], "allow")
 
     def test_full_asset_ratio_qty_uses_actual_available_balance_with_minimum(self):
         with (

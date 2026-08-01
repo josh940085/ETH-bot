@@ -1532,6 +1532,7 @@
   let STRATEGY_SIGNAL = "wait";
   let STRATEGY_AI_PROB = null;
   let STRATEGY_REGIME = "";
+  let STRATEGY_DONCHIAN_MARKET_STATE = {};
   let STRATEGY_WAIT_CONDITIONS = [];
   const TELEGRAM_WEBAPP = (window.Telegram && window.Telegram.WebApp) ? Telegram.WebApp : null;
   const TELEGRAM_INIT_DATA = TELEGRAM_WEBAPP ? String(TELEGRAM_WEBAPP.initData || "").trim() : "";
@@ -1755,6 +1756,9 @@
     STRATEGY_SIGNAL = String(data.strategy_signal || "wait").toLowerCase();
     STRATEGY_AI_PROB = Number.isFinite(Number(data.strategy_ai_prob)) ? Number(data.strategy_ai_prob) : null;
     STRATEGY_REGIME = String(data.strategy_regime || "");
+    STRATEGY_DONCHIAN_MARKET_STATE = (data.strategy_donchian_market_state && typeof data.strategy_donchian_market_state === "object")
+      ? data.strategy_donchian_market_state
+      : {};
     STRATEGY_WAIT_CONDITIONS = Array.isArray(data.strategy_wait_conditions)
       ? data.strategy_wait_conditions.slice(0, 3)
       : [];
@@ -2876,6 +2880,10 @@
     const dataFeedReady = marketPrice > 0 && KLINES_4H.length > 0;
     const panelReady = HAS_POSITION_PAYLOAD && PANEL_ACCESS_STATE !== "unauthorized";
     const liquidationRisk = LIQUIDATION_CLUSTER_RISK ? escapeHtml(LIQUIDATION_CLUSTER_RISK) : "未偵測";
+    const donState = STRATEGY_DONCHIAN_MARKET_STATE || {};
+    const donStateLabel = donState.state ? String(donState.state) : "-";
+    const donActionLabel = donState.action ? String(donState.action) : "-";
+    const donFakeRate = Number.isFinite(Number(donState.fake_rate)) ? `${(Number(donState.fake_rate) * 100).toFixed(0)}%` : "-";
 
     return `
   <div class="command-deck" aria-label="戰術交易總覽">
@@ -2929,6 +2937,7 @@
         <div class="command-regime-stat"><span>趨勢</span><strong>${fmt_signed(regime.changePct)}%</strong></div>
         <div class="command-regime-stat"><span>動能</span><strong>${fmt_signed(regime.momentumPct)}%</strong></div>
         <div class="command-regime-stat"><span>波動</span><strong>${regime.volatilityPct.toFixed(2)}%</strong></div>
+        <div class="command-regime-stat"><span>Don72</span><strong>${escapeHtml(donStateLabel)} / ${escapeHtml(donActionLabel)} / 假${escapeHtml(donFakeRate)}</strong></div>
       </div>
     </section>
 
