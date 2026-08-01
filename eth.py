@@ -10312,6 +10312,131 @@ def _build_manipulation_reversal_plan(
     }
 
 
+def _build_donchian_regime_plan(
+    *,
+    price,
+    df_1h,
+    df_1d,
+    news_bias=0.0,
+    event_risk=0,
+):
+    """Build the Don72 long/short candidate gated by daily MA10/MA50 regime."""
+    if not _is_truthy(os.getenv("TRADE_DONCHIAN_REGIME_ENABLED", "0")):
+        return None
+
+    price = max(0.0, _safe_float(price, 0.0))
+    if price <= 0 or df_1h is None or df_1d is None:
+        return None
+    required_1h = max(73, _safe_int(os.getenv("TRADE_DONCHIAN_REGIME_LOOKBACK_HOURS", 72), 72) + 1)
+    required_1d = max(51, _safe_int(os.getenv("TRADE_DONCHIAN_REGIME_MA_SLOW", 50), 50) + 1)
+    if len(df_1h) < required_1h + 1 or len(df_1d) < required_1d + 1:
+        return None
+    for frame, columns in ((df_1h, ("high", "low", "close")), (df_1d, ("close",))):
+        if any(col not in frame for col in columns):
+            return None
+
+    max_event_risk = max(0, _safe_int(os.getenv("TRADE_DONCHIAN_REGIME_MAX_EVENT_RISK", 0), 0))
+    if _safe_int(event_risk, 0) > max_event_risk:
+        return None
+
+    completed_1h = df_1h.iloc[:-1] if len(df_1h) > required_1h else df_1h
+    completed_1d = df_1d.iloc[:-1] if len(df_1d) > required_1d else df_1d
+    lookback = max(24, _safe_int(os.getenv("TRADE_DONCHIAN_REGIME_LOOKBACK_HOURS", 72), 72))
+    ma_fast_len = max(3, _safe_int(os.getenv("TRADE_DONCHIAN_REGIME_MA_FAST", 10), 10))
+    ma_slow_len = max(ma_fast_len + 1, _safe_int(os.getenv("TRADE_DONCHIAN_REGIME_MA_SLOW", 50), 50))
+    if len(completed_1h) < lookback or len(completed_1d) < ma_slow_len:
+        return None
+
+    don_high = _safe_float(completed_1h["high"].tail(lookback).max(), 0.0)
+    don_low = _safe_float(completed_1h["low"].tail(lookback).min(), 0.0)
+    ma_fast = _safe_float(completed_1d["close"].tail(ma_fast_len).mean(), 0.0)
+    ma_slow = _safe_float(completed_1d["close"].tail(ma_slow_len).mean(), 0.0)
+    if don_high <= 0 or don_low <= 0 or ma_fast <= 0 or ma_slow <= 0:
+        return None
+
+    news_block = max(0.0, _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_NEWS_BLOCK_THRESHOLD", 0.45), 0.45))
+    direction = ""
+    regime_name = "bull" if ma_fast > ma_slow else "bear" if ma_fast < ma_slow else "neutral"
+    if regime_name == "bull" and price > don_high:
+        if news_block > 0 and _safe_float(news_bias, 0.0) <= -news_block:
+            return None
+        direction = "long"
+    elif regime_name == "bear" and price < don_low:
+        if news_block > 0 and _safe_float(news_bias, 0.0) >= news_block:
+            return None
+        direction = "short"
+    if direction not in {"long", "short"}:
+        return None
+
+    recent = completed_1h.tail(max(15, min(lookback, 72))).copy()
+    prev_close = recent["close"].shift(1)
+    true_range = pd.concat(
+        [
+            (recent["high"] - recent["low"]).abs(),
+            (recent["high"] - prev_close).abs(),
+            (recent["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr_ref = max(_safe_float(true_range.tail(14).mean(), 0.0), price * 0.0012, 1e-9)
+    stop_atr = max(0.7, _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_STOP_ATR", 1.2), 1.2))
+    rr = max(1.8, _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_RR", 2.2), 2.2))
+    size = _cap_initial_position_size(
+        max(
+            0.001,
+            min(
+                0.06,
+                _safe_float(os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 0.02), 0.02),
+            ),
+        )
+    )
+    buffer = max(atr_ref * 0.10, price * 0.0003)
+    if direction == "long":
+        structural_sl = min(_safe_float(completed_1h["low"].tail(12).min(), price), price - buffer)
+        risk = max(price - structural_sl, atr_ref * stop_atr, price * 0.0015)
+        sl = price - risk
+        tp = price + risk * rr
+        score = 0.74
+        final = "📈 Don72日線多頭突破做多"
+    else:
+        structural_sl = max(_safe_float(completed_1h["high"].tail(12).max(), price), price + buffer)
+        risk = max(structural_sl - price, atr_ref * stop_atr, price * 0.0015)
+        sl = price + risk
+        tp = price - risk * rr
+        score = 0.26
+        final = "📉 Don72日線空頭跌破做空"
+    tp, required_rate = _ensure_minimum_net_profit_tp(direction, price, tp, hold_hours=24.0)
+    confidence = max(
+        0.58,
+        min(0.80, 0.58 + min(0.12, abs(ma_fast - ma_slow) / max(ma_slow, 1e-9) * 2.0)),
+    )
+    return {
+        "direction": direction,
+        "final": final,
+        "sl": float(sl),
+        "tp": float(tp),
+        "position_size": float(size),
+        "score": float(score),
+        "confidence": float(confidence),
+        "required_net_tp_rate": float(required_rate),
+        "donchian_high": float(don_high),
+        "donchian_low": float(don_low),
+        "daily_ma_fast": float(ma_fast),
+        "daily_ma_slow": float(ma_slow),
+        "host_opening_logic": {
+            "direction": direction,
+            "mode": "don72_ls_ma10_50",
+            "confidence": float(confidence),
+            "edge": round(abs(ma_fast - ma_slow) / max(ma_slow, 1e-9), 5),
+            "reasons": [
+                f"daily_ma{ma_fast_len}_{ma_fast:.2f}_{'above' if regime_name == 'bull' else 'below'}_ma{ma_slow_len}_{ma_slow:.2f}",
+                f"donchian_{lookback}h_{'high' if direction == 'long' else 'low'}_break",
+                f"tp_cost_floor>={required_rate*100:.3f}%",
+            ],
+        },
+    }
+
+
 def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
     """多週期支撐壓力 + K線型態分析，可直接餵入已準備好的 K 線資料。"""
     tf_cfg = tf_cfg or [
@@ -12467,6 +12592,40 @@ def build_trade_signal_snapshot(
             0.05,
         )
 
+    if final.startswith("觀望"):
+        donchian_plan = _build_donchian_regime_plan(
+            price=entry,
+            df_1h=df_1h,
+            df_1d=df_1d,
+            news_bias=news_bias,
+            event_risk=event_risk,
+        )
+        if donchian_plan:
+            final = str(donchian_plan["final"])
+            sl = float(donchian_plan["sl"])
+            tp = float(donchian_plan["tp"])
+            position_size = float(donchian_plan["position_size"])
+            score = float(donchian_plan["score"])
+            primary_indicator = "don72_ls_ma10_50"
+            host_opening_logic = dict(donchian_plan["host_opening_logic"])
+            host_logic_applied = True
+            learned_entry_logic = dict(learned_entry_logic)
+            learned_entry_logic["direction"] = str(donchian_plan["direction"])
+            learned_entry_logic["confidence"] = max(
+                _safe_float(learned_entry_logic.get("confidence"), 0.0),
+                _safe_float(donchian_plan.get("confidence"), 0.0),
+            )
+            learned_entry_logic["reasons"] = (
+                list(host_opening_logic.get("reasons") or [])
+                + list(learned_entry_logic.get("reasons") or [])
+            )[:8]
+            if donchian_plan["direction"] == "long":
+                ai_long_prob = max(ai_long_prob, _safe_float(donchian_plan.get("confidence"), 0.0))
+                ai_prob = max(ai_prob, score)
+            else:
+                ai_short_prob = max(ai_short_prob, _safe_float(donchian_plan.get("confidence"), 0.0))
+                ai_prob = min(ai_prob, score)
+
     if not multitimeframe_bull_reclaim.get("applied"):
         reversal_plan = _build_manipulation_reversal_plan(
             price=entry,
@@ -12750,6 +12909,8 @@ def build_trade_signal_snapshot(
             ):
                 profile_ok = True
             elif host_mode == "manipulation_reversal" and direction_name in {"long", "short"}:
+                profile_ok = True
+            elif host_mode == "don72_ls_ma10_50" and direction_name in {"long", "short"}:
                 profile_ok = True
             historical_long_quality_ok = True
             if (

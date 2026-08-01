@@ -92,6 +92,11 @@ def _parse_args():
         help="Backtest an offline candidate that reduces flat time and force-closes every trade within 24h.",
     )
     parser.add_argument(
+        "--donchian-regime",
+        action="store_true",
+        help="Enable the Don72 breakout/breakdown candidate gated by daily MA10/MA50 regime.",
+    )
+    parser.add_argument(
         "--low-flat-strict-quality",
         action="store_true",
         help=(
@@ -1226,6 +1231,7 @@ def _build_open_trade(ts, direction, signal, entry, score, decision):
     min_open_size = 0.001 if (
         str(host_logic.get("mode") or "") == "daily_minimum"
         or str(host_logic.get("mode") or "") == "low_flat_24h"
+        or str(host_logic.get("mode") or "") == "don72_ls_ma10_50"
         or counter_trend_probe
         or opposing_turn_probe
         or quality_signal
@@ -1740,8 +1746,12 @@ def run_backtest(
     invert_signals=False,
     low_flat_24h=False,
     low_flat_strict_quality=False,
+    donchian_regime=False,
     force_max_hold_hours=0.0,
 ):
+    previous_donchian_enabled = os.environ.get("TRADE_DONCHIAN_REGIME_ENABLED")
+    if donchian_regime:
+        os.environ["TRADE_DONCHIAN_REGIME_ENABLED"] = "1"
     base_5m = fetch_futures_klines(
         symbol=symbol,
         interval="5m",
@@ -2091,12 +2101,19 @@ def run_backtest(
     )
     summary["historical_macro_context"] = macro_context.summary()
     summary["signal_direction_mode"] = "inverted" if invert_signals else "normal"
-    if low_flat_24h and low_flat_strict_quality:
+    if donchian_regime:
+        summary["strategy_candidate"] = "don72_ls_ma10_50"
+    elif low_flat_24h and low_flat_strict_quality:
         summary["strategy_candidate"] = "low_flat_24h_strict_quality"
     elif (not low_flat_24h) and eth._safe_float(force_max_hold_hours, 0.0) > 0:
         summary["strategy_candidate"] = f"baseline_max_hold_{eth._safe_float(force_max_hold_hours, 0.0):g}h"
     else:
         summary["strategy_candidate"] = "low_flat_24h" if low_flat_24h else "baseline"
+    if donchian_regime:
+        if previous_donchian_enabled is None:
+            os.environ.pop("TRADE_DONCHIAN_REGIME_ENABLED", None)
+        else:
+            os.environ["TRADE_DONCHIAN_REGIME_ENABLED"] = previous_donchian_enabled
     return base_5m, trades, summary, learning_samples
 
 
@@ -2112,6 +2129,7 @@ def main():
         invert_signals=args.invert_signals,
         low_flat_24h=args.low_flat_24h,
         low_flat_strict_quality=args.low_flat_strict_quality,
+        donchian_regime=args.donchian_regime,
         force_max_hold_hours=args.force_max_hold_hours,
     )
 
