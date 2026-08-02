@@ -69,6 +69,30 @@ def _ma_momentum_hourly_frame(bull=True):
     return pd.DataFrame(rows, index=idx)
 
 
+def _dip_reclaim_5m_frame():
+    idx = pd.date_range("2026-01-01", periods=60, freq="5min", tz="UTC")
+    rows = []
+    for i in range(60):
+        if i < 40:
+            close = 100.0 - i * 0.03
+        elif i == 40:
+            close = 98.90
+        elif i < 48:
+            close = 98.95 + (i - 40) * 0.05
+        else:
+            close = 99.35 + (i - 48) * 0.04
+        low = close - 0.08
+        high = close + 0.10
+        volume = 1.0
+        if i == 40:
+            low = 98.20
+            high = 99.20
+            close = 98.95
+            volume = 2.0
+        rows.append({"open": close - 0.03, "high": high, "low": low, "close": close, "volume": volume})
+    return pd.DataFrame(rows, index=idx)
+
+
 class DonchianRegimeTests(unittest.TestCase):
     def test_bull_daily_regime_and_donchian_breakout_builds_long(self):
         df_1h = _hourly_frame()
@@ -336,6 +360,60 @@ class DonchianRegimeTests(unittest.TestCase):
             plan = eth._build_ma_momentum_regime_plan(
                 price=price,
                 df_1h=df_1h,
+                news_bias=-0.8,
+                event_risk=0,
+            )
+
+        self.assertIsNone(plan)
+
+    def test_dip_reclaim_candidate_builds_long_after_sweep_low(self):
+        df_5m = _dip_reclaim_5m_frame()
+        price = float(df_5m.iloc[-1]["close"]) + 0.1
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DIP_RECLAIM_LONG_ENABLED": "1",
+                "TRADE_DIP_RECLAIM_SIZE_RATIO": "0.60",
+                "TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M": "24",
+            },
+        ):
+            plan = eth._build_dip_reclaim_long_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["direction"], "long")
+        self.assertEqual(plan["host_opening_logic"]["mode"], "dip_reclaim_long")
+        self.assertEqual(plan["position_size"], 0.60)
+        self.assertGreater(plan["tp"], price)
+        self.assertLess(plan["sl"], plan["sweep_low"])
+
+    def test_dip_reclaim_candidate_waits_without_reclaim(self):
+        df_5m = _dip_reclaim_5m_frame()
+        price = float(df_5m["low"].min()) * 1.001
+
+        with patch.dict(os.environ, {"TRADE_DIP_RECLAIM_LONG_ENABLED": "1"}):
+            plan = eth._build_dip_reclaim_long_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNone(plan)
+
+    def test_dip_reclaim_news_against_direction_blocks_candidate(self):
+        df_5m = _dip_reclaim_5m_frame()
+        price = float(df_5m.iloc[-1]["close"]) + 0.1
+
+        with patch.dict(os.environ, {"TRADE_DIP_RECLAIM_LONG_ENABLED": "1"}):
+            plan = eth._build_dip_reclaim_long_plan(
+                price=price,
+                df_5m=df_5m,
                 news_bias=-0.8,
                 event_risk=0,
             )
