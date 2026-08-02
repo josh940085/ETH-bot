@@ -287,6 +287,30 @@ class DonchianRegimeTests(unittest.TestCase):
         self.assertGreater(plan["tp"], price)
         self.assertLess(plan["sl"], price)
 
+    def test_ma_momentum_candidate_ignores_chop_size_reduction_by_default(self):
+        df_1h = _ma_momentum_hourly_frame(bull=True)
+        price = float(df_1h.iloc[-1]["close"]) + 0.5
+
+        mocked_state = {"state": "chop", "action": "reduce", "size_multiplier": 0.35, "reasons": ["market_state=chop"]}
+        with patch.object(eth, "_score_recent_donchian_market_state", return_value=mocked_state), patch.dict(
+            os.environ,
+            {
+                "TRADE_MA_MOMENTUM_REGIME_ENABLED": "1",
+                "TRADE_MA_MOMENTUM_SIZE_RATIO": "1.00",
+                "TRADE_MA_MOMENTUM_USE_MARKET_STATE_SIZE_MULT": "0",
+            },
+        ):
+            plan = eth._build_ma_momentum_regime_plan(
+                price=price,
+                df_1h=df_1h,
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["market_state_filter"]["action"], "reduce")
+        self.assertEqual(plan["position_size"], 1.00)
+
     def test_ma_momentum_candidate_builds_short(self):
         df_1h = _ma_momentum_hourly_frame(bull=False)
         price = float(df_1h.iloc[-1]["close"]) - 0.5

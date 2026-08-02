@@ -10659,7 +10659,8 @@ def _build_ma_momentum_regime_plan(
     stop_atr = max(0.7, _safe_float(os.getenv("TRADE_MA_MOMENTUM_STOP_ATR", os.getenv("TRADE_DONCHIAN_REGIME_STOP_ATR", 1.2)), 1.2))
     rr = max(1.8, _safe_float(os.getenv("TRADE_MA_MOMENTUM_RR", os.getenv("TRADE_DONCHIAN_REGIME_RR", 2.2)), 2.2))
     size = max(0.001, min(1.0, _safe_float(os.getenv("TRADE_MA_MOMENTUM_SIZE_RATIO", os.getenv("TRADE_DONCHIAN_REGIME_SIZE_RATIO", 1.0)), 1.0)))
-    size *= max(0.0, min(1.0, _safe_float(market_state.get("size_multiplier"), 1.0)))
+    if _is_truthy(os.getenv("TRADE_MA_MOMENTUM_USE_MARKET_STATE_SIZE_MULT", "0")):
+        size *= max(0.0, min(1.0, _safe_float(market_state.get("size_multiplier"), 1.0)))
 
     buffer = max(atr_ref * 0.10, price * 0.0003)
     if direction == "long":
@@ -17110,7 +17111,15 @@ def run_bot():
                 base_size = _safe_float(position_size, 0.0)
                 if base_size <= 0:
                     base_size = 0.2
-                base_size = _cap_initial_position_size(base_size)
+                full_asset_entry = (
+                    str(decision.get("primary_indicator") or "") == "ma24_120_mom60_10"
+                    and _is_truthy(os.getenv("TRADE_MA_MOMENTUM_FULL_ASSET_OPEN", "1"))
+                    and not daily_min_trade
+                )
+                if full_asset_entry:
+                    base_size = min(1.0, max(0.001, base_size))
+                else:
+                    base_size = _cap_initial_position_size(base_size)
                 planned_open_size = base_size
                 active_trade["size"] = float(min(1.0, max(base_size, 0.1)))
                 breakout_max_size = max(
@@ -17119,7 +17128,10 @@ def run_bot():
                 )
                 if daily_min_trade or bool(decision.get("daily_anchor_quality_signal")) or breakout_max_size > 0:
                     active_trade["size"] = float(max(base_size, 0.01))
-                max_size, min_size = _derive_scaling_bounds(active_trade["size"])
+                if full_asset_entry:
+                    max_size, min_size = 1.0, min(1.0, active_trade["size"])
+                else:
+                    max_size, min_size = _derive_scaling_bounds(active_trade["size"])
                 if bool(decision.get("daily_anchor_quality_signal")):
                     max_size = active_trade["size"]
                 elif breakout_max_size > 0:
