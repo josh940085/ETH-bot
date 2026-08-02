@@ -10710,22 +10710,29 @@ def _build_ma_momentum_regime_plan(
     }
 
 
-def _build_dip_reclaim_long_plan(
+def _build_extreme_reclaim_plan(
     *,
+    direction,
     price,
     df_5m,
     df_15m=None,
     news_bias=0.0,
     event_risk=0,
 ):
-    """Build a post-dump low reclaim long candidate.
+    """Build a post-extreme reclaim candidate.
 
-    This is intentionally not a falling-knife entry.  It waits for a sharp
-    selloff, a recent sweep low, and a short-term reclaim before allowing a
-    counter-trend long.  It exists to catch lows like a 02:31 washout after the
-    market proves it is no longer making immediate new lows.
+    Long waits for a sharp selloff, a sweep low, and a reclaim. Short waits
+    for a sharp pump, a sweep high, and a rejection. This avoids blind
+    falling-knife / rising-knife entries.
     """
-    if not _is_truthy(os.getenv("TRADE_DIP_RECLAIM_LONG_ENABLED", "0")):
+    direction = str(direction or "").lower()
+    if direction not in {"long", "short"}:
+        return None
+    if direction == "long":
+        enabled = _is_truthy(os.getenv("TRADE_DIP_RECLAIM_LONG_ENABLED", "0"))
+    else:
+        enabled = _is_truthy(os.getenv("TRADE_DIP_RECLAIM_SHORT_ENABLED", "0"))
+    if not enabled:
         return None
 
     price = max(0.0, _safe_float(price, 0.0))
@@ -10738,12 +10745,14 @@ def _build_dip_reclaim_long_plan(
     if _safe_int(event_risk, 0) > max_event_risk:
         return None
     news_block = max(0.0, _safe_float(os.getenv("TRADE_DIP_RECLAIM_NEWS_BLOCK_THRESHOLD", 0.50), 0.50))
-    if news_block > 0 and _safe_float(news_bias, 0.0) <= -news_block:
+    if direction == "long" and news_block > 0 and _safe_float(news_bias, 0.0) <= -news_block:
+        return None
+    if direction == "short" and news_block > 0 and _safe_float(news_bias, 0.0) >= news_block:
         return None
 
     completed = df_5m.iloc[:-1].copy() if len(df_5m) > 60 else df_5m.copy()
     lookback = max(18, min(96, _safe_int(os.getenv("TRADE_DIP_RECLAIM_LOOKBACK_BARS_5M", 36), 36)))
-    recent_low_bars = max(2, min(24, _safe_int(os.getenv("TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M", 12), 12)))
+    recent_extreme_bars = max(2, min(24, _safe_int(os.getenv("TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M", 12), 12)))
     if len(completed) < lookback:
         return None
     window = completed.tail(lookback).copy()
@@ -10753,53 +10762,81 @@ def _build_dip_reclaim_long_plan(
     if highs.isna().any() or lows.isna().any() or closes.isna().any():
         return None
 
-    low_pos = int(lows.values.argmin())
-    bars_since_low = len(window) - 1 - low_pos
-    if bars_since_low < 1 or bars_since_low > recent_low_bars:
-        return None
-
-    sweep_low = _safe_float(lows.iloc[low_pos], 0.0)
-    pre_high = _safe_float(highs.iloc[: low_pos + 1].max(), 0.0)
     last_close = _safe_float(closes.iloc[-1], 0.0)
     prev_close = _safe_float(closes.iloc[-2], 0.0) if len(closes) >= 2 else last_close
-    if sweep_low <= 0 or pre_high <= 0 or last_close <= 0:
-        return None
-
-    dump_rate = max(0.0, (pre_high - sweep_low) / pre_high)
-    reclaim_rate = max(0.0, (price - sweep_low) / sweep_low)
     min_dump = max(0.002, _safe_float(os.getenv("TRADE_DIP_RECLAIM_MIN_DUMP_RATE", 0.010), 0.010))
+    min_pump = max(0.002, _safe_float(os.getenv("TRADE_DIP_RECLAIM_MIN_PUMP_RATE", os.getenv("TRADE_DIP_RECLAIM_MIN_DUMP_RATE", 0.010)), 0.010))
     min_reclaim = max(0.001, _safe_float(os.getenv("TRADE_DIP_RECLAIM_MIN_RECLAIM_RATE", 0.0035), 0.0035))
-    if dump_rate < min_dump or reclaim_rate < min_reclaim:
-        return None
 
-    post_low = window.iloc[low_pos + 1 :]
-    if post_low.empty:
-        return None
-    post_low_min = _safe_float(pd.to_numeric(post_low["low"], errors="coerce").min(), sweep_low)
-    if post_low_min < sweep_low:
-        return None
+    if direction == "long":
+        extreme_pos = int(lows.values.argmin())
+        bars_since_extreme = len(window) - 1 - extreme_pos
+        if bars_since_extreme < 1 or bars_since_extreme > recent_extreme_bars:
+            return None
+        sweep_price = _safe_float(lows.iloc[extreme_pos], 0.0)
+        opposite_ref = _safe_float(highs.iloc[: extreme_pos + 1].max(), 0.0)
+        if sweep_price <= 0 or opposite_ref <= 0 or last_close <= 0:
+            return None
+        extreme_rate = max(0.0, (opposite_ref - sweep_price) / opposite_ref)
+        reclaim_rate = max(0.0, (price - sweep_price) / sweep_price)
+        if extreme_rate < min_dump or reclaim_rate < min_reclaim:
+            return None
+        post_extreme = window.iloc[extreme_pos + 1 :]
+        if post_extreme.empty:
+            return None
+        post_min = _safe_float(pd.to_numeric(post_extreme["low"], errors="coerce").min(), sweep_price)
+        if post_min < sweep_price:
+            return None
+        reclaim_level = sweep_price * (1.0 + min_reclaim)
+        early_confirm = _safe_float(pd.to_numeric(post_extreme["high"], errors="coerce").head(max(1, min(3, len(post_extreme)))).max(), reclaim_level)
+        if price < reclaim_level or price < early_confirm or last_close < reclaim_level:
+            return None
+        structure_ok = _safe_float(lows.tail(min(3, len(lows))).min(), sweep_price) > sweep_price
+        short_momentum_ok = last_close >= prev_close or price >= last_close
+        if not structure_ok or not short_momentum_ok:
+            return None
+    else:
+        extreme_pos = int(highs.values.argmax())
+        bars_since_extreme = len(window) - 1 - extreme_pos
+        if bars_since_extreme < 1 or bars_since_extreme > recent_extreme_bars:
+            return None
+        sweep_price = _safe_float(highs.iloc[extreme_pos], 0.0)
+        opposite_ref = _safe_float(lows.iloc[: extreme_pos + 1].min(), 0.0)
+        if sweep_price <= 0 or opposite_ref <= 0 or last_close <= 0:
+            return None
+        extreme_rate = max(0.0, (sweep_price - opposite_ref) / opposite_ref)
+        reclaim_rate = max(0.0, (sweep_price - price) / sweep_price)
+        if extreme_rate < min_pump or reclaim_rate < min_reclaim:
+            return None
+        post_extreme = window.iloc[extreme_pos + 1 :]
+        if post_extreme.empty:
+            return None
+        post_max = _safe_float(pd.to_numeric(post_extreme["high"], errors="coerce").max(), sweep_price)
+        if post_max > sweep_price:
+            return None
+        reclaim_level = sweep_price * (1.0 - min_reclaim)
+        early_confirm = _safe_float(pd.to_numeric(post_extreme["low"], errors="coerce").head(max(1, min(3, len(post_extreme)))).min(), reclaim_level)
+        if price > reclaim_level or price > early_confirm or last_close > reclaim_level:
+            return None
+        structure_ok = _safe_float(highs.tail(min(3, len(highs))).max(), sweep_price) < sweep_price
+        short_momentum_ok = last_close <= prev_close or price <= last_close
+        if not structure_ok or not short_momentum_ok:
+            return None
 
-    reclaim_level = sweep_low * (1.0 + min_reclaim)
-    recent_high_confirm = _safe_float(pd.to_numeric(post_low["high"], errors="coerce").head(max(1, min(3, len(post_low)))).max(), reclaim_level)
-    if price < reclaim_level or price < recent_high_confirm or last_close < reclaim_level:
-        return None
-
-    higher_low_ok = _safe_float(lows.tail(min(3, len(lows))).min(), sweep_low) > sweep_low
-    short_momentum_ok = last_close >= prev_close or price >= last_close
-    if not higher_low_ok or not short_momentum_ok:
-        return None
-
-    low_row = window.iloc[low_pos]
-    low_range = max(_safe_float(low_row.get("high"), sweep_low) - sweep_low, 1e-9)
-    low_close_recovery = (_safe_float(low_row.get("close"), sweep_low) - sweep_low) / low_range
+    extreme_row = window.iloc[extreme_pos]
+    extreme_range = max(_safe_float(extreme_row.get("high"), sweep_price) - _safe_float(extreme_row.get("low"), sweep_price), 1e-9)
+    if direction == "long":
+        wick_recovery = (_safe_float(extreme_row.get("close"), sweep_price) - sweep_price) / extreme_range
+    else:
+        wick_recovery = (sweep_price - _safe_float(extreme_row.get("close"), sweep_price)) / extreme_range
     volume_reason = ""
     if "volume" in window:
         vols = pd.to_numeric(window["volume"], errors="coerce")
-        avg_vol = _safe_float(vols.drop(vols.index[low_pos]).tail(20).mean(), 0.0)
-        low_vol = _safe_float(vols.iloc[low_pos], 0.0)
-        if avg_vol > 0 and low_vol >= avg_vol * _safe_float(os.getenv("TRADE_DIP_RECLAIM_VOLUME_MULT", 1.10), 1.10):
-            volume_reason = f"selloff_absorption_vol={low_vol/avg_vol:.2f}x"
-    wick_ok = low_close_recovery >= _safe_float(os.getenv("TRADE_DIP_RECLAIM_LOW_CLOSE_RECOVERY", 0.35), 0.35)
+        avg_vol = _safe_float(vols.drop(vols.index[extreme_pos]).tail(20).mean(), 0.0)
+        extreme_vol = _safe_float(vols.iloc[extreme_pos], 0.0)
+        if avg_vol > 0 and extreme_vol >= avg_vol * _safe_float(os.getenv("TRADE_DIP_RECLAIM_VOLUME_MULT", 1.10), 1.10):
+            volume_reason = ("selloff_absorption" if direction == "long" else "pump_rejection") + f"_vol={extreme_vol/avg_vol:.2f}x"
+    wick_ok = wick_recovery >= _safe_float(os.getenv("TRADE_DIP_RECLAIM_LOW_CLOSE_RECOVERY", 0.35), 0.35)
     if not (wick_ok or volume_reason):
         return None
 
@@ -10815,45 +10852,99 @@ def _build_dip_reclaim_long_plan(
     ).max(axis=1)
     atr_ref = max(_safe_float(true_range.tail(14).mean(), 0.0), price * 0.0012, 1e-9)
     stop_buffer = max(atr_ref * _safe_float(os.getenv("TRADE_DIP_RECLAIM_STOP_ATR", 0.55), 0.55), price * 0.0015)
-    sl = min(sweep_low - stop_buffer, price - price * 0.0015)
-    risk = max(price - sl, atr_ref * 0.65, price * 0.0015)
     rr = max(1.6, _safe_float(os.getenv("TRADE_DIP_RECLAIM_RR", 2.0), 2.0))
-    tp = price + risk * rr
-    tp, required_rate = _ensure_minimum_net_profit_tp("long", price, tp, hold_hours=12.0)
+    if direction == "long":
+        sl = min(sweep_price - stop_buffer, price - price * 0.0015)
+        risk = max(price - sl, atr_ref * 0.65, price * 0.0015)
+        tp = price + risk * rr
+        score = 0.76
+        final = "📈 急跌低點收回做多"
+        mode = "dip_reclaim_long"
+        extreme_key = "sweep_low"
+    else:
+        sl = max(sweep_price + stop_buffer, price + price * 0.0015)
+        risk = max(sl - price, atr_ref * 0.65, price * 0.0015)
+        tp = price - risk * rr
+        score = 0.24
+        final = "📉 急拉高點回落做空"
+        mode = "pump_reject_short"
+        extreme_key = "sweep_high"
+    tp, required_rate = _ensure_minimum_net_profit_tp(direction, price, tp, hold_hours=12.0)
     size = max(0.001, min(1.0, _safe_float(os.getenv("TRADE_DIP_RECLAIM_SIZE_RATIO", 0.60), 0.60)))
-    confidence = max(0.58, min(0.82, 0.55 + min(0.12, dump_rate * 4.0) + min(0.08, reclaim_rate * 6.0)))
+    confidence = max(0.58, min(0.82, 0.55 + min(0.12, extreme_rate * 4.0) + min(0.08, reclaim_rate * 6.0)))
     reasons = [
-        f"dump={dump_rate*100:.2f}%",
-        f"reclaim={reclaim_rate*100:.2f}%",
-        f"low_age={bars_since_low}x5m",
-        f"higher_low={higher_low_ok}",
+        f"{'dump' if direction == 'long' else 'pump'}={extreme_rate*100:.2f}%",
+        f"{'reclaim' if direction == 'long' else 'reject'}={reclaim_rate*100:.2f}%",
+        f"extreme_age={bars_since_extreme}x5m",
+        f"{'higher_low' if direction == 'long' else 'lower_high'}={structure_ok}",
         f"tp_cost_floor>={required_rate*100:.3f}%",
     ]
     if volume_reason:
         reasons.append(volume_reason)
     elif wick_ok:
-        reasons.append(f"low_wick_recovery={low_close_recovery:.2f}")
+        reasons.append(f"wick_recovery={wick_recovery:.2f}")
 
-    return {
-        "direction": "long",
-        "final": "📈 急跌低點收回做多",
+    result = {
+        "direction": direction,
+        "final": final,
         "sl": float(sl),
         "tp": float(tp),
         "position_size": float(size),
-        "score": 0.76,
+        "score": float(score),
         "confidence": float(confidence),
         "required_net_tp_rate": float(required_rate),
-        "sweep_low": float(sweep_low),
-        "dump_rate": float(dump_rate),
+        "extreme_rate": float(extreme_rate),
         "reclaim_rate": float(reclaim_rate),
         "host_opening_logic": {
-            "direction": "long",
-            "mode": "dip_reclaim_long",
+            "direction": direction,
+            "mode": mode,
             "confidence": float(confidence),
-            "edge": round(dump_rate + reclaim_rate, 5),
+            "edge": round(extreme_rate + reclaim_rate, 5),
             "reasons": reasons[:8],
         },
     }
+    result[extreme_key] = float(sweep_price)
+    if direction == "long":
+        result["dump_rate"] = float(extreme_rate)
+    else:
+        result["pump_rate"] = float(extreme_rate)
+    return result
+
+
+def _build_dip_reclaim_long_plan(
+    *,
+    price,
+    df_5m,
+    df_15m=None,
+    news_bias=0.0,
+    event_risk=0,
+):
+    return _build_extreme_reclaim_plan(
+        direction="long",
+        price=price,
+        df_5m=df_5m,
+        df_15m=df_15m,
+        news_bias=news_bias,
+        event_risk=event_risk,
+    )
+
+
+def _build_pump_reject_short_plan(
+    *,
+    price,
+    df_5m,
+    df_15m=None,
+    news_bias=0.0,
+    event_risk=0,
+):
+    return _build_extreme_reclaim_plan(
+        direction="short",
+        price=price,
+        df_5m=df_5m,
+        df_15m=df_15m,
+        news_bias=news_bias,
+        event_risk=event_risk,
+    )
 
 
 def analyze_multi_tf_sr_frames(price, frame_map, tf_cfg=None):
@@ -13045,6 +13136,36 @@ def build_trade_signal_snapshot(
             )[:8]
             ai_long_prob = max(ai_long_prob, _safe_float(dip_reclaim_plan.get("confidence"), 0.0))
             ai_prob = max(ai_prob, score)
+
+    if final.startswith("觀望"):
+        pump_reject_plan = _build_pump_reject_short_plan(
+            price=entry,
+            df_5m=df_5m,
+            df_15m=df_15m,
+            news_bias=news_bias,
+            event_risk=event_risk,
+        )
+        if pump_reject_plan:
+            final = str(pump_reject_plan["final"])
+            sl = float(pump_reject_plan["sl"])
+            tp = float(pump_reject_plan["tp"])
+            position_size = float(pump_reject_plan["position_size"])
+            score = float(pump_reject_plan["score"])
+            primary_indicator = "pump_reject_short"
+            host_opening_logic = dict(pump_reject_plan["host_opening_logic"])
+            host_logic_applied = True
+            learned_entry_logic = dict(learned_entry_logic)
+            learned_entry_logic["direction"] = "short"
+            learned_entry_logic["confidence"] = max(
+                _safe_float(learned_entry_logic.get("confidence"), 0.0),
+                _safe_float(pump_reject_plan.get("confidence"), 0.0),
+            )
+            learned_entry_logic["reasons"] = (
+                list(host_opening_logic.get("reasons") or [])
+                + list(learned_entry_logic.get("reasons") or [])
+            )[:8]
+            ai_short_prob = max(ai_short_prob, _safe_float(pump_reject_plan.get("confidence"), 0.0))
+            ai_prob = min(ai_prob, score)
 
     if final.startswith("觀望"):
         ma_momentum_plan = _build_ma_momentum_regime_plan(

@@ -93,6 +93,30 @@ def _dip_reclaim_5m_frame():
     return pd.DataFrame(rows, index=idx)
 
 
+def _pump_reject_5m_frame():
+    idx = pd.date_range("2026-01-01", periods=60, freq="5min", tz="UTC")
+    rows = []
+    for i in range(60):
+        if i < 40:
+            close = 100.0 + i * 0.03
+        elif i == 40:
+            close = 101.10
+        elif i < 48:
+            close = 101.05 - (i - 40) * 0.05
+        else:
+            close = 100.65 - (i - 48) * 0.04
+        low = close - 0.10
+        high = close + 0.08
+        volume = 1.0
+        if i == 40:
+            low = 100.80
+            high = 101.80
+            close = 101.05
+            volume = 2.0
+        rows.append({"open": close + 0.03, "high": high, "low": low, "close": close, "volume": volume})
+    return pd.DataFrame(rows, index=idx)
+
+
 class DonchianRegimeTests(unittest.TestCase):
     def test_bull_daily_regime_and_donchian_breakout_builds_long(self):
         df_1h = _hourly_frame()
@@ -415,6 +439,60 @@ class DonchianRegimeTests(unittest.TestCase):
                 price=price,
                 df_5m=df_5m,
                 news_bias=-0.8,
+                event_risk=0,
+            )
+
+        self.assertIsNone(plan)
+
+    def test_pump_reject_candidate_builds_short_after_sweep_high(self):
+        df_5m = _pump_reject_5m_frame()
+        price = float(df_5m.iloc[-1]["close"]) - 0.1
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DIP_RECLAIM_SHORT_ENABLED": "1",
+                "TRADE_DIP_RECLAIM_SIZE_RATIO": "0.60",
+                "TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M": "24",
+            },
+        ):
+            plan = eth._build_pump_reject_short_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["direction"], "short")
+        self.assertEqual(plan["host_opening_logic"]["mode"], "pump_reject_short")
+        self.assertEqual(plan["position_size"], 0.60)
+        self.assertLess(plan["tp"], price)
+        self.assertGreater(plan["sl"], plan["sweep_high"])
+
+    def test_pump_reject_candidate_waits_without_rejection(self):
+        df_5m = _pump_reject_5m_frame()
+        price = float(df_5m["high"].max()) * 0.999
+
+        with patch.dict(os.environ, {"TRADE_DIP_RECLAIM_SHORT_ENABLED": "1"}):
+            plan = eth._build_pump_reject_short_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.0,
+                event_risk=0,
+            )
+
+        self.assertIsNone(plan)
+
+    def test_pump_reject_news_against_direction_blocks_candidate(self):
+        df_5m = _pump_reject_5m_frame()
+        price = float(df_5m.iloc[-1]["close"]) - 0.1
+
+        with patch.dict(os.environ, {"TRADE_DIP_RECLAIM_SHORT_ENABLED": "1"}):
+            plan = eth._build_pump_reject_short_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.8,
                 event_risk=0,
             )
 
