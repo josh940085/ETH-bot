@@ -50,6 +50,74 @@ class StopLossAndPullbackSafetyTests(unittest.TestCase):
         self.assertEqual(deduped[0]["close_price"], 1930.28)
         self.assertEqual(deduped[1]["direction"], "short")
 
+    def test_post_sl_review_rechecks_qualified_opposite_direction(self):
+        review = eth._build_post_sl_opposite_review(
+            "short",
+            {
+                "htf": 1,
+                "mid_trend": 1,
+                "breakout": 1,
+                "macro_bias": 1.5,
+                "derivatives_pressure": 0.05,
+                "event_risk": 0,
+                "ai_long_prob": 0.72,
+                "host_opening_logic": {
+                    "direction": "long",
+                    "confidence": 0.80,
+                },
+            },
+        )
+
+        self.assertEqual(review["opposite_direction"], "long")
+        self.assertTrue(review["ready_for_fresh_evaluation"])
+        self.assertTrue(review["requires_normal_entry_validation"])
+        self.assertIn("正常進場與RR/TP/SL確認", review["summary"])
+
+    def test_post_sl_review_does_not_force_unconfirmed_reversal(self):
+        review = eth._build_post_sl_opposite_review(
+            "short",
+            {
+                "htf": -1,
+                "mid_trend": 1,
+                "breakout": 0,
+                "macro_bias": 1.5,
+                "derivatives_pressure": -0.10,
+                "event_risk": 0,
+                "ai_long_prob": 0.36,
+                "host_opening_logic": {"direction": "neutral", "confidence": 0.30},
+            },
+        )
+
+        self.assertFalse(review["ready_for_fresh_evaluation"])
+        self.assertIn("4H未轉多", review["missing_conditions"])
+        self.assertIn("反向突破未確認", review["missing_conditions"])
+        self.assertIn("AI做多機率 0.36<0.65", review["missing_conditions"])
+
+    def test_stop_loss_review_persists_opposite_direction_analysis(self):
+        review = eth._review_stop_loss_event(
+            "short",
+            100.0,
+            98.0,
+            101.0,
+            101.0,
+            101.1,
+            99.9,
+            1.0,
+            {
+                "htf": 1,
+                "mid_trend": 1,
+                "breakout": 1,
+                "macro_bias": 1.0,
+                "derivatives_pressure": 0.0,
+                "event_risk": 0,
+                "ai_long_prob": 0.70,
+                "host_opening_logic": {"direction": "long", "confidence": 0.75},
+            },
+        )
+
+        self.assertEqual(review["opposite_direction_review"]["opposite_direction"], "long")
+        self.assertTrue(review["opposite_direction_review"]["ready_for_fresh_evaluation"])
+
     def test_reclaim_signal_requires_pullback(self):
         self.assertTrue(
             eth._entry_confirmation_requires_pullback(

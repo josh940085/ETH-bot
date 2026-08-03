@@ -5012,6 +5012,94 @@ def _build_sl_strategy_review(direction, entry, tp, sl, close_price, atr_ref, co
     }
 
 
+def _build_post_sl_opposite_review(direction, context=None):
+    """Explain whether the opposite side deserves a fresh post-SL evaluation.
+
+    This is deliberately diagnostic. A stopped trade must not turn into an
+    unconditional market reversal; the normal entry, price-validation, event,
+    RR, and protection-order gates remain authoritative.
+    """
+    direction = _normalize_trade_direction(direction)
+    context = context if isinstance(context, dict) else {}
+    opposite = "short" if direction == "long" else "long"
+    sign = 1 if opposite == "long" else -1
+    label = "做多" if opposite == "long" else "做空"
+
+    htf = _safe_int(context.get("htf"), 0)
+    mid_trend = _safe_int(context.get("mid_trend"), 0)
+    breakout = _safe_int(context.get("breakout"), 0)
+    macro_bias = _safe_float(context.get("macro_bias"), 0.0)
+    derivatives_pressure = _safe_float(context.get("derivatives_pressure"), 0.0)
+    event_risk = _safe_int(context.get("event_risk"), 0)
+    opposite_prob = _safe_float(
+        context.get("ai_long_prob" if opposite == "long" else "ai_short_prob"),
+        0.0,
+    )
+    min_probability = max(
+        0.55,
+        min(0.75, _safe_float(os.getenv("TRADE_POST_SL_OPPOSITE_MIN_PROB", 0.65), 0.65)),
+    )
+    host_logic = context.get("host_opening_logic") if isinstance(context.get("host_opening_logic"), dict) else {}
+    host_direction = str(host_logic.get("direction") or "neutral")
+    host_confidence = _safe_float(host_logic.get("confidence"), 0.0)
+
+    checks = {
+        "higher_timeframe": htf == sign,
+        "mid_trend": mid_trend == sign,
+        "breakout": breakout == sign,
+        "probability": opposite_prob >= min_probability,
+        "macro": macro_bias * sign >= 0.30,
+        "derivatives": derivatives_pressure * sign >= -0.15,
+        "host_logic": host_direction == opposite and host_confidence >= 0.60,
+        "event_risk": event_risk <= 1,
+    }
+    directional_votes = sum(
+        int(checks[key])
+        for key in ("higher_timeframe", "mid_trend", "breakout", "macro", "host_logic")
+    )
+    ready = bool(
+        checks["probability"]
+        and checks["event_risk"]
+        and checks["derivatives"]
+        and directional_votes >= 3
+        and (checks["higher_timeframe"] or checks["breakout"])
+    )
+
+    missing = []
+    if not checks["higher_timeframe"]:
+        missing.append(f"4H未轉{label[-1]}")
+    if not checks["mid_trend"]:
+        missing.append(f"30m未轉{label[-1]}")
+    if not checks["breakout"]:
+        missing.append("反向突破未確認")
+    if not checks["probability"]:
+        missing.append(f"AI{label}機率 {opposite_prob:.2f}<{min_probability:.2f}")
+    if not checks["macro"]:
+        missing.append("宏觀未支持反向")
+    if not checks["host_logic"]:
+        missing.append("MLX主邏輯未支持反向")
+    if not checks["event_risk"]:
+        missing.append("事件風險過高")
+
+    summary = (
+        f"反向{label}具備重新評估條件，交回正常進場與RR/TP/SL確認"
+        if ready
+        else f"反向{label}尚未成立：" + "、".join(missing[:4])
+    )
+    return {
+        "original_direction": direction,
+        "opposite_direction": opposite,
+        "ready_for_fresh_evaluation": ready,
+        "summary": summary,
+        "checks": checks,
+        "directional_votes": directional_votes,
+        "ai_probability": round(opposite_prob, 4),
+        "min_ai_probability": round(min_probability, 4),
+        "missing_conditions": missing,
+        "requires_normal_entry_validation": True,
+    }
+
+
 def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, candle_low, atr, context=None):
     """Review the SL plan at execution time and retain a short re-entry guard."""
     direction = _normalize_trade_direction(direction)
@@ -5085,6 +5173,7 @@ def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, 
     for detail in strategy_review.get("issue_details", []):
         if detail not in issues:
             issues.append(detail)
+    opposite_review = _build_post_sl_opposite_review(direction, context)
 
     requires_revalidation = bool(issues)
     verdict = "需重新確認" if requires_revalidation else "SL設定合理，屬正常風控出場"
@@ -5107,6 +5196,7 @@ def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, 
         "optimization_actions": strategy_review.get("optimization_actions", []),
         "replay_snapshot": strategy_review.get("replay_snapshot", {}),
         "strategy_optimization_severity": strategy_review.get("severity", 1),
+        "opposite_direction_review": opposite_review,
         "requires_revalidation": requires_revalidation,
         "verdict": verdict,
     }
@@ -5200,7 +5290,9 @@ def _build_sl_review_context_from_live(
         "repeated_support_tests": decision.get("repeated_support_tests"),
         "repeated_resistance_tests": decision.get("repeated_resistance_tests"),
         "repeated_test_pressure": decision.get("repeated_test_pressure"),
+        "event_risk": decision.get("event_risk"),
         "content_override": decision.get("content_override"),
+        "host_opening_logic": decision.get("host_opening_logic"),
         "learned_entry_logic": decision.get("learned_entry_logic"),
         "primary_indicator": decision.get("primary_indicator"),
     }
@@ -16774,7 +16866,9 @@ def run_bot():
                             + (
                                 "\n策略優化: " + "；".join((sl_review.get("optimization_actions") or [])[:3])
                                 if sl_review.get("optimization_actions") else ""
-                            ),
+                            )
+                            + "\n反向檢查: "
+                            + str((sl_review.get("opposite_direction_review") or {}).get("summary") or "等待下一輪重新評估"),
                             priority=True,
                         )
 
@@ -16861,7 +16955,9 @@ def run_bot():
                             + (
                                 "\n策略優化: " + "；".join((sl_review.get("optimization_actions") or [])[:3])
                                 if sl_review.get("optimization_actions") else ""
-                            ),
+                            )
+                            + "\n反向檢查: "
+                            + str((sl_review.get("opposite_direction_review") or {}).get("summary") or "等待下一輪重新評估"),
                             priority=True,
                         )
 
