@@ -10718,6 +10718,7 @@ def _build_extreme_reclaim_plan(
     df_15m=None,
     news_bias=0.0,
     event_risk=0,
+    bearish_context=False,
 ):
     """Build a post-extreme reclaim candidate.
 
@@ -10755,7 +10756,11 @@ def _build_extreme_reclaim_plan(
     recent_extreme_bars = max(2, min(24, _safe_int(os.getenv("TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M", 12), 12)))
     if len(completed) < lookback:
         return None
-    window = completed.tail(lookback).copy()
+    # For pump rejection, keep the pre-extreme lookback anchored to the high.
+    # Otherwise the starting low can roll out while the bot waits for the
+    # required post-high confirmation candle. Leave the long path unchanged.
+    window_span = lookback + recent_extreme_bars if direction == "short" else lookback
+    window = completed.tail(window_span).copy()
     highs = pd.to_numeric(window["high"], errors="coerce")
     lows = pd.to_numeric(window["low"], errors="coerce")
     closes = pd.to_numeric(window["close"], errors="coerce")
@@ -10767,14 +10772,40 @@ def _build_extreme_reclaim_plan(
     min_dump = max(0.002, _safe_float(os.getenv("TRADE_DIP_RECLAIM_MIN_DUMP_RATE", 0.010), 0.010))
     min_pump = max(0.002, _safe_float(os.getenv("TRADE_DIP_RECLAIM_MIN_PUMP_RATE", os.getenv("TRADE_DIP_RECLAIM_MIN_DUMP_RATE", 0.010)), 0.010))
     min_reclaim = max(0.001, _safe_float(os.getenv("TRADE_DIP_RECLAIM_MIN_RECLAIM_RATE", 0.0035), 0.0035))
+    base_min_pump = min_pump
+    base_min_reclaim = min_reclaim
+    guarded_bear_short_context = bool(
+        direction == "short"
+        and bearish_context
+        and _safe_int(event_risk, 0) == 0
+        and _is_truthy(os.getenv("TRADE_DIP_RECLAIM_BEAR_SHORT_ENABLED", "1"))
+        and not _is_truthy(os.getenv("BACKTEST_DISABLE_GUARDED_BEAR_PUMP_SHORT", "0"))
+    )
+    if guarded_bear_short_context:
+        min_pump = max(
+            0.002,
+            min(
+                min_pump,
+                _safe_float(os.getenv("TRADE_DIP_RECLAIM_BEAR_SHORT_MIN_PUMP_RATE", 0.007), 0.007),
+            ),
+        )
+        min_reclaim = max(
+            0.001,
+            min(
+                min_reclaim,
+                _safe_float(os.getenv("TRADE_DIP_RECLAIM_BEAR_SHORT_MIN_REJECTION_RATE", 0.0025), 0.0025),
+            ),
+        )
 
     if direction == "long":
-        extreme_pos = int(lows.values.argmin())
+        recent_start = max(0, len(window) - recent_extreme_bars - 1)
+        extreme_pos = recent_start + int(lows.iloc[recent_start:].values.argmin())
         bars_since_extreme = len(window) - 1 - extreme_pos
         if bars_since_extreme < 1 or bars_since_extreme > recent_extreme_bars:
             return None
         sweep_price = _safe_float(lows.iloc[extreme_pos], 0.0)
-        opposite_ref = _safe_float(highs.iloc[: extreme_pos + 1].max(), 0.0)
+        opposite_start = max(0, extreme_pos - lookback + 1)
+        opposite_ref = _safe_float(highs.iloc[opposite_start : extreme_pos + 1].max(), 0.0)
         if sweep_price <= 0 or opposite_ref <= 0 or last_close <= 0:
             return None
         extreme_rate = max(0.0, (opposite_ref - sweep_price) / opposite_ref)
@@ -10796,12 +10827,14 @@ def _build_extreme_reclaim_plan(
         if not structure_ok or not short_momentum_ok:
             return None
     else:
-        extreme_pos = int(highs.values.argmax())
+        recent_start = max(0, len(window) - recent_extreme_bars - 1)
+        extreme_pos = recent_start + int(highs.iloc[recent_start:].values.argmax())
         bars_since_extreme = len(window) - 1 - extreme_pos
         if bars_since_extreme < 1 or bars_since_extreme > recent_extreme_bars:
             return None
         sweep_price = _safe_float(highs.iloc[extreme_pos], 0.0)
-        opposite_ref = _safe_float(lows.iloc[: extreme_pos + 1].min(), 0.0)
+        opposite_start = max(0, extreme_pos - lookback + 1)
+        opposite_ref = _safe_float(lows.iloc[opposite_start : extreme_pos + 1].min(), 0.0)
         if sweep_price <= 0 or opposite_ref <= 0 or last_close <= 0:
             return None
         extreme_rate = max(0.0, (sweep_price - opposite_ref) / opposite_ref)
@@ -10871,6 +10904,17 @@ def _build_extreme_reclaim_plan(
         extreme_key = "sweep_high"
     tp, required_rate = _ensure_minimum_net_profit_tp(direction, price, tp, hold_hours=12.0)
     size = max(0.001, min(1.0, _safe_float(os.getenv("TRADE_DIP_RECLAIM_SIZE_RATIO", 0.60), 0.60)))
+    if direction == "short":
+        size = min(
+            size,
+            max(
+                0.001,
+                min(
+                    0.10,
+                    _safe_float(os.getenv("TRADE_DIP_RECLAIM_SHORT_MAX_SIZE_RATIO", 0.05), 0.05),
+                ),
+            ),
+        )
     confidence = max(0.58, min(0.82, 0.55 + min(0.12, extreme_rate * 4.0) + min(0.08, reclaim_rate * 6.0)))
     reasons = [
         f"{'dump' if direction == 'long' else 'pump'}={extreme_rate*100:.2f}%",
@@ -10883,6 +10927,13 @@ def _build_extreme_reclaim_plan(
         reasons.append(volume_reason)
     elif wick_ok:
         reasons.append(f"wick_recovery={wick_recovery:.2f}")
+    guarded_bear_short = bool(
+        guarded_bear_short_context
+        and direction == "short"
+        and (extreme_rate < base_min_pump or reclaim_rate < base_min_reclaim)
+    )
+    if guarded_bear_short:
+        reasons.append("1H/4H_bear_guarded_relaxation")
 
     result = {
         "direction": direction,
@@ -10895,9 +10946,11 @@ def _build_extreme_reclaim_plan(
         "required_net_tp_rate": float(required_rate),
         "extreme_rate": float(extreme_rate),
         "reclaim_rate": float(reclaim_rate),
+        "guarded_bear_short": bool(guarded_bear_short),
         "host_opening_logic": {
             "direction": direction,
             "mode": mode,
+            "guarded_bear_short": bool(guarded_bear_short),
             "confidence": float(confidence),
             "edge": round(extreme_rate + reclaim_rate, 5),
             "reasons": reasons[:8],
@@ -10936,6 +10989,7 @@ def _build_pump_reject_short_plan(
     df_15m=None,
     news_bias=0.0,
     event_risk=0,
+    bearish_context=False,
 ):
     return _build_extreme_reclaim_plan(
         direction="short",
@@ -10944,6 +10998,7 @@ def _build_pump_reject_short_plan(
         df_15m=df_15m,
         news_bias=news_bias,
         event_risk=event_risk,
+        bearish_context=bearish_context,
     )
 
 
@@ -13138,12 +13193,19 @@ def build_trade_signal_snapshot(
             ai_prob = max(ai_prob, score)
 
     if final.startswith("觀望"):
+        bearish_pump_context = bool(
+            htf == -1
+            and _safe_int(higher_timeframe.get("one_hour_trend"), 0) == -1
+            and _safe_int(higher_timeframe.get("four_hour_trend"), 0) == -1
+            and _safe_int(event_risk, 0) == 0
+        )
         pump_reject_plan = _build_pump_reject_short_plan(
             price=entry,
             df_5m=df_5m,
             df_15m=df_15m,
             news_bias=news_bias,
             event_risk=event_risk,
+            bearish_context=bearish_pump_context,
         )
         if pump_reject_plan:
             final = str(pump_reject_plan["final"])
@@ -13392,7 +13454,16 @@ def build_trade_signal_snapshot(
             ):
                 final = "觀望（多單壓力未突破）"
         if not final.startswith("觀望"):
-            is_manipulation_reversal_entry = str(host_opening_logic.get("mode") or "") == "manipulation_reversal"
+            host_mode = str(host_opening_logic.get("mode") or "")
+            is_manipulation_reversal_entry = host_mode == "manipulation_reversal"
+            is_guarded_bear_pump_short = bool(
+                host_mode == "pump_reject_short"
+                and bool(host_opening_logic.get("guarded_bear_short"))
+                and htf == -1
+                and _safe_int(higher_timeframe.get("one_hour_trend"), 0) == -1
+                and _safe_int(higher_timeframe.get("four_hour_trend"), 0) == -1
+                and _safe_int(event_risk, 0) == 0
+            )
             if "做空" in final:
                 conflict_count = 0
                 if mid_trend == 1:
@@ -13405,6 +13476,7 @@ def build_trade_signal_snapshot(
                     conflict_count += 1
                 if (
                     not is_manipulation_reversal_entry
+                    and not is_guarded_bear_pump_short
                     and conflict_count >= 2
                     and (score > conflict_short_max_score or net_edge_rate_est < conflict_min_edge_rate)
                 ):
@@ -13478,6 +13550,7 @@ def build_trade_signal_snapshot(
                 macro_indicator_alignment.get("hard_block")
                 and not multitimeframe_bull_reclaim.get("applied")
                 and str(host_opening_logic.get("mode") or "") != "manipulation_reversal"
+                and not is_guarded_bear_pump_short
             ):
                 final = "觀望（MLX宏觀指標共振不足）"
                 position_size = 0.0
@@ -13519,6 +13592,8 @@ def build_trade_signal_snapshot(
             ):
                 profile_ok = True
             elif host_mode == "manipulation_reversal" and direction_name in {"long", "short"}:
+                profile_ok = True
+            elif host_mode == "pump_reject_short" and direction_name == "short" and is_guarded_bear_pump_short:
                 profile_ok = True
             elif host_mode == "don72_ls_ma10_50" and direction_name in {"long", "short"}:
                 profile_ok = True

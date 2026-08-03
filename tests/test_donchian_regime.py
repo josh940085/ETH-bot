@@ -117,6 +117,27 @@ def _pump_reject_5m_frame():
     return pd.DataFrame(rows, index=idx)
 
 
+def _guarded_bear_pump_reject_5m_frame():
+    idx = pd.date_range("2026-01-01", periods=60, freq="5min", tz="UTC")
+    rows = []
+    for i in range(60):
+        close = 100.0
+        low = 99.99
+        high = 100.03
+        volume = 1.0
+        if i == 40:
+            low = 100.35
+            high = 100.75
+            close = 100.45
+            volume = 2.0
+        elif i > 40:
+            close = 100.48 - (i - 41) * 0.01
+            low = close - 0.03
+            high = close + 0.03
+        rows.append({"open": close + 0.01, "high": high, "low": low, "close": close, "volume": volume})
+    return pd.DataFrame(rows, index=idx)
+
+
 class DonchianRegimeTests(unittest.TestCase):
     def test_bull_daily_regime_and_donchian_breakout_builds_long(self):
         df_1h = _hourly_frame()
@@ -453,6 +474,7 @@ class DonchianRegimeTests(unittest.TestCase):
             {
                 "TRADE_DIP_RECLAIM_SHORT_ENABLED": "1",
                 "TRADE_DIP_RECLAIM_SIZE_RATIO": "0.60",
+                "TRADE_DIP_RECLAIM_SHORT_MAX_SIZE_RATIO": "0.05",
                 "TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M": "24",
             },
         ):
@@ -461,14 +483,83 @@ class DonchianRegimeTests(unittest.TestCase):
                 df_5m=df_5m,
                 news_bias=0.0,
                 event_risk=0,
+                bearish_context=True,
             )
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan["direction"], "short")
         self.assertEqual(plan["host_opening_logic"]["mode"], "pump_reject_short")
-        self.assertEqual(plan["position_size"], 0.60)
+        self.assertEqual(plan["position_size"], 0.05)
+        self.assertFalse(plan["guarded_bear_short"])
+        self.assertFalse(plan["host_opening_logic"]["guarded_bear_short"])
         self.assertLess(plan["tp"], price)
         self.assertGreater(plan["sl"], plan["sweep_high"])
+
+    def test_guarded_bear_pump_reject_uses_narrower_thresholds_and_small_size(self):
+        df_5m = _guarded_bear_pump_reject_5m_frame()
+        price = float(df_5m.iloc[-1]["close"])
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DIP_RECLAIM_SHORT_ENABLED": "1",
+                "TRADE_DIP_RECLAIM_MIN_PUMP_RATE": "0.010",
+                "TRADE_DIP_RECLAIM_MIN_RECLAIM_RATE": "0.0035",
+                "TRADE_DIP_RECLAIM_BEAR_SHORT_ENABLED": "1",
+                "TRADE_DIP_RECLAIM_BEAR_SHORT_MIN_PUMP_RATE": "0.007",
+                "TRADE_DIP_RECLAIM_BEAR_SHORT_MIN_REJECTION_RATE": "0.0025",
+                "TRADE_DIP_RECLAIM_SHORT_MAX_SIZE_RATIO": "0.05",
+                "TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M": "24",
+            },
+        ):
+            guarded = eth._build_pump_reject_short_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.0,
+                event_risk=0,
+                bearish_context=True,
+            )
+            ordinary = eth._build_pump_reject_short_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.0,
+                event_risk=0,
+                bearish_context=False,
+            )
+
+        self.assertIsNotNone(guarded)
+        self.assertTrue(guarded["guarded_bear_short"])
+        self.assertEqual(guarded["position_size"], 0.05)
+        self.assertGreaterEqual(guarded["pump_rate"], 0.007)
+        self.assertLess(guarded["pump_rate"], 0.010)
+        self.assertGreaterEqual(guarded["reclaim_rate"], 0.0025)
+        self.assertIn("1H/4H_bear_guarded_relaxation", guarded["host_opening_logic"]["reasons"])
+        self.assertIsNone(ordinary)
+
+    def test_guarded_bear_pump_reject_can_be_disabled_without_disabling_regular_short(self):
+        df_5m = _guarded_bear_pump_reject_5m_frame()
+        price = float(df_5m.iloc[-1]["close"])
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRADE_DIP_RECLAIM_SHORT_ENABLED": "1",
+                "TRADE_DIP_RECLAIM_BEAR_SHORT_ENABLED": "0",
+                "TRADE_DIP_RECLAIM_MIN_PUMP_RATE": "0.010",
+                "TRADE_DIP_RECLAIM_BEAR_SHORT_MIN_PUMP_RATE": "0.007",
+                "TRADE_DIP_RECLAIM_BEAR_SHORT_MIN_REJECTION_RATE": "0.0025",
+                "TRADE_DIP_RECLAIM_RECENT_LOW_BARS_5M": "24",
+            },
+        ):
+            plan = eth._build_pump_reject_short_plan(
+                price=price,
+                df_5m=df_5m,
+                news_bias=0.0,
+                event_risk=0,
+                bearish_context=True,
+            )
+
+        self.assertIsNone(plan)
 
     def test_pump_reject_candidate_waits_without_rejection(self):
         df_5m = _pump_reject_5m_frame()
