@@ -311,3 +311,63 @@ def build_market_selection(
         "reason_codes": sorted(set(str(code) for code in reason_codes if code)),
         "rationale": rationale,
     }
+
+
+def build_execution_guard(
+    shadow_state,
+    *,
+    direction,
+    requested_size,
+):
+    shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
+    selection = (
+        shadow_state.get("market_selection")
+        if isinstance(shadow_state.get("market_selection"), dict)
+        else {}
+    )
+    direction = str(direction or "").lower()
+    requested_size = max(0.0, min(1.0, _safe_float(requested_size, 0.0)))
+    shadow_action = str(selection.get("shadow_action") or "wait")
+    selected_plan = str(selection.get("selected_plan") or "normal_wait")
+    exposure_cap = max(0.0, min(1.0, _safe_float(selection.get("exposure_cap"), requested_size)))
+    mode = str(shadow_state.get("mode") or "normal")
+
+    allowed = True
+    reason_code = "allowed"
+    reason = "月報酬5%風控允許"
+
+    if mode in {"intraday_stop", "post_lock_floor_guard"} or shadow_action == "risk_off":
+        allowed = False
+        reason_code = "monthly5_risk_off"
+        reason = "日內停損或月度鎖利地板啟動，禁止新倉"
+    elif direction == "long" and shadow_action == "evaluate_short":
+        allowed = False
+        reason_code = "monthly5_direction_mismatch"
+        reason = "月報酬5%策略目前只評估空方，禁止多單"
+    elif direction == "short" and shadow_action == "evaluate_long":
+        allowed = False
+        reason_code = "monthly5_direction_mismatch"
+        reason = "月報酬5%策略目前只評估多方，禁止空單"
+    elif selected_plan == "macro_block_wait":
+        allowed = False
+        reason_code = "monthly5_macro_block"
+        reason = "宏觀或事件風險阻擋，禁止新倉"
+
+    adjusted_size = min(requested_size, exposure_cap) if allowed else 0.0
+    capped = bool(allowed and adjusted_size < requested_size - 1e-9)
+
+    return {
+        "schema_version": 1,
+        "enabled": True,
+        "allowed": bool(allowed),
+        "reason_code": reason_code,
+        "reason": reason,
+        "direction": direction,
+        "requested_size": round(requested_size, 4),
+        "adjusted_size": round(adjusted_size, 4),
+        "exposure_cap": round(exposure_cap, 4),
+        "capped": capped,
+        "selected_plan": selected_plan,
+        "shadow_action": shadow_action,
+        "max_leverage": min(5, max(0, _safe_int(shadow_state.get("max_leverage"), 5))),
+    }

@@ -804,6 +804,11 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 "shadow_action": "reduced_exposure",
             },
         }
+        eth.POSITION_PANEL_STATE["monthly5_execution_guard"] = {
+            "allowed": True,
+            "adjusted_size": 0.15,
+            "reason_code": "allowed",
+        }
 
         with (
             patch.object(eth, "_refresh_position_panel_account_state"),
@@ -819,6 +824,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             payload["monthly5_shadow"]["market_selection"]["selected_plan"],
             "post_lock_low_exposure",
         )
+        self.assertEqual(payload["monthly5_execution_guard"]["adjusted_size"], 0.15)
 
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):

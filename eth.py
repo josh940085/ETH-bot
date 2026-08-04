@@ -5865,7 +5865,7 @@ def _recent_sl_guard_reason(final, score, net_edge_rate_est, risk_rate, macro_bi
     return ""
 
 
-def _update_monthly5_shadow_panel_state(mark_price=None):
+def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy_signal=None, strategy_execution_reason=None):
     if not _is_truthy(os.getenv("MONTHLY5_SHADOW_ENABLED", "1")):
         cached = dict(POSITION_PANEL_STATE.get("monthly5_shadow") or {})
         cached["enabled"] = False
@@ -5874,6 +5874,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None):
         return cached
 
     try:
+        decision = decision if isinstance(decision, dict) else {}
         previous = monthly5_shadow.load_state(MONTHLY5_SHADOW_STATE_PATH)
         position_qty = max(0.0, _safe_float(POSITION_PANEL_STATE.get("binance_qty"), 0.0))
         position_open = bool(active_trade.get("open")) or position_qty > 0
@@ -5896,12 +5897,36 @@ def _update_monthly5_shadow_panel_state(mark_price=None):
         )
         snapshot["market_selection"] = monthly5_shadow.build_market_selection(
             snapshot,
-            strategy_signal=str(POSITION_PANEL_STATE.get("strategy_signal") or "wait"),
-            strategy_execution_reason=str(POSITION_PANEL_STATE.get("strategy_execution_reason") or ""),
-            strategy_context=dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
-            host_logic=dict(POSITION_PANEL_STATE.get("strategy_host_logic") or {}),
-            macro_alignment=dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {}),
-            donchian_state=dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {}),
+            strategy_signal=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait"),
+            strategy_execution_reason=str(
+                strategy_execution_reason
+                or POSITION_PANEL_STATE.get("strategy_execution_reason")
+                or ""
+            ),
+            strategy_context=(
+                {
+                    "htf": decision.get("htf"),
+                    "mid_trend": decision.get("mid_trend"),
+                    "macro_bias": decision.get("macro_bias"),
+                }
+                if decision
+                else dict(POSITION_PANEL_STATE.get("strategy_context") or {})
+            ),
+            host_logic=(
+                dict(decision.get("host_opening_logic") or {})
+                if decision
+                else dict(POSITION_PANEL_STATE.get("strategy_host_logic") or {})
+            ),
+            macro_alignment=(
+                dict(decision.get("macro_indicator_alignment") or {})
+                if decision
+                else dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {})
+            ),
+            donchian_state=(
+                dict(decision.get("donchian_market_state") or {})
+                if decision
+                else dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {})
+            ),
         )
         monthly5_shadow.save_state(MONTHLY5_SHADOW_STATE_PATH, snapshot)
         POSITION_PANEL_STATE["monthly5_shadow"] = snapshot
@@ -5909,6 +5934,31 @@ def _update_monthly5_shadow_panel_state(mark_price=None):
     except Exception as exc:
         print(f"⚠️ monthly5 shadow 更新失敗: {exc}")
         return dict(POSITION_PANEL_STATE.get("monthly5_shadow") or {})
+
+
+def _apply_monthly5_execution_guard(decision, direction, requested_size, mark_price=None):
+    if not _is_truthy(os.getenv("MONTHLY5_EXECUTION_GUARD_ENABLED", "1")):
+        return {
+            "enabled": False,
+            "allowed": True,
+            "requested_size": round(max(0.0, _safe_float(requested_size, 0.0)), 4),
+            "adjusted_size": round(max(0.0, _safe_float(requested_size, 0.0)), 4),
+            "reason_code": "disabled",
+            "reason": "monthly5 execution guard disabled",
+        }
+    shadow_state = _update_monthly5_shadow_panel_state(
+        mark_price,
+        decision=decision,
+        strategy_signal=direction,
+        strategy_execution_reason=str((decision or {}).get("final") or ""),
+    )
+    guard = monthly5_shadow.build_execution_guard(
+        shadow_state,
+        direction=direction,
+        requested_size=requested_size,
+    )
+    POSITION_PANEL_STATE["monthly5_execution_guard"] = guard
+    return guard
 
 
 def sync_position_panel(current_price=None):
@@ -6173,6 +6223,7 @@ def sync_position_panel(current_price=None):
             "strategy_context": dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
             "monthly5_shadow": dict(monthly5_shadow_state or {}),
+            "monthly5_execution_guard": dict(POSITION_PANEL_STATE.get("monthly5_execution_guard") or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -17459,6 +17510,36 @@ def run_bot():
                 reason.append(f"15m上漲九轉 Setup {td_setup_15m['up_count']}（封鎖新多單）")
             elif td_setup_15m["down_9"]:
                 reason.append(f"15m下跌九轉 Setup {td_setup_15m['down_count']}（封鎖新空單）")
+
+            if not final.startswith("觀望"):
+                monthly5_direction = "long" if "做多" in final else "short"
+                monthly5_guard = _apply_monthly5_execution_guard(
+                    decision,
+                    monthly5_direction,
+                    position_size,
+                    mark_price=price,
+                )
+                decision["monthly5_execution_guard"] = dict(monthly5_guard)
+                if not monthly5_guard.get("allowed", True):
+                    final = f"觀望（月報酬5%風控-{monthly5_guard.get('reason', '禁止新倉')}）"
+                    position_size = 0.0
+                    reason.append(str(monthly5_guard.get("reason") or "月報酬5%風控禁止新倉"))
+                else:
+                    adjusted_size = max(0.0, _safe_float(monthly5_guard.get("adjusted_size"), position_size))
+                    if adjusted_size < max(0.0, _safe_float(position_size, 0.0)) - 1e-9:
+                        reason.append(
+                            f"月報酬5%風控降倉（{position_size*100:.1f}% → {adjusted_size*100:.1f}%）"
+                        )
+                    position_size = adjusted_size
+                    decision["position_size"] = min(
+                        max(0.0, _safe_float(decision.get("position_size"), position_size)),
+                        position_size,
+                    )
+                    if _safe_float(decision.get("max_position_size"), 0.0) > 0:
+                        decision["max_position_size"] = min(
+                            _safe_float(decision.get("max_position_size"), position_size),
+                            position_size,
+                        )
 
             reason_text = " | ".join(reason)
 

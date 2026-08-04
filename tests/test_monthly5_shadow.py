@@ -151,6 +151,62 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["exposure_cap"], 0.35)
         self.assertIn("chop_market_reduce", selection["reason_codes"])
 
+    def test_execution_guard_blocks_risk_off(self):
+        guard = monthly5_shadow.build_execution_guard(
+            {
+                "mode": "intraday_stop",
+                "max_leverage": 5,
+                "market_selection": {
+                    "selected_plan": "risk_off",
+                    "shadow_action": "risk_off",
+                    "exposure_cap": 0.0,
+                },
+            },
+            direction="long",
+            requested_size=0.2,
+        )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["adjusted_size"], 0.0)
+        self.assertEqual(guard["reason_code"], "monthly5_risk_off")
+
+    def test_execution_guard_caps_allowed_size(self):
+        guard = monthly5_shadow.build_execution_guard(
+            {
+                "mode": "normal",
+                "max_leverage": 5,
+                "market_selection": {
+                    "selected_plan": "normal_long_selector",
+                    "shadow_action": "evaluate_long",
+                    "exposure_cap": 0.35,
+                },
+            },
+            direction="long",
+            requested_size=0.8,
+        )
+
+        self.assertTrue(guard["allowed"])
+        self.assertTrue(guard["capped"])
+        self.assertEqual(guard["adjusted_size"], 0.35)
+
+    def test_execution_guard_blocks_direction_mismatch(self):
+        guard = monthly5_shadow.build_execution_guard(
+            {
+                "mode": "normal",
+                "max_leverage": 5,
+                "market_selection": {
+                    "selected_plan": "normal_long_selector",
+                    "shadow_action": "evaluate_long",
+                    "exposure_cap": 1.0,
+                },
+            },
+            direction="short",
+            requested_size=0.2,
+        )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["reason_code"], "monthly5_direction_mismatch")
+
 
 if __name__ == "__main__":
     unittest.main()
