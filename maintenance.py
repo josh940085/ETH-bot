@@ -56,6 +56,7 @@ CHECK_NAME_ZH = {
     "model_health": "交易模型健康狀態",
     "strategy_strictness": "策略嚴苛度",
     "monthly5_runtime": "月報酬5%策略一致性",
+    "monthly5_readiness": "月報酬5%實盤樣本準備度",
     "smoke_backtest": "策略快速回測",
 }
 STATUS_ZH = {
@@ -993,6 +994,45 @@ def _check_monthly5_runtime():
     }
 
 
+def _check_monthly5_readiness():
+    max_age_sec = max(
+        60,
+        int(float(os.getenv("MONTHLY5_READINESS_MAX_AGE_SEC", "900") or "900")),
+    )
+    min_records = max(
+        1,
+        int(float(os.getenv("MONTHLY5_READINESS_MIN_RECORDS", "48") or "48")),
+    )
+    min_span_hours = max(
+        0.0,
+        float(os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS", "24") or "24"),
+    )
+    command = [
+        sys.executable,
+        "verify_monthly5_readiness.py",
+        "--max-age-sec",
+        str(max_age_sec),
+        "--min-records",
+        str(min_records),
+        "--min-span-hours",
+        str(min_span_hours),
+    ]
+    if os.getenv("MONTHLY5_REQUIRE_READY", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        command.append("--require-ready")
+    result = _run_command(command, timeout=60)
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        raise RuntimeError(output or "monthly5 readiness verifier failed")
+    detail = output.splitlines()[0] if output else "monthly5 readiness verifier passed"
+    return {
+        "status": "ok",
+        "detail": detail,
+        "max_age_sec": max_age_sec,
+        "min_records": min_records,
+        "min_span_hours": min_span_hours,
+    }
+
+
 def _check_conflict_markers():
     findings = []
     scan_paths = [REPO_DIR / name for name in TEXT_SCAN_FILES]
@@ -1730,6 +1770,7 @@ def main():
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
         ("monthly5_runtime", _check_monthly5_runtime),
+        ("monthly5_readiness", _check_monthly5_readiness),
         ("telegram_policy", _check_telegram_policy_and_repair),
         ("telegram_watch_risk", _check_telegram_watch_risk),
         ("model_health", _check_models_and_repair),

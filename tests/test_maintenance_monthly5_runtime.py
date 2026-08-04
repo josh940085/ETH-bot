@@ -43,6 +43,33 @@ class Monthly5MaintenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "post-lock exposure drift"):
                 maintenance._check_monthly5_runtime()
 
+    def test_monthly5_readiness_check_wraps_collecting_status(self):
+        command_result = SimpleNamespace(
+            returncode=0,
+            stdout="PASS monthly5_readiness status=collecting ready=false rows=2 span_hours=0.04 evaluate_rows=1 risk_rows=0\nWARN sample count collecting\n",
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result) as run_command:
+            result = maintenance._check_monthly5_readiness()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("status=collecting", result["detail"])
+        self.assertIn("verify_monthly5_readiness.py", run_command.call_args.args[0])
+
+    def test_monthly5_readiness_check_can_require_ready(self):
+        command_result = SimpleNamespace(
+            returncode=0,
+            stdout="PASS monthly5_readiness status=ready ready=true rows=48 span_hours=24.0 evaluate_rows=20 risk_rows=1\n",
+        )
+
+        with (
+            patch.dict(maintenance.os.environ, {"MONTHLY5_REQUIRE_READY": "1"}),
+            patch.object(maintenance, "_run_command", return_value=command_result) as run_command,
+        ):
+            maintenance._check_monthly5_readiness()
+
+        self.assertIn("--require-ready", run_command.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()
