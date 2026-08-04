@@ -1,0 +1,60 @@
+{
+  "strategy_id": "monthly5_postlock_hourly_v0",
+  "status": "research_candidate",
+  "symbol": "BTCUSDT",
+  "objective": {
+    "monthly_return_floor_pct": 5.0,
+    "max_leverage": 5,
+    "reduce_flat_time": true
+  },
+  "policy": {
+    "selector": {
+      "normal": {
+        "type": "similar_day_selector",
+        "warmup_days": 365,
+        "candidate_pool": 40,
+        "nearest_days": 80,
+        "feature_set": "short_market_state",
+        "score": "q25_plus_hit_rate"
+      },
+      "recovery": {
+        "type": "similar_day_selector",
+        "candidate_filter": "long_flat_only",
+        "score": "mean_plus_hit_rate",
+        "exposure_scale": 0.5
+      }
+    },
+    "risk": {
+      "intraday_stop_pct": -8.0,
+      "monthly_recovery_trigger_pct": -8.0,
+      "monthly_lock_pct": 5.0,
+      "post_lock_exposure_scale": 0.15,
+      "post_lock_floor_pct": 5.0
+    }
+  },
+  "backtest_evidence": {
+    "source_summary": ".runtime/data/backtests/monthly5_search/postlock_low_exposure_hourly_summary.json",
+    "source_monthly": ".runtime/data/backtests/monthly5_search/postlock_low_exposure_hourly_monthly.json",
+    "candidate_name": "postlock_scale0.15_floor_pdaystopNone",
+    "period_start": "2020-01",
+    "period_end": "2026-08",
+    "complete_months_end": "2026-07",
+    "months": 80,
+    "complete_months": 79,
+    "months_ge_5": 79,
+    "complete_months_ge_5": 79,
+    "months_ge_0": 80,
+    "incomplete_month": "2026-08",
+    "incomplete_month_return_pct": 0.497,
+    "avg_month_pct": 18.585,
+    "worst_intramonth_pnl_pct": -10.32,
+    "avg_flat_time_pct": 41.65
+  },
+  "live_rollout_requirements": [
+    "Implement as shadow-only first; do not replace Binance-confirmed live execution until shadow state matches backtest policy.",
+    "Persist monthly PnL state, daily intraday stop state, recovery mode, post-lock mode, and selected candidate key.",
+    "Use Binance mark price and account/position state as authoritative for PnL and exposure.",
+    "Keep maximum leverage capped at 5x and retain existing event-risk and position-cap guards.",
+    "Post-lock floor must be implemented as executable risk control, not as a reporting-only clamp."
+  ]
+}
