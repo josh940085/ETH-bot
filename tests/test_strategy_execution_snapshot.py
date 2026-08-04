@@ -11,16 +11,25 @@ import eth
 
 
 class StrategyExecutionSnapshotTests(unittest.TestCase):
-    def test_telegram_control_keyboard_does_not_attach_crypto_mini_app(self):
-        keyboard = eth._build_control_panel_keyboard(chat_id=123456)
+    def test_telegram_control_keyboard_opens_external_panel_without_crypto_mini_app(self):
+        with patch.object(
+            eth,
+            "_build_position_panel_external_url",
+            return_value="https://example.com/panel?panel_session=v2.test",
+        ):
+            keyboard = eth._build_control_panel_keyboard(chat_id=123456)
 
         buttons = [
             button
-            for row in keyboard.get("keyboard", [])
+            for row in keyboard.get("inline_keyboard", [])
             for button in row
         ]
         self.assertTrue(buttons)
         self.assertIn(eth.POSITION_PANEL_BUTTON_TEXT, [button.get("text") for button in buttons])
+        panel_button = next(button for button in buttons if button.get("text") == eth.POSITION_PANEL_BUTTON_TEXT)
+        self.assertEqual(panel_button["url"], "https://example.com/panel?panel_session=v2.test")
+        self.assertIn("toggle_follow", [button.get("callback_data") for button in buttons])
+        self.assertIn("manual_close", [button.get("callback_data") for button in buttons])
         self.assertFalse(any("web_app" in button for button in buttons))
 
     def test_position_panel_button_sends_fresh_private_panel(self):

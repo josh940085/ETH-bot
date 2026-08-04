@@ -529,22 +529,21 @@ def _get_follow_button_text() -> str:
 
 def _build_control_panel_keyboard(chat_id=None):
     follow_text = _get_follow_button_text()
-    # Telegram's blockchain rules exempt regular bots, but not crypto-enabled
-    # Mini Apps. Keep trading controls as ordinary private-chat buttons and do
-    # not attach the standalone BTC panel as a Telegram Web App.
+    panel_url = _build_position_panel_external_url(chat_id)
+    rows = []
+    if panel_url:
+        # Use a regular HTTPS inline URL rather than KeyboardButton.web_app.
+        # This preserves one-tap access without registering the trading panel
+        # as a crypto-enabled Telegram Mini App.
+        rows.append([{"text": POSITION_PANEL_BUTTON_TEXT, "url": panel_url}])
+    rows.append(
+        [
+            {"text": follow_text, "callback_data": "toggle_follow"},
+            {"text": "⛔ 一鍵平倉", "callback_data": "manual_close"},
+        ]
+    )
     return {
-        "keyboard": [
-            [
-                {"text": POSITION_PANEL_BUTTON_TEXT},
-            ],
-            [
-                {"text": follow_text},
-                {"text": "⛔ 一鍵平倉"},
-            ],
-        ],
-        "resize_keyboard": True,
-        "is_persistent": True,
-        "one_time_keyboard": False,
+        "inline_keyboard": rows,
     }
 
 
