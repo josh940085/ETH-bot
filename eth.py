@@ -5928,6 +5928,11 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                 else dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {})
             ),
         )
+        POSITION_PANEL_STATE["monthly5_execution_guard"] = monthly5_shadow.build_execution_guard(
+            snapshot,
+            direction=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or ""),
+            requested_size=_safe_float((decision or {}).get("position_size"), 0.0),
+        )
         monthly5_shadow.save_state(MONTHLY5_SHADOW_STATE_PATH, snapshot)
         POSITION_PANEL_STATE["monthly5_shadow"] = snapshot
         return snapshot
