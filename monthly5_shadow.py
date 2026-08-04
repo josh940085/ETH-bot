@@ -371,3 +371,58 @@ def build_execution_guard(
         "shadow_action": shadow_action,
         "max_leverage": min(5, max(0, _safe_int(shadow_state.get("max_leverage"), 5))),
     }
+
+
+def build_position_guard(
+    shadow_state,
+    *,
+    current_size,
+):
+    shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
+    selection = (
+        shadow_state.get("market_selection")
+        if isinstance(shadow_state.get("market_selection"), dict)
+        else {}
+    )
+    current_size = max(0.0, min(1.0, _safe_float(current_size, 0.0)))
+    exposure_cap = max(0.0, min(1.0, _safe_float(selection.get("exposure_cap"), current_size)))
+    mode = str(shadow_state.get("mode") or "normal")
+    shadow_action = str(selection.get("shadow_action") or "wait")
+    selected_plan = str(selection.get("selected_plan") or "normal_wait")
+
+    action = "hold"
+    target_size = current_size
+    reduce_delta = 0.0
+    reason_code = "within_cap"
+    reason = "月報酬5%持倉風控未要求調整"
+
+    if current_size <= 0:
+        reason_code = "flat"
+        reason = "目前空倉"
+    elif mode in {"intraday_stop", "post_lock_floor_guard"} or shadow_action == "risk_off":
+        action = "close_all"
+        target_size = 0.0
+        reduce_delta = current_size
+        reason_code = "monthly5_close_all"
+        reason = "日內停損或月度鎖利地板啟動，持倉需平倉"
+    elif current_size > exposure_cap + 1e-9:
+        action = "reduce_to_cap"
+        target_size = exposure_cap
+        reduce_delta = current_size - exposure_cap
+        reason_code = "monthly5_reduce_to_cap"
+        reason = "持倉超過月報酬5%策略曝險上限，需降倉"
+
+    return {
+        "schema_version": 1,
+        "enabled": True,
+        "action": action,
+        "reason_code": reason_code,
+        "reason": reason,
+        "current_size": round(current_size, 4),
+        "target_size": round(max(0.0, target_size), 4),
+        "reduce_delta": round(max(0.0, reduce_delta), 4),
+        "exposure_cap": round(exposure_cap, 4),
+        "selected_plan": selected_plan,
+        "shadow_action": shadow_action,
+        "mode": mode,
+    }

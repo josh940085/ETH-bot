@@ -207,6 +207,56 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertFalse(guard["allowed"])
         self.assertEqual(guard["reason_code"], "monthly5_direction_mismatch")
 
+    def test_position_guard_reduces_to_exposure_cap(self):
+        guard = monthly5_shadow.build_position_guard(
+            {
+                "mode": "post_lock",
+                "market_selection": {
+                    "selected_plan": "post_lock_low_exposure",
+                    "shadow_action": "reduced_exposure",
+                    "exposure_cap": 0.15,
+                },
+            },
+            current_size=0.5,
+        )
+
+        self.assertEqual(guard["action"], "reduce_to_cap")
+        self.assertEqual(guard["target_size"], 0.15)
+        self.assertEqual(guard["reduce_delta"], 0.35)
+
+    def test_position_guard_closes_on_floor_guard(self):
+        guard = monthly5_shadow.build_position_guard(
+            {
+                "mode": "post_lock_floor_guard",
+                "market_selection": {
+                    "selected_plan": "risk_off",
+                    "shadow_action": "risk_off",
+                    "exposure_cap": 0.0,
+                },
+            },
+            current_size=0.5,
+        )
+
+        self.assertEqual(guard["action"], "close_all")
+        self.assertEqual(guard["target_size"], 0.0)
+        self.assertEqual(guard["reason_code"], "monthly5_close_all")
+
+    def test_position_guard_holds_within_cap(self):
+        guard = monthly5_shadow.build_position_guard(
+            {
+                "mode": "normal",
+                "market_selection": {
+                    "selected_plan": "normal_long_selector",
+                    "shadow_action": "evaluate_long",
+                    "exposure_cap": 0.5,
+                },
+            },
+            current_size=0.2,
+        )
+
+        self.assertEqual(guard["action"], "hold")
+        self.assertEqual(guard["target_size"], 0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

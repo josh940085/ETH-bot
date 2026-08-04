@@ -826,6 +826,82 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(payload["monthly5_execution_guard"]["adjusted_size"], 0.15)
 
+    def test_monthly5_position_guard_reduces_local_position_to_cap(self):
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "long",
+                "entry": 1900.0,
+                "avg_entry": 1900.0,
+                "tp": 1950.0,
+                "sl": 1870.0,
+                "size": 0.5,
+                "max_size": 0.8,
+                "min_size": 0.1,
+                "monthly5_position_guard_ts": 0.0,
+            }
+        )
+        shadow_state = {
+            "mode": "post_lock",
+            "market_selection": {
+                "selected_plan": "post_lock_low_exposure",
+                "shadow_action": "reduced_exposure",
+                "exposure_cap": 0.15,
+            },
+        }
+
+        with (
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth, "_get_follow_mode_enabled", return_value=False),
+            patch.object(eth, "_is_real_copy_enabled", return_value=False),
+            patch.object(eth, "sync_position_panel"),
+            patch.object(eth, "send_telegram"),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            adjusted = eth.manage_monthly5_position_guard(1910.0)
+
+        self.assertTrue(adjusted)
+        self.assertEqual(eth.active_trade["size"], 0.15)
+        self.assertEqual(eth.POSITION_PANEL_STATE["monthly5_position_guard"]["action"], "reduce_to_cap")
+
+    def test_monthly5_position_guard_closes_local_position_on_risk_off(self):
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "short",
+                "entry": 1900.0,
+                "avg_entry": 1900.0,
+                "tp": 1850.0,
+                "sl": 1930.0,
+                "size": 0.5,
+                "position_qty": 0.01,
+                "monthly5_position_guard_ts": 0.0,
+            }
+        )
+        shadow_state = {
+            "mode": "intraday_stop",
+            "market_selection": {
+                "selected_plan": "risk_off",
+                "shadow_action": "risk_off",
+                "exposure_cap": 0.0,
+            },
+        }
+
+        with (
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth, "_get_follow_mode_enabled", return_value=False),
+            patch.object(eth, "_is_real_copy_enabled", return_value=False),
+            patch.object(eth, "record_position_close"),
+            patch.object(eth, "sync_position_panel"),
+            patch.object(eth, "send_telegram"),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            adjusted = eth.manage_monthly5_position_guard(1910.0)
+
+        self.assertTrue(adjusted)
+        self.assertFalse(eth.active_trade["open"])
+        self.assertEqual(eth.active_trade["size"], 0.0)
+
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"

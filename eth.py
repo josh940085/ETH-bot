@@ -4605,6 +4605,7 @@ def sync_active_trade_from_binance(send_notice=False):
     active_trade["scale_add_pause_ts"] = _safe_float(active_trade.get("scale_add_pause_ts"), 0.0) if preserve_local_state else 0.0
     active_trade["last_scale_skip_notify_key"] = str(active_trade.get("last_scale_skip_notify_key") or "") if preserve_local_state else ""
     active_trade["last_scale_skip_notify_ts"] = _safe_float(active_trade.get("last_scale_skip_notify_ts"), 0.0) if preserve_local_state else 0.0
+    active_trade["monthly5_position_guard_ts"] = _safe_float(active_trade.get("monthly5_position_guard_ts"), 0.0) if preserve_local_state else 0.0
     prev_open_time = _safe_float(active_trade.get("open_time"), 0.0)
     active_trade["open_time"] = prev_open_time if preserve_local_state and prev_open_time > 0 else time.time()
     active_trade["tp_sl_adjusted_4h"] = bool(active_trade.get("tp_sl_adjusted_4h", False)) if preserve_local_state else False
@@ -6229,6 +6230,7 @@ def sync_position_panel(current_price=None):
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
             "monthly5_shadow": dict(monthly5_shadow_state or {}),
             "monthly5_execution_guard": dict(POSITION_PANEL_STATE.get("monthly5_execution_guard") or {}),
+            "monthly5_position_guard": dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -6433,6 +6435,166 @@ def _enforce_daily_min_trade_size(planned_size, current_price):
     )
     send_telegram(notice, priority=True)
     return notice
+
+
+def _close_trade_for_monthly5_guard(current_price, reason):
+    current_price = _safe_float(current_price, _safe_float(active_trade.get("entry"), 0.0))
+    direction = str(active_trade.get("direction") or "long").lower()
+    close_msg = ""
+    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+        try:
+            qty = _get_active_trade_position_qty()
+            if qty <= 0:
+                return False, "⚠️ 月報酬5%風控要求平倉，但無法取得 Binance 持倉數量，保留本地持倉"
+            dual_side = _is_binance_dual_side_mode()
+            position_side = "LONG" if direction == "long" else "SHORT"
+            close_side = "SELL" if direction == "long" else "BUY"
+            _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
+            params = {
+                "symbol": COPY_TRADE_SYMBOL,
+                "side": close_side,
+                "type": "MARKET",
+                "quantity": round(qty, 3),
+            }
+            if dual_side:
+                params["positionSide"] = position_side
+            else:
+                params["reduceOnly"] = "true"
+            _binance_futures_signed_request("POST", "/fapi/v1/order", params)
+            close_msg = f"✅ Binance 月報酬5%風控市價平倉已送出 qty={qty:.3f}"
+        except Exception as exc:
+            return False, f"⚠️ Binance 月報酬5%風控平倉失敗: {exc}"
+
+    record_position_close("MONTHLY5_GUARD", current_price, current_price, current_price)
+    _reset_active_trade_state()
+    sync_position_panel(current_price)
+    return True, close_msg or "✅ 月報酬5%風控已結束本地持倉"
+
+
+def manage_monthly5_position_guard(current_price, decision=None):
+    if not _is_truthy(os.getenv("MONTHLY5_POSITION_GUARD_ENABLED", "1")):
+        return False
+    if not active_trade.get("open"):
+        return False
+
+    now_ts = time.time()
+    cooldown = max(20.0, _safe_float(os.getenv("MONTHLY5_POSITION_GUARD_COOLDOWN_SEC", 60), 60))
+    last_ts = _safe_float(active_trade.get("monthly5_position_guard_ts"), 0.0)
+    if now_ts - last_ts < cooldown:
+        return False
+
+    direction = str(active_trade.get("direction") or "")
+    current_size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+    shadow_state = _update_monthly5_shadow_panel_state(
+        current_price,
+        decision=decision,
+        strategy_signal=direction,
+        strategy_execution_reason="持倉中月報酬5%風控",
+    )
+    guard = monthly5_shadow.build_position_guard(
+        shadow_state,
+        current_size=current_size,
+    )
+    POSITION_PANEL_STATE["monthly5_position_guard"] = guard
+    active_trade["monthly5_position_guard_ts"] = now_ts
+
+    action = str(guard.get("action") or "hold")
+    if action == "hold":
+        sync_position_panel(current_price)
+        return False
+
+    if action == "close_all":
+        ok, msg = _close_trade_for_monthly5_guard(current_price, str(guard.get("reason") or ""))
+        if ok:
+            send_telegram(
+                f"🧯 月報酬5%持倉風控：全平\n"
+                f"方向: {direction} | 現價: {current_price:.2f}\n"
+                f"原因: {guard.get('reason')}\n"
+                f"{msg}",
+                priority=True,
+            )
+            return True
+        _notify_scale_skip(
+            f"⚠️ 月報酬5%持倉風控全平失敗：{msg}",
+            private=True,
+            key=f"monthly5_close:{msg}",
+            now_ts=now_ts,
+        )
+        sync_position_panel(current_price)
+        return False
+
+    if action == "reduce_to_cap":
+        delta = max(0.0, _safe_float(guard.get("reduce_delta"), 0.0))
+        target_size = max(0.0, _safe_float(guard.get("target_size"), 0.0))
+        if delta <= 1e-9:
+            sync_position_panel(current_price)
+            return False
+        if target_size <= 1e-9:
+            ok, msg = _close_trade_for_monthly5_guard(current_price, str(guard.get("reason") or ""))
+            if ok:
+                send_telegram(
+                    f"🧯 月報酬5%持倉風控：降倉至 0%\n"
+                    f"方向: {direction} | 現價: {current_price:.2f}\n"
+                    f"原因: {guard.get('reason')}\n"
+                    f"{msg}",
+                    priority=True,
+                )
+                return True
+            _notify_scale_skip(
+                f"⚠️ 月報酬5%持倉風控降倉失敗：{msg}",
+                private=True,
+                key=f"monthly5_reduce_close:{msg}",
+                now_ts=now_ts,
+            )
+            sync_position_panel(current_price)
+            return False
+
+        if _get_follow_mode_enabled() and _is_real_copy_enabled():
+            ok, msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
+            if not ok:
+                _notify_scale_skip(
+                    f"⚠️ 月報酬5%持倉風控降倉失敗：{msg}",
+                    private=True,
+                    key=f"monthly5_reduce:{msg}",
+                    now_ts=now_ts,
+                )
+                sync_position_panel(current_price)
+                return False
+            sync_active_trade_from_binance(send_notice=False)
+            sync_position_panel(current_price)
+            synced_size = _safe_float(active_trade.get("size"), target_size)
+            send_telegram(
+                f"🧯 月報酬5%持倉風控：降倉\n"
+                f"方向: {direction} | 現價: {current_price:.2f}\n"
+                f"倉位: {current_size*100:.1f}% → {synced_size*100:.1f}% | 上限: {target_size*100:.1f}%\n"
+                f"原因: {guard.get('reason')}\n"
+                f"{msg}",
+                priority=True,
+            )
+            return True
+
+        active_trade["size"] = float(target_size)
+        active_trade["max_size"] = min(
+            _safe_float(active_trade.get("max_size"), target_size),
+            target_size,
+        )
+        active_trade["min_size"] = min(
+            _safe_float(active_trade.get("min_size"), target_size),
+            target_size,
+        )
+        active_trade["last_adjust_ts"] = now_ts
+        sync_position_panel(current_price)
+        send_telegram(
+            f"🧯 月報酬5%持倉風控：本地降倉\n"
+            f"方向: {direction} | 現價: {current_price:.2f}\n"
+            f"倉位: {current_size*100:.1f}% → {target_size*100:.1f}%\n"
+            f"原因: {guard.get('reason')}",
+            priority=True,
+        )
+        return True
+
+    sync_position_panel(current_price)
+    return False
 
 
 def _estimate_trade_cost_rate_est(hold_hours=None) -> float:
@@ -8556,6 +8718,7 @@ active_trade = {
     "scale_add_pause_ts": 0.0,
     "last_scale_skip_notify_key": "",
     "last_scale_skip_notify_ts": 0.0,
+    "monthly5_position_guard_ts": 0.0,
     "open_time": None,
     "tp_sl_adjusted_4h": False,
     "time_horizon": "short",
@@ -8600,6 +8763,7 @@ def _reset_active_trade_state():
     active_trade["scale_add_pause_ts"] = 0.0
     active_trade["last_scale_skip_notify_key"] = ""
     active_trade["last_scale_skip_notify_ts"] = 0.0
+    active_trade["monthly5_position_guard_ts"] = 0.0
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
     active_trade["time_horizon"] = "short"
@@ -17004,6 +17168,7 @@ def run_bot():
                         active_trade["quick_reduce_count"] = 0
                         active_trade["quick_reduce_ts"] = 0.0
                         active_trade["daily_min_size_enforce_ts"] = 0.0
+                        active_trade["monthly5_position_guard_ts"] = 0.0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
                         active_trade["time_horizon"] = "short"
@@ -17154,11 +17319,16 @@ def run_bot():
                         _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05),
                         current,
                     )
-                quick_reduced = maybe_take_quick_profit_reduce(current, atr=atr)
-                profit_locked = maybe_lock_profit_after_reversal(current, favorable_price=current, atr=atr)
-                be_triggered = False if profit_locked else maybe_activate_auto_break_even(current, atr=atr)
-                if not quick_reduced and not profit_locked and not be_triggered:
-                    manage_position_scaling(current, atr=atr)
+                monthly5_adjusted = manage_monthly5_position_guard(
+                    current,
+                    decision=locals().get("decision"),
+                )
+                if not monthly5_adjusted and active_trade["open"]:
+                    quick_reduced = maybe_take_quick_profit_reduce(current, atr=atr)
+                    profit_locked = maybe_lock_profit_after_reversal(current, favorable_price=current, atr=atr)
+                    be_triggered = False if profit_locked else maybe_activate_auto_break_even(current, atr=atr)
+                    if not quick_reduced and not profit_locked and not be_triggered:
+                        manage_position_scaling(current, atr=atr)
 
             # ===== 持倉超過4小時，只縮減止盈範圍 =====
             if active_trade["open"]:
@@ -17831,6 +18001,7 @@ def run_bot():
                 active_trade["scale_add_pause_ts"] = 0.0
                 active_trade["last_scale_skip_notify_key"] = ""
                 active_trade["last_scale_skip_notify_ts"] = 0.0
+                active_trade["monthly5_position_guard_ts"] = 0.0
                 active_trade["open_time"] = time.time()
                 active_trade["tp_sl_adjusted_4h"] = False
                 active_trade["time_horizon"] = _infer_trade_time_horizon(
