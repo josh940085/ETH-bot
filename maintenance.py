@@ -55,6 +55,7 @@ CHECK_NAME_ZH = {
     "telegram_watch_risk": "Telegram 發送風險",
     "model_health": "交易模型健康狀態",
     "strategy_strictness": "策略嚴苛度",
+    "monthly5_runtime": "月報酬5%策略一致性",
     "smoke_backtest": "策略快速回測",
 }
 STATUS_ZH = {
@@ -969,6 +970,26 @@ def _check_py_compile():
     }
 
 
+def _check_monthly5_runtime():
+    max_age_sec = max(
+        60,
+        int(float(os.getenv("MONTHLY5_RUNTIME_MAX_AGE_SEC", "600") or "600")),
+    )
+    result = _run_command(
+        [sys.executable, "verify_monthly5_runtime.py", "--max-age-sec", str(max_age_sec)],
+        timeout=60,
+    )
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        raise RuntimeError(output or "monthly5 runtime verifier failed")
+    detail = output.splitlines()[-1] if output else "monthly5 runtime verifier passed"
+    return {
+        "status": "ok",
+        "detail": detail,
+        "max_age_sec": max_age_sec,
+    }
+
+
 def _check_conflict_markers():
     findings = []
     scan_paths = [REPO_DIR / name for name in TEXT_SCAN_FILES]
@@ -1705,6 +1726,7 @@ def main():
         ("market_kline_source", _check_market_kline_source),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
+        ("monthly5_runtime", _check_monthly5_runtime),
         ("telegram_policy", _check_telegram_policy_and_repair),
         ("telegram_watch_risk", _check_telegram_watch_risk),
         ("model_health", _check_models_and_repair),
