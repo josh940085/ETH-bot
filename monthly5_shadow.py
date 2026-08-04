@@ -263,6 +263,32 @@ def build_readiness_report(
     ]
     open_sample_pct = (len(open_rows) / len(valid_rows)) * 100.0
     flat_sample_pct = 100.0 - open_sample_pct
+    timed_rows = sorted(
+        (row for row in valid_rows if _safe_int(row.get("updated_ts"), 0) > 0),
+        key=lambda row: _safe_int(row.get("updated_ts"), 0),
+    )
+    weighted_total_sec = 0.0
+    weighted_open_sec = 0.0
+    weighted_flat_sec = 0.0
+    if len(timed_rows) >= 2:
+        end_ts = max(_safe_float(now_ts, time.time()), _safe_int(timed_rows[-1].get("updated_ts"), 0))
+        for idx, row in enumerate(timed_rows):
+            start_ts = _safe_int(row.get("updated_ts"), 0)
+            next_ts = _safe_int(timed_rows[idx + 1].get("updated_ts"), 0) if idx + 1 < len(timed_rows) else end_ts
+            duration = max(0.0, next_ts - start_ts)
+            if duration <= 0:
+                continue
+            weighted_total_sec += duration
+            if bool(row.get("position_open", False)) or _safe_float(row.get("position_notional"), 0.0) > 0:
+                weighted_open_sec += duration
+            else:
+                weighted_flat_sec += duration
+    if weighted_total_sec > 0:
+        open_time_pct = (weighted_open_sec / weighted_total_sec) * 100.0
+        flat_time_pct = (weighted_flat_sec / weighted_total_sec) * 100.0
+    else:
+        open_time_pct = open_sample_pct
+        flat_time_pct = flat_sample_pct
 
     min_records = max(1, _safe_int(min_records, 48))
     min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
@@ -275,10 +301,10 @@ def build_readiness_report(
         warnings.append("no evaluate_long/evaluate_short/reduced_exposure samples yet")
     if not risk_rows:
         warnings.append("no live risk-mode samples yet")
-    if flat_cap is not None and flat_sample_pct > flat_cap:
-        warnings.append(f"flat sample pct high: {flat_sample_pct:.2f}% > {flat_cap:.2f}%")
+    if flat_cap is not None and flat_time_pct > flat_cap:
+        warnings.append(f"flat time pct high: {flat_time_pct:.2f}% > {flat_cap:.2f}%")
 
-    flat_ok = flat_cap is None or flat_sample_pct <= flat_cap
+    flat_ok = flat_cap is None or flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
     status = "ready" if ready else "collecting"
     if failures:
@@ -302,6 +328,11 @@ def build_readiness_report(
         "flat_rows": len(valid_rows) - len(open_rows),
         "open_sample_pct": round(max(0.0, open_sample_pct), 4),
         "flat_sample_pct": round(max(0.0, flat_sample_pct), 4),
+        "open_time_pct": round(max(0.0, open_time_pct), 4),
+        "flat_time_pct": round(max(0.0, flat_time_pct), 4),
+        "weighted_total_sec": round(max(0.0, weighted_total_sec), 4),
+        "weighted_open_sec": round(max(0.0, weighted_open_sec), 4),
+        "weighted_flat_sec": round(max(0.0, weighted_flat_sec), 4),
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,

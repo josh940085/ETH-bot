@@ -2878,7 +2878,7 @@
     const minSpanHours = Number.isFinite(Number(state.min_span_hours)) ? Number(state.min_span_hours) : 24;
     const evaluateRows = Number.isFinite(Number(state.evaluate_rows)) ? Number(state.evaluate_rows) : 0;
     const riskRows = Number.isFinite(Number(state.risk_rows)) ? Number(state.risk_rows) : 0;
-    const flatPct = Number.isFinite(Number(state.flat_sample_pct)) ? Number(state.flat_sample_pct) : 0;
+    const flatPct = Number.isFinite(Number(state.flat_time_pct)) ? Number(state.flat_time_pct) : (Number.isFinite(Number(state.flat_sample_pct)) ? Number(state.flat_sample_pct) : 0);
     const maxFlatPct = Number.isFinite(Number(state.max_flat_time_pct)) ? Number(state.max_flat_time_pct) : 41.65;
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
