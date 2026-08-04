@@ -798,6 +798,11 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "shadow_only": True,
             "mode": "post_lock",
             "suggested_exposure_scale": 0.15,
+            "market_selection": {
+                "market_bias": "bullish",
+                "selected_plan": "post_lock_low_exposure",
+                "shadow_action": "reduced_exposure",
+            },
         }
 
         with (
@@ -810,6 +815,10 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         payload = write_snapshot.call_args.args[1]
         self.assertEqual(payload["monthly5_shadow"], shadow_state)
+        self.assertEqual(
+            payload["monthly5_shadow"]["market_selection"]["selected_plan"],
+            "post_lock_low_exposure",
+        )
 
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):

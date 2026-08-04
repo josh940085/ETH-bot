@@ -179,3 +179,135 @@ def update_shadow_state(
         "mark_price": round(max(0.0, _safe_float(mark_price, 0.0)), 4),
         "updated_ts": now,
     }
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _direction_score(value):
+    value = _safe_float(value, 0.0)
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
+def build_market_selection(
+    shadow_state,
+    *,
+    strategy_signal="wait",
+    strategy_execution_reason="",
+    strategy_context=None,
+    host_logic=None,
+    macro_alignment=None,
+    donchian_state=None,
+):
+    shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
+    strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
+    host_logic = host_logic if isinstance(host_logic, dict) else {}
+    macro_alignment = macro_alignment if isinstance(macro_alignment, dict) else {}
+    donchian_state = donchian_state if isinstance(donchian_state, dict) else {}
+
+    votes = []
+    htf = _direction_score(strategy_context.get("htf"))
+    mid = _direction_score(strategy_context.get("mid_trend"))
+    macro_bias = _safe_float(strategy_context.get("macro_bias"), 0.0)
+    host_direction = str(host_logic.get("direction") or "").lower()
+    host_confidence = _safe_float(host_logic.get("confidence"), 0.0)
+    macro_score = _safe_float(macro_alignment.get("score"), 0.0)
+    hard_block = bool(macro_alignment.get("hard_block", False))
+    market_state = str(donchian_state.get("state") or "").lower()
+    market_action = str(donchian_state.get("action") or "").lower()
+
+    if htf:
+        votes.append(("htf", htf, 1.2))
+    if mid:
+        votes.append(("mid_trend", mid, 1.0))
+    if macro_bias >= 0.5:
+        votes.append(("macro_bias", 1, 0.8))
+    elif macro_bias <= -0.5:
+        votes.append(("macro_bias", -1, 0.8))
+    if host_direction in {"long", "short"} and host_confidence >= 0.65:
+        votes.append(("host_logic", 1 if host_direction == "long" else -1, 1.2))
+    if macro_score >= 1.15 and not hard_block:
+        host_vote = 1 if host_direction == "long" else -1 if host_direction == "short" else 0
+        if host_vote:
+            votes.append(("macro_alignment", host_vote, 0.8))
+
+    bull_score = round(sum(weight for _, vote, weight in votes if vote > 0), 4)
+    bear_score = round(sum(weight for _, vote, weight in votes if vote < 0), 4)
+    if hard_block:
+        market_bias = "blocked"
+    elif bull_score >= bear_score + 1.0 and bull_score >= 1.8:
+        market_bias = "bullish"
+    elif bear_score >= bull_score + 1.0 and bear_score >= 1.8:
+        market_bias = "bearish"
+    elif bull_score > 0 or bear_score > 0:
+        market_bias = "mixed"
+    else:
+        market_bias = "neutral"
+
+    mode = str(shadow_state.get("mode") or "normal")
+    exposure_cap = max(0.0, min(1.0, _safe_float(shadow_state.get("suggested_exposure_scale"), 0.0)))
+    reason_codes = list(shadow_state.get("reason_codes") or [])
+    signal = str(strategy_signal or "wait").lower()
+
+    selected_plan = "normal_wait"
+    shadow_action = "wait"
+    rationale = "等待月報酬5%策略與市場方向同時確認"
+
+    if mode in {"intraday_stop", "post_lock_floor_guard"}:
+        selected_plan = "risk_off"
+        shadow_action = "risk_off"
+        rationale = "日內停損或月度鎖利地板被觸發，優先空倉保護"
+    elif mode == "post_lock":
+        selected_plan = "post_lock_low_exposure"
+        shadow_action = "reduced_exposure"
+        rationale = "月報酬已達5%鎖利區，僅允許低曝險續跑"
+    elif mode == "recovery":
+        if market_bias == "bullish" and signal in {"long", "wait"}:
+            selected_plan = "recovery_long_flat_selector"
+            shadow_action = "evaluate_long"
+            rationale = "月度回撤觸發恢復模式，僅評估回測指定的低曝險偏多恢復路徑"
+        else:
+            selected_plan = "recovery_wait_for_long_flat"
+            shadow_action = "wait"
+            rationale = "恢復模式未取得偏多共振，等待更適合的低曝險恢復行情"
+    elif market_bias == "bullish" and signal in {"long", "wait"}:
+        selected_plan = "normal_long_selector"
+        shadow_action = "evaluate_long"
+        rationale = "短中期與宏觀偏多，使用正常相似日策略評估多方機會"
+    elif market_bias == "bearish" and signal in {"short", "wait"}:
+        selected_plan = "normal_short_selector"
+        shadow_action = "evaluate_short"
+        rationale = "市場偏空，使用正常相似日策略評估空方機會"
+    elif market_bias == "blocked":
+        selected_plan = "macro_block_wait"
+        shadow_action = "wait"
+        rationale = "宏觀或事件風險硬阻擋，等待解除"
+
+    if market_state == "chop" and shadow_action in {"evaluate_long", "evaluate_short"}:
+        exposure_cap = round(min(exposure_cap, 0.35), 4)
+        reason_codes.append("chop_market_reduce")
+
+    return {
+        "schema_version": 1,
+        "market_bias": market_bias,
+        "bull_score": bull_score,
+        "bear_score": bear_score,
+        "market_state": market_state,
+        "market_action": market_action,
+        "selected_plan": selected_plan,
+        "shadow_action": shadow_action,
+        "exposure_cap": round(exposure_cap, 4),
+        "max_leverage": min(5, max(0, _safe_int(shadow_state.get("max_leverage"), 5))),
+        "strategy_signal": str(strategy_signal or "wait"),
+        "strategy_execution_reason": str(strategy_execution_reason or ""),
+        "reason_codes": sorted(set(str(code) for code in reason_codes if code)),
+        "rationale": rationale,
+    }

@@ -91,6 +91,66 @@ class Monthly5ShadowTests(unittest.TestCase):
             monthly5_shadow.save_state(path, payload)
             self.assertEqual(monthly5_shadow.load_state(path), payload)
 
+    def test_market_selection_chooses_normal_long_for_bullish_context(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "trend", "action": "open"},
+        )
+
+        self.assertEqual(selection["market_bias"], "bullish")
+        self.assertEqual(selection["selected_plan"], "normal_long_selector")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["exposure_cap"], 1.0)
+
+    def test_market_selection_uses_recovery_long_flat_only_when_bullish(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "recovery", "suggested_exposure_scale": 0.5, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.0},
+            host_logic={"direction": "long", "confidence": 0.76},
+            macro_alignment={"score": 1.5, "hard_block": False},
+        )
+
+        self.assertEqual(selection["selected_plan"], "recovery_long_flat_selector")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["exposure_cap"], 0.5)
+
+    def test_market_selection_risk_off_overrides_bullish_context(self):
+        selection = monthly5_shadow.build_market_selection(
+            {
+                "mode": "post_lock_floor_guard",
+                "suggested_exposure_scale": 0.0,
+                "max_leverage": 5,
+                "reason_codes": ["post_lock_floor_guard"],
+            },
+            strategy_signal="long",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.0},
+            host_logic={"direction": "long", "confidence": 0.9},
+            macro_alignment={"score": 2.0, "hard_block": False},
+        )
+
+        self.assertEqual(selection["selected_plan"], "risk_off")
+        self.assertEqual(selection["shadow_action"], "risk_off")
+        self.assertEqual(selection["exposure_cap"], 0.0)
+
+    def test_market_selection_reduces_exposure_in_chop(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "chop", "action": "reduce"},
+        )
+
+        self.assertEqual(selection["selected_plan"], "normal_long_selector")
+        self.assertEqual(selection["exposure_cap"], 0.35)
+        self.assertIn("chop_market_reduce", selection["reason_codes"])
+
 
 if __name__ == "__main__":
     unittest.main()

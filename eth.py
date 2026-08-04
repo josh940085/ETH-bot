@@ -5894,6 +5894,15 @@ def _update_monthly5_shadow_panel_state(mark_price=None):
                 (POSITION_PANEL_STATE.get("monthly5_shadow") or {}).get("selected_candidate")
             ),
         )
+        snapshot["market_selection"] = monthly5_shadow.build_market_selection(
+            snapshot,
+            strategy_signal=str(POSITION_PANEL_STATE.get("strategy_signal") or "wait"),
+            strategy_execution_reason=str(POSITION_PANEL_STATE.get("strategy_execution_reason") or ""),
+            strategy_context=dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
+            host_logic=dict(POSITION_PANEL_STATE.get("strategy_host_logic") or {}),
+            macro_alignment=dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {}),
+            donchian_state=dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {}),
+        )
         monthly5_shadow.save_state(MONTHLY5_SHADOW_STATE_PATH, snapshot)
         POSITION_PANEL_STATE["monthly5_shadow"] = snapshot
         return snapshot
