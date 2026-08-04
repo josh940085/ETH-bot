@@ -8,7 +8,7 @@ import verify_monthly5_runtime
 
 
 class VerifyMonthly5RuntimeTests(unittest.TestCase):
-    def _spec(self, summary_path):
+    def _spec(self, summary_path, monthly_path):
         return {
             "strategy_id": monthly5_shadow.STRATEGY_ID,
             "objective": {
@@ -25,14 +25,19 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             },
             "backtest_evidence": {
                 "source_summary": str(summary_path),
+                "source_monthly": str(monthly_path),
                 "candidate_name": monthly5_shadow.SELECTED_CANDIDATE,
-                "months_ge_5": 79,
-                "months_ge_0": 80,
-                "complete_months": 79,
-                "complete_months_ge_5": 79,
-                "incomplete_month": "2026-08",
-                "worst_intramonth_pnl_pct": -10.32,
-                "avg_flat_time_pct": 41.65,
+                "period_start": "2020-01",
+                "period_end": "2020-03",
+                "complete_months_end": "2020-02",
+                "months": 3,
+                "months_ge_5": 2,
+                "months_ge_0": 3,
+                "complete_months": 2,
+                "complete_months_ge_5": 2,
+                "incomplete_month": "2020-03",
+                "worst_intramonth_pnl_pct": -4.0,
+                "avg_flat_time_pct": 20.0,
             },
         }
 
@@ -41,12 +46,39 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             "top": [
                 {
                     "name": monthly5_shadow.SELECTED_CANDIDATE,
-                    "months_ge_5": 79,
-                    "months_ge_0": 80,
-                    "worst_intramonth_pnl_pct": -10.32,
-                    "avg_flat_time_pct": 41.65,
-                    "failed_months": [{"month": "2026-08", "return_pct": 0.497}],
+                    "months_ge_5": 2,
+                    "months_ge_0": 3,
+                    "worst_intramonth_pnl_pct": -4.0,
+                    "avg_flat_time_pct": 20.0,
+                    "failed_months": [{"month": "2020-03", "return_pct": 1.0}],
                 }
+            ]
+        }
+
+    def _monthly(self):
+        return {
+            monthly5_shadow.SELECTED_CANDIDATE: [
+                {
+                    "month": "2020-01",
+                    "return_pct": 5.0,
+                    "flat_time_pct": 10.0,
+                    "min_intramonth_pnl_pct": -1.0,
+                    "top_pick": "mom72_ls|lev4|stopNone|target0.05|redlev0.5",
+                },
+                {
+                    "month": "2020-02",
+                    "return_pct": 8.0,
+                    "flat_time_pct": 20.0,
+                    "min_intramonth_pnl_pct": -4.0,
+                    "top_pick": "mom48_lf|lev5|stopNone|target0.08|redlev1.0",
+                },
+                {
+                    "month": "2020-03",
+                    "return_pct": 1.0,
+                    "flat_time_pct": 30.0,
+                    "min_intramonth_pnl_pct": 0.0,
+                    "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                },
             ]
         }
 
@@ -75,8 +107,10 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             summary_path = root / "summary.json"
+            monthly_path = root / "monthly.json"
             summary_path.write_text(json.dumps(self._summary()), encoding="utf-8")
-            spec = self._spec(summary_path)
+            monthly_path.write_text(json.dumps(self._monthly()), encoding="utf-8")
+            spec = self._spec(summary_path, monthly_path)
             shadow = self._shadow()
 
             failures = []
@@ -94,8 +128,10 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             summary_path = root / "summary.json"
+            monthly_path = root / "monthly.json"
             summary_path.write_text(json.dumps(self._summary()), encoding="utf-8")
-            spec = self._spec(summary_path)
+            monthly_path.write_text(json.dumps(self._monthly()), encoding="utf-8")
+            spec = self._spec(summary_path, monthly_path)
             spec["backtest_evidence"]["candidate_name"] = "wrong"
 
             failures = verify_monthly5_runtime._verify_spec_and_summary(spec)
@@ -106,7 +142,8 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             summary_path = root / "summary.json"
-            spec = self._spec(summary_path)
+            monthly_path = root / "monthly.json"
+            spec = self._spec(summary_path, monthly_path)
             shadow = self._shadow()
             shadow.pop("market_selection")
 
