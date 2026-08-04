@@ -68,8 +68,14 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertTrue(report["ready"])
         self.assertEqual(report["evaluate_rows"], 5)
 
-    def test_collecting_when_weighted_flat_time_exceeds_backtest_cap(self):
-        rows = [self._row(1000 + idx * 900, position_open=(idx == 0)) for idx in range(5)]
+    def test_collecting_when_weighted_shadow_flat_time_exceeds_backtest_cap(self):
+        rows = [
+            self._row(1000, action="wait", plan="normal_wait", position_open=False),
+            self._row(1900, action="evaluate_long", plan="normal_long_selector", position_open=True),
+            self._row(2800, action="evaluate_long", plan="normal_long_selector", position_open=False),
+            self._row(3700, action="evaluate_long", plan="normal_long_selector", position_open=False),
+            self._row(4600, action="evaluate_long", plan="normal_long_selector", position_open=False),
+        ]
 
         report = monthly5_shadow.build_readiness_report(
             rows,
@@ -78,15 +84,15 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             min_records=5,
             min_span_hours=1.0,
             max_age_sec=None,
-            max_flat_time_pct=50.0,
+            max_flat_time_pct=20.0,
             now_ts=1000 + 4 * 900,
         )
 
         self.assertEqual(report["status"], "collecting")
         self.assertFalse(report["ready"])
         self.assertEqual(report["flat_sample_pct"], 80.0)
-        self.assertEqual(report["flat_time_pct"], 75.0)
-        self.assertTrue(any("flat time pct high" in item for item in report["warnings"]))
+        self.assertEqual(report["shadow_flat_time_pct"], 25.0)
+        self.assertTrue(any("shadow flat time pct high" in item for item in report["warnings"]))
 
     def test_flat_time_is_weighted_by_timestamp_span(self):
         rows = [
@@ -108,6 +114,25 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
 
         self.assertAlmostEqual(report["flat_sample_pct"], 66.6667, places=3)
         self.assertAlmostEqual(report["flat_time_pct"], 90.0, places=3)
+
+    def test_actual_flat_time_does_not_block_shadow_readiness(self):
+        rows = [self._row(1000 + idx * 900, position_open=False) for idx in range(5)]
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=5,
+            min_span_hours=1.0,
+            max_age_sec=None,
+            max_flat_time_pct=50.0,
+            now_ts=1000 + 4 * 900,
+        )
+
+        self.assertEqual(report["status"], "ready")
+        self.assertTrue(report["ready"])
+        self.assertEqual(report["actual_flat_time_pct"], 100.0)
+        self.assertEqual(report["shadow_flat_time_pct"], 0.0)
 
     def test_invalid_when_history_breaks_shadow_safety(self):
         row = self._row(1000)

@@ -256,6 +256,13 @@ def build_readiness_report(
         for row in valid_rows
         if str(row.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}
     ]
+    shadow_active_rows = [
+        row
+        for row in valid_rows
+        if str(row.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}
+        and _safe_float(row.get("exposure_cap"), 0.0) > 0.0
+        and row.get("guard_allowed") is not False
+    ]
     open_rows = [
         row
         for row in valid_rows
@@ -263,6 +270,8 @@ def build_readiness_report(
     ]
     open_sample_pct = (len(open_rows) / len(valid_rows)) * 100.0
     flat_sample_pct = 100.0 - open_sample_pct
+    shadow_active_sample_pct = (len(shadow_active_rows) / len(valid_rows)) * 100.0
+    shadow_flat_sample_pct = 100.0 - shadow_active_sample_pct
     timed_rows = sorted(
         (row for row in valid_rows if _safe_int(row.get("updated_ts"), 0) > 0),
         key=lambda row: _safe_int(row.get("updated_ts"), 0),
@@ -270,6 +279,8 @@ def build_readiness_report(
     weighted_total_sec = 0.0
     weighted_open_sec = 0.0
     weighted_flat_sec = 0.0
+    weighted_shadow_active_sec = 0.0
+    weighted_shadow_flat_sec = 0.0
     if len(timed_rows) >= 2:
         end_ts = max(_safe_float(now_ts, time.time()), _safe_int(timed_rows[-1].get("updated_ts"), 0))
         for idx, row in enumerate(timed_rows):
@@ -283,12 +294,25 @@ def build_readiness_report(
                 weighted_open_sec += duration
             else:
                 weighted_flat_sec += duration
+            shadow_active = (
+                str(row.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}
+                and _safe_float(row.get("exposure_cap"), 0.0) > 0.0
+                and row.get("guard_allowed") is not False
+            )
+            if shadow_active:
+                weighted_shadow_active_sec += duration
+            else:
+                weighted_shadow_flat_sec += duration
     if weighted_total_sec > 0:
         open_time_pct = (weighted_open_sec / weighted_total_sec) * 100.0
         flat_time_pct = (weighted_flat_sec / weighted_total_sec) * 100.0
+        shadow_active_time_pct = (weighted_shadow_active_sec / weighted_total_sec) * 100.0
+        shadow_flat_time_pct = (weighted_shadow_flat_sec / weighted_total_sec) * 100.0
     else:
         open_time_pct = open_sample_pct
         flat_time_pct = flat_sample_pct
+        shadow_active_time_pct = shadow_active_sample_pct
+        shadow_flat_time_pct = shadow_flat_sample_pct
 
     min_records = max(1, _safe_int(min_records, 48))
     min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
@@ -301,10 +325,10 @@ def build_readiness_report(
         warnings.append("no evaluate_long/evaluate_short/reduced_exposure samples yet")
     if not risk_rows:
         warnings.append("no live risk-mode samples yet")
-    if flat_cap is not None and flat_time_pct > flat_cap:
-        warnings.append(f"flat time pct high: {flat_time_pct:.2f}% > {flat_cap:.2f}%")
+    if flat_cap is not None and shadow_flat_time_pct > flat_cap:
+        warnings.append(f"shadow flat time pct high: {shadow_flat_time_pct:.2f}% > {flat_cap:.2f}%")
 
-    flat_ok = flat_cap is None or flat_time_pct <= flat_cap
+    flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
     status = "ready" if ready else "collecting"
     if failures:
@@ -324,15 +348,25 @@ def build_readiness_report(
         "market_bias_counts": dict(sorted(market_bias_counts.items())),
         "risk_rows": len(risk_rows),
         "evaluate_rows": len(evaluate_rows),
+        "shadow_active_rows": len(shadow_active_rows),
+        "shadow_flat_rows": len(valid_rows) - len(shadow_active_rows),
         "open_rows": len(open_rows),
         "flat_rows": len(valid_rows) - len(open_rows),
         "open_sample_pct": round(max(0.0, open_sample_pct), 4),
         "flat_sample_pct": round(max(0.0, flat_sample_pct), 4),
+        "shadow_active_sample_pct": round(max(0.0, shadow_active_sample_pct), 4),
+        "shadow_flat_sample_pct": round(max(0.0, shadow_flat_sample_pct), 4),
         "open_time_pct": round(max(0.0, open_time_pct), 4),
         "flat_time_pct": round(max(0.0, flat_time_pct), 4),
+        "actual_open_time_pct": round(max(0.0, open_time_pct), 4),
+        "actual_flat_time_pct": round(max(0.0, flat_time_pct), 4),
+        "shadow_active_time_pct": round(max(0.0, shadow_active_time_pct), 4),
+        "shadow_flat_time_pct": round(max(0.0, shadow_flat_time_pct), 4),
         "weighted_total_sec": round(max(0.0, weighted_total_sec), 4),
         "weighted_open_sec": round(max(0.0, weighted_open_sec), 4),
         "weighted_flat_sec": round(max(0.0, weighted_flat_sec), 4),
+        "weighted_shadow_active_sec": round(max(0.0, weighted_shadow_active_sec), 4),
+        "weighted_shadow_flat_sec": round(max(0.0, weighted_shadow_flat_sec), 4),
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,
