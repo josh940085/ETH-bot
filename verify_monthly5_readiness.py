@@ -72,7 +72,9 @@ def main() -> int:
             f"evaluate_rows={report.get('evaluate_rows', 0)} "
             f"risk_rows={report.get('risk_rows', 0)} "
             f"shadow_flat_time_pct={report.get('shadow_flat_time_pct', 0.0)} "
-            f"actual_flat_time_pct={report.get('actual_flat_time_pct', 0.0)}"
+            f"actual_flat_time_pct={report.get('actual_flat_time_pct', 0.0)} "
+            f"shadow_paper_return_pct={report.get('shadow_paper_return_pct', 0.0)} "
+            f"shadow_paper_intervals={report.get('shadow_paper_intervals', 0)}"
         )
         for item in report.get("failures") or []:
             print(f"FAIL {item}")

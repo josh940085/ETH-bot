@@ -16,7 +16,17 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             spec["backtest_evidence"]["avg_flat_time_pct"] = avg_flat_time_pct
         return spec
 
-    def _row(self, ts, *, action="evaluate_long", plan="normal_long_selector", position_open=False):
+    def _row(
+        self,
+        ts,
+        *,
+        action="evaluate_long",
+        plan="normal_long_selector",
+        position_open=False,
+        mark_price=100.0,
+        exposure_cap=0.35,
+        max_leverage=5,
+    ):
         return {
             "schema_version": 1,
             "strategy_id": monthly5_shadow.STRATEGY_ID,
@@ -26,8 +36,8 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             "month_key": "2026-08",
             "day_key": "2026-08-05",
             "mode": "normal",
-            "max_leverage": 5,
-            "exposure_cap": 0.35,
+            "max_leverage": max_leverage,
+            "exposure_cap": exposure_cap,
             "selected_plan": plan,
             "shadow_action": action,
             "market_bias": "bullish",
@@ -35,6 +45,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             "guard_allowed": True,
             "position_open": position_open,
             "position_notional": 100.0 if position_open else 0.0,
+            "mark_price": mark_price,
         }
 
     def test_collecting_when_history_is_valid_but_small(self):
@@ -133,6 +144,30 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertTrue(report["ready"])
         self.assertEqual(report["actual_flat_time_pct"], 100.0)
         self.assertEqual(report["shadow_flat_time_pct"], 0.0)
+
+    def test_shadow_paper_return_tracks_direction_exposure_and_leverage(self):
+        rows = [
+            self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.5, max_leverage=2),
+            self._row(1900, action="wait", plan="normal_wait", mark_price=110.0),
+            self._row(2800, action="evaluate_short", plan="normal_short_selector", mark_price=105.0, exposure_cap=0.2, max_leverage=5),
+            self._row(3700, action="wait", plan="normal_wait", mark_price=100.0),
+        ]
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=4,
+            min_span_hours=0.5,
+            max_age_sec=None,
+            now_ts=3700,
+        )
+
+        self.assertEqual(report["shadow_paper_intervals"], 2)
+        self.assertEqual(report["shadow_paper_long_intervals"], 1)
+        self.assertEqual(report["shadow_paper_short_intervals"], 1)
+        self.assertAlmostEqual(report["shadow_paper_return_pct"], 14.7619, places=4)
+        self.assertEqual(report["shadow_paper_win_rate_pct"], 100.0)
 
     def test_invalid_when_history_breaks_shadow_safety(self):
         row = self._row(1000)

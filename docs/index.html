@@ -2883,6 +2883,9 @@
       : (Number.isFinite(Number(state.flat_time_pct)) ? Number(state.flat_time_pct) : (Number.isFinite(Number(state.flat_sample_pct)) ? Number(state.flat_sample_pct) : 0));
     const actualFlatPct = Number.isFinite(Number(state.actual_flat_time_pct)) ? Number(state.actual_flat_time_pct) : flatPct;
     const maxFlatPct = Number.isFinite(Number(state.max_flat_time_pct)) ? Number(state.max_flat_time_pct) : 41.65;
+    const paperReturnPct = Number.isFinite(Number(state.shadow_paper_return_pct)) ? Number(state.shadow_paper_return_pct) : 0;
+    const paperIntervals = Number.isFinite(Number(state.shadow_paper_intervals)) ? Number(state.shadow_paper_intervals) : 0;
+    const paperWinRatePct = Number.isFinite(Number(state.shadow_paper_win_rate_pct)) ? Number(state.shadow_paper_win_rate_pct) : 0;
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
     const label = status === "ready" || ready ? "可審核" : (status === "invalid" ? "異常" : "收集中");
@@ -2897,6 +2900,7 @@
         <div class="service-row"><span>跨度</span><strong>${spanHours.toFixed(2)}/${minSpanHours.toFixed(0)}h (${spanProgress.toFixed(0)}%)</strong></div>
         <div class="service-row"><span>Shadow 空倉</span><strong>${flatPct.toFixed(1)}% / ${maxFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>實單空倉</span><strong>${actualFlatPct.toFixed(1)}%</strong></div>
+        <div class="service-row"><span>紙上報酬</span><strong>${paperReturnPct.toFixed(2)}% / ${paperWinRatePct.toFixed(0)}% (${paperIntervals})</strong></div>
         <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
       </div>
       <div class="command-meta">${warningText}</div>`;

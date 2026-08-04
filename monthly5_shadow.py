@@ -183,6 +183,82 @@ def append_history(path, snapshot, guard=None, *, min_interval_sec=300):
     return True
 
 
+def _shadow_paper_direction(row):
+    action = str(row.get("shadow_action") or "").lower()
+    if action == "evaluate_long":
+        return 1
+    if action == "evaluate_short":
+        return -1
+    if action != "reduced_exposure":
+        return 0
+    hints = [
+        str(row.get("position_side") or "").lower(),
+        str(row.get("strategy_signal") or "").lower(),
+        str(row.get("selected_plan") or "").lower(),
+    ]
+    if any("short" in hint for hint in hints):
+        return -1
+    if any("long" in hint for hint in hints):
+        return 1
+    return 0
+
+
+def _build_shadow_paper_return(rows):
+    timed_rows = sorted(
+        (row for row in rows if isinstance(row, dict) and _safe_int(row.get("updated_ts"), 0) > 0),
+        key=lambda row: _safe_int(row.get("updated_ts"), 0),
+    )
+    total_return_pct = 0.0
+    cumulative_pct = 0.0
+    peak_pct = 0.0
+    max_drawdown_pct = 0.0
+    interval_count = 0
+    win_count = 0
+    loss_count = 0
+    long_count = 0
+    short_count = 0
+    last_interval_pct = 0.0
+    for idx in range(len(timed_rows) - 1):
+        row = timed_rows[idx]
+        next_row = timed_rows[idx + 1]
+        if row.get("guard_allowed") is False:
+            continue
+        direction = _shadow_paper_direction(row)
+        exposure_cap = max(0.0, min(1.0, _safe_float(row.get("exposure_cap"), 0.0)))
+        leverage = max(0.0, min(5.0, _safe_float(row.get("max_leverage"), 5.0)))
+        start_price = _safe_float(row.get("mark_price"), 0.0)
+        end_price = _safe_float(next_row.get("mark_price"), 0.0)
+        if direction == 0 or exposure_cap <= 0.0 or leverage <= 0.0 or start_price <= 0.0 or end_price <= 0.0:
+            continue
+        interval_pct = direction * ((end_price / start_price) - 1.0) * 100.0 * exposure_cap * leverage
+        total_return_pct += interval_pct
+        cumulative_pct += interval_pct
+        peak_pct = max(peak_pct, cumulative_pct)
+        max_drawdown_pct = min(max_drawdown_pct, cumulative_pct - peak_pct)
+        interval_count += 1
+        if interval_pct > 0:
+            win_count += 1
+        elif interval_pct < 0:
+            loss_count += 1
+        if direction > 0:
+            long_count += 1
+        else:
+            short_count += 1
+        last_interval_pct = interval_pct
+    win_rate_pct = (win_count / interval_count) * 100.0 if interval_count else 0.0
+    return {
+        "shadow_paper_return_pct": round(total_return_pct, 4),
+        "shadow_paper_max_drawdown_pct": round(max_drawdown_pct, 4),
+        "shadow_paper_intervals": interval_count,
+        "shadow_paper_win_intervals": win_count,
+        "shadow_paper_loss_intervals": loss_count,
+        "shadow_paper_win_rate_pct": round(win_rate_pct, 4),
+        "shadow_paper_long_intervals": long_count,
+        "shadow_paper_short_intervals": short_count,
+        "shadow_paper_last_interval_pct": round(last_interval_pct, 4),
+    }
+
+
 def build_readiness_report(
     rows,
     *,
@@ -313,6 +389,7 @@ def build_readiness_report(
         flat_time_pct = flat_sample_pct
         shadow_active_time_pct = shadow_active_sample_pct
         shadow_flat_time_pct = shadow_flat_sample_pct
+    shadow_paper = _build_shadow_paper_return(valid_rows)
 
     min_records = max(1, _safe_int(min_records, 48))
     min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
@@ -327,6 +404,8 @@ def build_readiness_report(
         warnings.append("no live risk-mode samples yet")
     if flat_cap is not None and shadow_flat_time_pct > flat_cap:
         warnings.append(f"shadow flat time pct high: {shadow_flat_time_pct:.2f}% > {flat_cap:.2f}%")
+    if span_hours >= min_span_hours and shadow_paper["shadow_paper_intervals"] > 0 and shadow_paper["shadow_paper_return_pct"] < 0:
+        warnings.append(f"shadow paper return negative: {shadow_paper['shadow_paper_return_pct']:.4f}%")
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
@@ -367,6 +446,7 @@ def build_readiness_report(
         "weighted_flat_sec": round(max(0.0, weighted_flat_sec), 4),
         "weighted_shadow_active_sec": round(max(0.0, weighted_shadow_active_sec), 4),
         "weighted_shadow_flat_sec": round(max(0.0, weighted_shadow_flat_sec), 4),
+        **shadow_paper,
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,
