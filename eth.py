@@ -206,6 +206,7 @@ TELEGRAM_POLL_BACKOFF_MAX = 60.0
 # ===== Discord（同步通知） =====
 POSITION_PANEL_FILE = data_path("docs", "position.json")
 MONTHLY5_SHADOW_STATE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_monthly5_shadow_state.json")
+MONTHLY5_SHADOW_HISTORY_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_monthly5_shadow_history.jsonl")
 PENDING_TRAINING_SAMPLE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_pending_training_sample.json")
 MAINTENANCE_REPORT_FILE = data_path("maintenance_latest_report.json")
 PROGRAM_LOG_FILE = data_path("..", "logs", "program.log").resolve()
@@ -5929,12 +5930,19 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                 else dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {})
             ),
         )
-        POSITION_PANEL_STATE["monthly5_execution_guard"] = monthly5_shadow.build_execution_guard(
+        guard = monthly5_shadow.build_execution_guard(
             snapshot,
             direction=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or ""),
             requested_size=_safe_float((decision or {}).get("position_size"), 0.0),
         )
+        POSITION_PANEL_STATE["monthly5_execution_guard"] = guard
         monthly5_shadow.save_state(MONTHLY5_SHADOW_STATE_PATH, snapshot)
+        monthly5_shadow.append_history(
+            MONTHLY5_SHADOW_HISTORY_PATH,
+            snapshot,
+            guard,
+            min_interval_sec=_safe_int(os.getenv("MONTHLY5_SHADOW_HISTORY_MIN_INTERVAL_SEC"), 300),
+        )
         POSITION_PANEL_STATE["monthly5_shadow"] = snapshot
         return snapshot
     except Exception as exc:

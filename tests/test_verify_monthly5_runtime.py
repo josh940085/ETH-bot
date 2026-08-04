@@ -103,6 +103,17 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             },
         }
 
+    def _history_row(self, shadow=None):
+        shadow = shadow or self._shadow()
+        return monthly5_shadow.build_history_record(
+            shadow,
+            {
+                "allowed": True,
+                "reason_code": "allowed",
+                "adjusted_size": 0.0,
+            },
+        )
+
     def test_runtime_verifier_accepts_matching_spec_summary_and_shadow(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -116,6 +127,7 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures = []
             failures.extend(verify_monthly5_runtime._verify_spec_and_summary(spec))
             failures.extend(verify_monthly5_runtime._verify_shadow_state("shadow", shadow, spec, None))
+            failures.extend(verify_monthly5_runtime._verify_shadow_history("history", [self._history_row(shadow)], shadow, spec, None))
             failures.extend(verify_monthly5_runtime._verify_guard_scenarios())
             failures.extend(verify_monthly5_runtime._verify_end_to_end_scenarios())
 
@@ -123,6 +135,38 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
     def test_runtime_verifier_end_to_end_scenarios_pass(self):
         self.assertEqual(verify_monthly5_runtime._verify_end_to_end_scenarios(), [])
+
+    def test_runtime_verifier_accepts_matching_shadow_history(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            summary_path = root / "summary.json"
+            monthly_path = root / "monthly.json"
+            spec = self._spec(summary_path, monthly_path)
+            shadow = self._shadow()
+
+            failures = verify_monthly5_runtime._verify_shadow_history(
+                "history",
+                [self._history_row(shadow)],
+                shadow,
+                spec,
+                None,
+            )
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_shadow_history_mode_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            summary_path = root / "summary.json"
+            monthly_path = root / "monthly.json"
+            spec = self._spec(summary_path, monthly_path)
+            shadow = self._shadow()
+            row = self._history_row(shadow)
+            row["mode"] = "post_lock"
+
+            failures = verify_monthly5_runtime._verify_shadow_history("history", [row], shadow, spec, None)
+
+        self.assertTrue(any("mode does not match" in failure for failure in failures))
 
     def test_runtime_verifier_rejects_candidate_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:

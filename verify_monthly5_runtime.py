@@ -15,6 +15,7 @@ from verify_monthly5_candidate import _failures as candidate_failures
 DEFAULT_SPEC = Path("docs/strategy_specs/monthly5_postlock_hourly.json")
 DEFAULT_POSITION = Path(".runtime/data/docs/position.json")
 DEFAULT_SHADOW = Path(".runtime/data/btcusdt_monthly5_shadow_state.json")
+DEFAULT_HISTORY = Path(".runtime/data/btcusdt_monthly5_shadow_history.jsonl")
 
 
 def _load_json(path: Path) -> dict:
@@ -25,6 +26,26 @@ def _load_json(path: Path) -> dict:
     if not isinstance(payload, dict):
         raise SystemExit(f"expected object JSON: {path}")
     return payload
+
+
+def _load_jsonl(path: Path) -> list[dict]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception as exc:
+        raise SystemExit(f"failed to read JSONL {path}: {exc}") from exc
+    rows = []
+    for idx, line in enumerate(lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception as exc:
+            raise SystemExit(f"failed to parse JSONL {path}:{idx}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise SystemExit(f"expected object JSONL row: {path}:{idx}")
+        rows.append(payload)
+    return rows
 
 
 def _safe_float(value, default=0.0):
@@ -126,6 +147,29 @@ def _verify_shadow_state(name: str, shadow: dict, spec: dict, max_age_sec: float
     if max_age_sec is not None:
         age = time.time() - _safe_float(shadow.get("updated_ts"), 0.0)
         _require(age <= max_age_sec, failures, f"{name} shadow state stale: age={age:.1f}s > {max_age_sec:.1f}s")
+    return failures
+
+
+def _verify_shadow_history(name: str, rows: list[dict], latest_shadow: dict, spec: dict, max_age_sec: float | None) -> list[str]:
+    failures: list[str] = []
+    evidence = spec.get("backtest_evidence") if isinstance(spec.get("backtest_evidence"), dict) else {}
+    _require(bool(rows), failures, f"{name} history missing rows")
+    if not rows:
+        return failures
+    latest = rows[-1]
+    _require(latest.get("schema_version") == 1, failures, f"{name} history schema mismatch")
+    _require(latest.get("strategy_id") == spec.get("strategy_id"), failures, f"{name} history strategy_id mismatch")
+    _require(latest.get("selected_candidate") == evidence.get("candidate_name"), failures, f"{name} history candidate mismatch")
+    _require(latest.get("shadow_only") is True, failures, f"{name} history must remain shadow_only")
+    _require(_safe_float(latest.get("max_leverage")) <= 5.0, failures, f"{name} history leverage exceeds 5x")
+    _require(0.0 <= _safe_float(latest.get("exposure_cap"), -1.0) <= 1.0, failures, f"{name} history exposure cap out of range")
+    _require(str(latest.get("selected_plan") or ""), failures, f"{name} history selected_plan missing")
+    _require(str(latest.get("shadow_action") or ""), failures, f"{name} history shadow_action missing")
+    if latest_shadow:
+        _require(latest.get("mode") == latest_shadow.get("mode"), failures, f"{name} history mode does not match shadow")
+    if max_age_sec is not None:
+        age = time.time() - _safe_float(latest.get("updated_ts"), 0.0)
+        _require(age <= max_age_sec, failures, f"{name} history stale: age={age:.1f}s > {max_age_sec:.1f}s")
     return failures
 
 
@@ -329,6 +373,8 @@ def main() -> int:
     parser.add_argument("--spec", default=str(DEFAULT_SPEC))
     parser.add_argument("--position", default=str(DEFAULT_POSITION))
     parser.add_argument("--shadow", default=str(DEFAULT_SHADOW))
+    parser.add_argument("--history", default=str(DEFAULT_HISTORY))
+    parser.add_argument("--require-history", action="store_true")
     parser.add_argument("--max-age-sec", type=float, default=None)
     args = parser.parse_args()
 
@@ -340,6 +386,11 @@ def main() -> int:
     failures.extend(_verify_spec_and_summary(spec))
     failures.extend(_verify_shadow_state("position", _shadow_from_position(position), spec, args.max_age_sec))
     failures.extend(_verify_shadow_state("shadow_file", shadow, spec, args.max_age_sec))
+    history_path = Path(args.history)
+    if history_path.exists():
+        failures.extend(_verify_shadow_history("history_file", _load_jsonl(history_path), shadow, spec, args.max_age_sec))
+    elif args.require_history:
+        failures.append(f"history file missing: {history_path}")
     failures.extend(_verify_guard_scenarios())
     failures.extend(_verify_end_to_end_scenarios())
 
@@ -350,12 +401,14 @@ def main() -> int:
 
     position_shadow = _shadow_from_position(position)
     selection = position_shadow.get("market_selection") if isinstance(position_shadow.get("market_selection"), dict) else {}
+    history_status = "history=ok" if Path(args.history).exists() else "history=missing"
     print(
         "PASS monthly5_runtime "
         f"strategy_id={position_shadow.get('strategy_id')} "
         f"mode={position_shadow.get('mode')} "
         f"selected_plan={selection.get('selected_plan')} "
         f"exposure_cap={selection.get('exposure_cap')} "
+        f"{history_status} "
         "e2e=ok"
     )
     return 0

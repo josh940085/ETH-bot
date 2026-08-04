@@ -975,8 +975,11 @@ def _check_monthly5_runtime():
         60,
         int(float(os.getenv("MONTHLY5_RUNTIME_MAX_AGE_SEC", "600") or "600")),
     )
+    command = [sys.executable, "verify_monthly5_runtime.py", "--max-age-sec", str(max_age_sec)]
+    if os.getenv("MONTHLY5_REQUIRE_HISTORY", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        command.append("--require-history")
     result = _run_command(
-        [sys.executable, "verify_monthly5_runtime.py", "--max-age-sec", str(max_age_sec)],
+        command,
         timeout=60,
     )
     output = (result.stdout or "").strip()

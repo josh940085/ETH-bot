@@ -71,6 +71,95 @@ def save_state(path, payload):
     os.replace(tmp_path, state_path)
 
 
+def _last_jsonl_record(path):
+    history_path = Path(path)
+    if not history_path.exists():
+        return {}
+    try:
+        lines = history_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return {}
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def build_history_record(snapshot, guard=None):
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    selection = (
+        snapshot.get("market_selection")
+        if isinstance(snapshot.get("market_selection"), dict)
+        else {}
+    )
+    guard = guard if isinstance(guard, dict) else {}
+    return {
+        "schema_version": 1,
+        "strategy_id": str(snapshot.get("strategy_id") or STRATEGY_ID),
+        "selected_candidate": str(snapshot.get("selected_candidate") or SELECTED_CANDIDATE),
+        "shadow_only": bool(snapshot.get("shadow_only", True)),
+        "updated_ts": _safe_int(snapshot.get("updated_ts"), int(time.time())),
+        "month_key": str(snapshot.get("month_key") or ""),
+        "day_key": str(snapshot.get("day_key") or ""),
+        "mode": str(snapshot.get("mode") or ""),
+        "monthly_pnl_pct": round(_safe_float(snapshot.get("monthly_pnl_pct"), 0.0), 4),
+        "intraday_pnl_pct": round(_safe_float(snapshot.get("intraday_pnl_pct"), 0.0), 4),
+        "lock_reached": bool(snapshot.get("lock_reached", False)),
+        "floor_guard_required": bool(snapshot.get("floor_guard_required", False)),
+        "intraday_stop_active": bool(snapshot.get("intraday_stop_active", False)),
+        "recovery_active": bool(snapshot.get("recovery_active", False)),
+        "suggested_exposure_scale": round(_safe_float(snapshot.get("suggested_exposure_scale"), 0.0), 4),
+        "max_leverage": min(5, max(0, _safe_int(snapshot.get("max_leverage"), 5))),
+        "position_open": bool(snapshot.get("position_open", False)),
+        "position_side": str(snapshot.get("position_side") or ""),
+        "position_notional": round(_safe_float(snapshot.get("position_notional"), 0.0), 4),
+        "mark_price": round(_safe_float(snapshot.get("mark_price"), 0.0), 4),
+        "market_bias": str(selection.get("market_bias") or ""),
+        "market_state": str(selection.get("market_state") or ""),
+        "selected_plan": str(selection.get("selected_plan") or ""),
+        "shadow_action": str(selection.get("shadow_action") or ""),
+        "exposure_cap": round(_safe_float(selection.get("exposure_cap"), 0.0), 4),
+        "strategy_signal": str(selection.get("strategy_signal") or ""),
+        "guard_allowed": bool(guard.get("allowed", True)),
+        "guard_reason_code": str(guard.get("reason_code") or ""),
+        "guard_adjusted_size": round(_safe_float(guard.get("adjusted_size"), 0.0), 4),
+    }
+
+
+def append_history(path, snapshot, guard=None, *, min_interval_sec=300):
+    record = build_history_record(snapshot, guard)
+    history_path = Path(path)
+    last = _last_jsonl_record(history_path)
+    min_interval = max(0, _safe_int(min_interval_sec, 300))
+    if last:
+        elapsed = _safe_int(record.get("updated_ts"), 0) - _safe_int(last.get("updated_ts"), 0)
+        same_state = all(
+            record.get(key) == last.get(key)
+            for key in (
+                "mode",
+                "selected_plan",
+                "shadow_action",
+                "exposure_cap",
+                "market_bias",
+                "market_state",
+                "guard_allowed",
+                "guard_reason_code",
+            )
+        )
+        if same_state and elapsed < min_interval:
+            return False
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    with history_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    return True
+
+
 def _account_equity(*, wallet_balance, margin_balance, unrealized_pnl):
     margin = _safe_float(margin_balance, 0.0)
     if margin > 0:

@@ -91,6 +91,33 @@ class Monthly5ShadowTests(unittest.TestCase):
             monthly5_shadow.save_state(path, payload)
             self.assertEqual(monthly5_shadow.load_state(path), payload)
 
+    def test_history_append_records_shadow_decision_and_dedupes(self):
+        snapshot = monthly5_shadow.update_shadow_state(
+            {},
+            now_ts=taipei_ts("2026-08-05T12:00:00"),
+            margin_balance=1000.0,
+            mark_price=112000.0,
+        )
+        selection = monthly5_shadow.build_market_selection(
+            snapshot,
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.0},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+        )
+        snapshot["market_selection"] = selection
+        guard = monthly5_shadow.build_execution_guard(snapshot, direction="wait", requested_size=0.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "history.jsonl"
+            self.assertTrue(monthly5_shadow.append_history(path, snapshot, guard, min_interval_sec=300))
+            self.assertFalse(monthly5_shadow.append_history(path, snapshot, guard, min_interval_sec=300))
+            rows = path.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(rows), 1)
+        self.assertIn('"selected_plan": "normal_long_selector"', rows[0])
+        self.assertIn('"guard_allowed": true', rows[0])
+
     def test_market_selection_chooses_normal_long_for_bullish_context(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
