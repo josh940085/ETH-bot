@@ -792,6 +792,25 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         payload = write_snapshot.call_args.args[1]
         self.assertEqual(payload["strategy_breakout"], breakout)
 
+    def test_panel_snapshot_publishes_monthly5_shadow_state(self):
+        shadow_state = {
+            "strategy_id": "monthly5_postlock_hourly_v0",
+            "shadow_only": True,
+            "mode": "post_lock",
+            "suggested_exposure_scale": 0.15,
+        }
+
+        with (
+            patch.object(eth, "_refresh_position_panel_account_state"),
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth, "_write_json_atomic") as write_snapshot,
+            patch.object(eth, "_queue_panel_realtime_publish"),
+        ):
+            eth.sync_position_panel(1938.0)
+
+        payload = write_snapshot.call_args.args[1]
+        self.assertEqual(payload["monthly5_shadow"], shadow_state)
+
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"

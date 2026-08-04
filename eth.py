@@ -46,6 +46,7 @@ from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from local_chat import extract_chat_text as _extract_chat_text
+import monthly5_shadow
 from n8n_client import post_n8n_notification
 from runtime_config import (
     env_float as _safe_float_env,
@@ -204,6 +205,7 @@ TELEGRAM_POLL_BACKOFF_MAX = 60.0
 
 # ===== Discord（同步通知） =====
 POSITION_PANEL_FILE = data_path("docs", "position.json")
+MONTHLY5_SHADOW_STATE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_monthly5_shadow_state.json")
 PENDING_TRAINING_SAMPLE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_pending_training_sample.json")
 MAINTENANCE_REPORT_FILE = data_path("maintenance_latest_report.json")
 PROGRAM_LOG_FILE = data_path("..", "logs", "program.log").resolve()
@@ -5863,6 +5865,43 @@ def _recent_sl_guard_reason(final, score, net_edge_rate_est, risk_rate, macro_bi
     return ""
 
 
+def _update_monthly5_shadow_panel_state(mark_price=None):
+    if not _is_truthy(os.getenv("MONTHLY5_SHADOW_ENABLED", "1")):
+        cached = dict(POSITION_PANEL_STATE.get("monthly5_shadow") or {})
+        cached["enabled"] = False
+        cached["shadow_only"] = True
+        POSITION_PANEL_STATE["monthly5_shadow"] = cached
+        return cached
+
+    try:
+        previous = monthly5_shadow.load_state(MONTHLY5_SHADOW_STATE_PATH)
+        position_qty = max(0.0, _safe_float(POSITION_PANEL_STATE.get("binance_qty"), 0.0))
+        position_open = bool(active_trade.get("open")) or position_qty > 0
+        position_side = str(
+            active_trade.get("direction") or POSITION_PANEL_STATE.get("direction") or ""
+        )
+        snapshot = monthly5_shadow.update_shadow_state(
+            previous,
+            now_ts=time.time(),
+            mark_price=_safe_float(mark_price, POSITION_PANEL_STATE.get("binance_mark_price", 0.0)),
+            wallet_balance=_safe_float(POSITION_PANEL_STATE.get("account_wallet_balance_usdt"), 0.0),
+            margin_balance=_safe_float(POSITION_PANEL_STATE.get("account_margin_balance_usdt"), 0.0),
+            unrealized_pnl=_safe_float(POSITION_PANEL_STATE.get("binance_unrealized_pnl_usdt"), 0.0),
+            position_open=position_open,
+            position_side=position_side,
+            position_notional=_safe_float(POSITION_PANEL_STATE.get("position_notional_usdt"), 0.0),
+            selected_candidate=(
+                (POSITION_PANEL_STATE.get("monthly5_shadow") or {}).get("selected_candidate")
+            ),
+        )
+        monthly5_shadow.save_state(MONTHLY5_SHADOW_STATE_PATH, snapshot)
+        POSITION_PANEL_STATE["monthly5_shadow"] = snapshot
+        return snapshot
+    except Exception as exc:
+        print(f"⚠️ monthly5 shadow 更新失敗: {exc}")
+        return dict(POSITION_PANEL_STATE.get("monthly5_shadow") or {})
+
+
 def sync_position_panel(current_price=None):
     # Normalize historical partial-fill/retry duplicates before persisting or
     # calculating the live recent TP/SL record.
@@ -6082,6 +6121,9 @@ def sync_position_panel(current_price=None):
             "ts": int(time.time()),
         }
 
+    monthly5_shadow_state = _update_monthly5_shadow_panel_state(
+        _safe_float(payload.get("binance_mark_price"), last_price)
+    )
     payload.update(
         {
             "execution_priority": "real_order" if _real_order_priority_enabled() else "strategy_signal",
@@ -6121,6 +6163,7 @@ def sync_position_panel(current_price=None):
             "strategy_macro_alignment": dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {}),
             "strategy_context": dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
+            "monthly5_shadow": dict(monthly5_shadow_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
