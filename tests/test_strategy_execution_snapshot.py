@@ -20,7 +20,18 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             for button in row
         ]
         self.assertTrue(buttons)
+        self.assertIn(eth.POSITION_PANEL_BUTTON_TEXT, [button.get("text") for button in buttons])
         self.assertFalse(any("web_app" in button for button in buttons))
+
+    def test_position_panel_button_sends_fresh_private_panel(self):
+        with patch.object(eth, "send_control_panel") as send_panel:
+            reply = eth.handle_ai_command(
+                eth.POSITION_PANEL_BUTTON_TEXT,
+                {"chat_id": 123456, "user_id": 123456, "chat_type": "private"},
+            )
+
+        self.assertIsNone(reply)
+        send_panel.assert_called_once_with(123456)
 
     def test_control_panel_text_includes_external_position_panel_link(self):
         with patch.object(eth, "_refresh_position_panel_account_state"), patch.object(

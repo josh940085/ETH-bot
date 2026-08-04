@@ -328,6 +328,7 @@ PREDICTED_LIQUIDATION_LOCK = threading.Lock()
 PREDICTED_LIQUIDATION_LOADED = False
 FOLLOW_BUTTON_TEXT_DISABLED = "📈 開啟跟單"
 FOLLOW_BUTTON_TEXT_ENABLED = "✅ 跟單中（點擊關閉）"
+POSITION_PANEL_BUTTON_TEXT = "📊 倉位面板"
 WEBAPP_COMMAND_PREFIX = "__webapp__:"
 POSITION_PANEL_REALTIME_BASE_URL = str(os.getenv("POSITION_PANEL_REALTIME_BASE_URL", "") or "").strip().rstrip("/")
 POSITION_PANEL_REALTIME_INTERNAL_BASE_URL = str(os.getenv("POSITION_PANEL_REALTIME_INTERNAL_BASE_URL", "") or "").strip().rstrip("/")
@@ -533,6 +534,9 @@ def _build_control_panel_keyboard(chat_id=None):
     # not attach the standalone BTC panel as a Telegram Web App.
     return {
         "keyboard": [
+            [
+                {"text": POSITION_PANEL_BUTTON_TEXT},
+            ],
             [
                 {"text": follow_text},
                 {"text": "⛔ 一鍵平倉"},
@@ -15117,6 +15121,12 @@ Volume Spike: {context.get('volume_spike')}
         if not is_private_chat:
             return "即時錯誤修正只允許在私聊執行。"
         return _run_realtime_error_fix()
+
+    if text == POSITION_PANEL_BUTTON_TEXT:
+        if not is_private_chat:
+            return "倉位面板只允許在私聊開啟。"
+        send_control_panel(chat_id)
+        return None
 
     if text.startswith("/panel") or text.startswith("/menu"):
         send_control_panel(chat_id)
