@@ -5975,6 +5975,49 @@ def _apply_monthly5_execution_guard(decision, direction, requested_size, mark_pr
     return guard
 
 
+def _build_monthly5_readiness_panel_state():
+    try:
+        rows = monthly5_shadow.load_history(MONTHLY5_SHADOW_HISTORY_PATH)
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=_safe_int(os.getenv("MONTHLY5_READINESS_MIN_RECORDS"), 48),
+            min_span_hours=_safe_float(os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS"), 24.0),
+            max_age_sec=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_AGE_SEC"), 900.0),
+        )
+        return {
+            "schema_version": 1,
+            "status": str(report.get("status") or "invalid"),
+            "ready": bool(report.get("ready", False)),
+            "rows": _safe_int(report.get("rows"), 0),
+            "span_hours": round(_safe_float(report.get("span_hours"), 0.0), 4),
+            "latest_age_sec": round(_safe_float(report.get("latest_age_sec"), 0.0), 1),
+            "evaluate_rows": _safe_int(report.get("evaluate_rows"), 0),
+            "risk_rows": _safe_int(report.get("risk_rows"), 0),
+            "min_records": _safe_int(report.get("min_records"), 48),
+            "min_span_hours": round(_safe_float(report.get("min_span_hours"), 24.0), 4),
+            "selected_plan_counts": dict(report.get("selected_plan_counts") or {}),
+            "shadow_action_counts": dict(report.get("shadow_action_counts") or {}),
+            "mode_counts": dict(report.get("mode_counts") or {}),
+            "market_bias_counts": dict(report.get("market_bias_counts") or {}),
+            "warnings": list(report.get("warnings") or [])[:5],
+            "failures": list(report.get("failures") or [])[:5],
+            "history_path": str(MONTHLY5_SHADOW_HISTORY_PATH),
+            "updated_ts": int(time.time()),
+        }
+    except Exception as exc:
+        return {
+            "schema_version": 1,
+            "status": "invalid",
+            "ready": False,
+            "rows": 0,
+            "warnings": [],
+            "failures": [str(exc)],
+            "updated_ts": int(time.time()),
+        }
+
+
 def sync_position_panel(current_price=None):
     # Normalize historical partial-fill/retry duplicates before persisting or
     # calculating the live recent TP/SL record.
@@ -6197,6 +6240,7 @@ def sync_position_panel(current_price=None):
     monthly5_shadow_state = _update_monthly5_shadow_panel_state(
         _safe_float(payload.get("binance_mark_price"), last_price)
     )
+    monthly5_readiness_state = _build_monthly5_readiness_panel_state()
     payload.update(
         {
             "execution_priority": "real_order" if _real_order_priority_enabled() else "strategy_signal",
@@ -6239,6 +6283,7 @@ def sync_position_panel(current_price=None):
             "monthly5_shadow": dict(monthly5_shadow_state or {}),
             "monthly5_execution_guard": dict(POSITION_PANEL_STATE.get("monthly5_execution_guard") or {}),
             "monthly5_position_guard": dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {}),
+            "monthly5_readiness": dict(monthly5_readiness_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),

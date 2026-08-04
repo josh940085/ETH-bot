@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -91,6 +92,28 @@ def _last_jsonl_record(path):
     return {}
 
 
+def load_history(path):
+    history_path = Path(path)
+    if not history_path.exists():
+        return []
+    rows = []
+    try:
+        lines = history_path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            rows.append(payload)
+    return rows
+
+
 def build_history_record(snapshot, guard=None):
     snapshot = snapshot if isinstance(snapshot, dict) else {}
     selection = (
@@ -158,6 +181,115 @@ def append_history(path, snapshot, guard=None, *, min_interval_sec=300):
     with history_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
     return True
+
+
+def build_readiness_report(
+    rows,
+    *,
+    strategy_id=STRATEGY_ID,
+    selected_candidate=SELECTED_CANDIDATE,
+    min_records=48,
+    min_span_hours=24.0,
+    max_age_sec=900.0,
+    now_ts=None,
+):
+    failures = []
+    warnings = []
+    valid_rows = [row for row in rows if isinstance(row, dict)]
+    if len(valid_rows) != len(rows or []):
+        failures.append("history contains non-object rows")
+    if not valid_rows:
+        failures.append("history has no rows")
+        return {
+            "status": "invalid",
+            "ready": False,
+            "failures": failures,
+            "warnings": warnings,
+            "rows": 0,
+            "span_hours": 0.0,
+            "latest_age_sec": 0.0,
+        }
+
+    strategy_drift = [
+        row
+        for row in valid_rows
+        if row.get("strategy_id") != strategy_id
+        or row.get("selected_candidate") != selected_candidate
+    ]
+    if strategy_drift:
+        failures.append(f"strategy/candidate drift rows={len(strategy_drift)}")
+
+    unsafe_rows = [
+        row
+        for row in valid_rows
+        if row.get("shadow_only") is not True
+        or _safe_float(row.get("max_leverage"), 99.0) > 5.0
+        or not (0.0 <= _safe_float(row.get("exposure_cap"), -1.0) <= 1.0)
+    ]
+    if unsafe_rows:
+        failures.append(f"unsafe shadow rows={len(unsafe_rows)}")
+
+    timestamps = sorted(_safe_int(row.get("updated_ts"), 0) for row in valid_rows if _safe_int(row.get("updated_ts"), 0) > 0)
+    if not timestamps:
+        failures.append("history timestamps missing")
+        span_hours = 0.0
+        age_sec = 10**9
+    else:
+        span_hours = (timestamps[-1] - timestamps[0]) / 3600.0
+        age_sec = _safe_float(now_ts, time.time()) - timestamps[-1]
+    if max_age_sec is not None and age_sec > _safe_float(max_age_sec, 0.0):
+        failures.append(f"history stale: age={age_sec:.1f}s > {_safe_float(max_age_sec, 0.0):.1f}s")
+
+    selected_plan_counts = Counter(str(row.get("selected_plan") or "") for row in valid_rows)
+    action_counts = Counter(str(row.get("shadow_action") or "") for row in valid_rows)
+    mode_counts = Counter(str(row.get("mode") or "") for row in valid_rows)
+    market_bias_counts = Counter(str(row.get("market_bias") or "") for row in valid_rows)
+    risk_rows = [
+        row
+        for row in valid_rows
+        if row.get("mode") in {"intraday_stop", "post_lock_floor_guard", "post_lock", "recovery"}
+        or row.get("guard_allowed") is False
+    ]
+    evaluate_rows = [
+        row
+        for row in valid_rows
+        if str(row.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}
+    ]
+
+    min_records = max(1, _safe_int(min_records, 48))
+    min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
+    if len(valid_rows) < min_records:
+        warnings.append(f"sample count collecting: rows={len(valid_rows)} < {min_records}")
+    if span_hours < min_span_hours:
+        warnings.append(f"sample span collecting: hours={span_hours:.2f} < {min_span_hours:.2f}")
+    if not evaluate_rows:
+        warnings.append("no evaluate_long/evaluate_short/reduced_exposure samples yet")
+    if not risk_rows:
+        warnings.append("no live risk-mode samples yet")
+
+    ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows)
+    status = "ready" if ready else "collecting"
+    if failures:
+        status = "invalid"
+    return {
+        "schema_version": 1,
+        "status": status,
+        "ready": ready,
+        "failures": failures,
+        "warnings": warnings,
+        "rows": len(valid_rows),
+        "span_hours": round(max(0.0, span_hours), 4),
+        "latest_age_sec": round(max(0.0, age_sec), 1),
+        "selected_plan_counts": dict(sorted(selected_plan_counts.items())),
+        "shadow_action_counts": dict(sorted(action_counts.items())),
+        "mode_counts": dict(sorted(mode_counts.items())),
+        "market_bias_counts": dict(sorted(market_bias_counts.items())),
+        "risk_rows": len(risk_rows),
+        "evaluate_rows": len(evaluate_rows),
+        "min_records": min_records,
+        "min_span_hours": min_span_hours,
+        "max_age_sec": max_age_sec,
+    }
 
 
 def _account_equity(*, wallet_balance, margin_balance, unrealized_pnl):

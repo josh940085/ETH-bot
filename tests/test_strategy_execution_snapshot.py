@@ -813,6 +813,11 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         with (
             patch.object(eth, "_refresh_position_panel_account_state"),
             patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(
+                eth,
+                "_build_monthly5_readiness_panel_state",
+                return_value={"status": "collecting", "ready": False, "rows": 6},
+            ),
             patch.object(eth, "_write_json_atomic") as write_snapshot,
             patch.object(eth, "_queue_panel_realtime_publish"),
         ):
@@ -825,6 +830,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "post_lock_low_exposure",
         )
         self.assertEqual(payload["monthly5_execution_guard"]["adjusted_size"], 0.15)
+        self.assertEqual(payload["monthly5_readiness"]["status"], "collecting")
 
     def test_monthly5_position_guard_reduces_local_position_to_cap(self):
         eth.active_trade.update(
