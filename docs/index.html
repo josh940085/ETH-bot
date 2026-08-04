@@ -1012,7 +1012,7 @@
       grid-template-areas:
         "market chart chart confidence"
         "signal chart chart position"
-        "regime regime services services";
+        "regime regime readiness services";
       gap: 8px;
       margin-bottom: 12px;
     }
@@ -1047,6 +1047,7 @@
     .command-signal { grid-area: signal; }
     .command-position { grid-area: position; }
     .command-regime { grid-area: regime; }
+    .command-readiness { grid-area: readiness; }
     .command-services { grid-area: services; }
 
     .command-label {
@@ -1245,6 +1246,8 @@
     .service-state.good .service-dot { background: #a9c65e; box-shadow: 0 0 7px rgba(169,198,94,0.4); }
     .service-state.warn { color: var(--tactical-amber); }
     .service-state.warn .service-dot { background: var(--tactical-amber); }
+    .service-state.bad { color: #e25555; }
+    .service-state.bad .service-dot { background: #e25555; box-shadow: 0 0 7px rgba(226,85,85,0.35); }
 
     .command-chart .mini-kline {
       height: 100%;
@@ -1268,6 +1271,7 @@
           "signal position"
           "chart chart"
           "regime regime"
+          "readiness readiness"
           "services services";
       }
 
@@ -1534,6 +1538,7 @@
   let STRATEGY_REGIME = "";
   let STRATEGY_DONCHIAN_MARKET_STATE = {};
   let STRATEGY_WAIT_CONDITIONS = [];
+  let MONTHLY5_READINESS = {};
   const TELEGRAM_WEBAPP = (window.Telegram && window.Telegram.WebApp) ? Telegram.WebApp : null;
   const TELEGRAM_INIT_DATA = TELEGRAM_WEBAPP ? String(TELEGRAM_WEBAPP.initData || "").trim() : "";
   const HAS_TELEGRAM_AUTH = TELEGRAM_INIT_DATA.length > 0;
@@ -1762,6 +1767,9 @@
     STRATEGY_WAIT_CONDITIONS = Array.isArray(data.strategy_wait_conditions)
       ? data.strategy_wait_conditions.slice(0, 3)
       : [];
+    MONTHLY5_READINESS = (data.monthly5_readiness && typeof data.monthly5_readiness === "object")
+      ? data.monthly5_readiness
+      : {};
     BINANCE_BREAK_EVEN_PRICE = Number.isFinite(Number(data.binance_break_even_price)) ? Number(data.binance_break_even_price) : BINANCE_BREAK_EVEN_PRICE;
     BINANCE_UNREALIZED_PNL_USDT = Number.isFinite(Number(data.binance_unrealized_pnl_usdt)) ? Number(data.binance_unrealized_pnl_usdt) : null;
     BINANCE_UNREALIZED_PNL_TS = Number.isFinite(Number(data.binance_unrealized_pnl_ts)) ? Number(data.binance_unrealized_pnl_ts) : BINANCE_UNREALIZED_PNL_TS;
@@ -2860,6 +2868,33 @@
     return `<div class="command-wait-panel" data-testid="strategy-wait-conditions"><div class="command-wait-title">開單尚缺條件</div>${rows}</div>`;
   }
 
+  function renderMonthly5Readiness() {
+    const state = MONTHLY5_READINESS && typeof MONTHLY5_READINESS === "object" ? MONTHLY5_READINESS : {};
+    const status = String(state.status || "collecting");
+    const ready = Boolean(state.ready);
+    const rows = Number.isFinite(Number(state.rows)) ? Number(state.rows) : 0;
+    const minRecords = Number.isFinite(Number(state.min_records)) ? Number(state.min_records) : 48;
+    const spanHours = Number.isFinite(Number(state.span_hours)) ? Number(state.span_hours) : 0;
+    const minSpanHours = Number.isFinite(Number(state.min_span_hours)) ? Number(state.min_span_hours) : 24;
+    const evaluateRows = Number.isFinite(Number(state.evaluate_rows)) ? Number(state.evaluate_rows) : 0;
+    const riskRows = Number.isFinite(Number(state.risk_rows)) ? Number(state.risk_rows) : 0;
+    const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
+    const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
+    const label = status === "ready" || ready ? "可審核" : (status === "invalid" ? "異常" : "收集中");
+    const rowProgress = minRecords > 0 ? clamp((rows / minRecords) * 100, 0, 100) : 0;
+    const spanProgress = minSpanHours > 0 ? clamp((spanHours / minSpanHours) * 100, 0, 100) : 0;
+    const warningText = warnings.length ? warnings.map((item) => escapeHtml(String(item))).join(" ｜ ") : "樣本門檻正常";
+    return `
+      <div class="command-label">MONTHLY 5% READINESS</div>
+      <div class="command-service-grid">
+        <div class="service-row"><span>升級狀態</span><span class="service-state ${tone}"><i class="service-dot"></i>${label}</span></div>
+        <div class="service-row"><span>樣本</span><strong>${rows}/${minRecords} (${rowProgress.toFixed(0)}%)</strong></div>
+        <div class="service-row"><span>跨度</span><strong>${spanHours.toFixed(2)}/${minSpanHours.toFixed(0)}h (${spanProgress.toFixed(0)}%)</strong></div>
+        <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
+      </div>
+      <div class="command-meta">${warningText}</div>`;
+  }
+
   function renderCommandDeck(live, totalAssetsUsdt) {
     const regime = buildMarketRegimeSnapshot();
     const marketPrice = Number(live) > 0 ? Number(live) : 0;
@@ -2939,6 +2974,10 @@
         <div class="command-regime-stat"><span>波動</span><strong>${regime.volatilityPct.toFixed(2)}%</strong></div>
         <div class="command-regime-stat"><span>Don72</span><strong>${escapeHtml(donStateLabel)} / ${escapeHtml(donActionLabel)} / 假${escapeHtml(donFakeRate)}</strong></div>
       </div>
+    </section>
+
+    <section class="command-card command-readiness">
+      ${renderMonthly5Readiness()}
     </section>
 
     <section class="command-card command-services">
