@@ -76,7 +76,9 @@ def main() -> int:
             f"shadow_paper_return_pct={report.get('shadow_paper_return_pct', 0.0)} "
             f"shadow_paper_intervals={report.get('shadow_paper_intervals', 0)} "
             f"shadow_projected_monthly_return_pct={report.get('shadow_projected_monthly_return_pct', 0.0)} "
-            f"shadow_monthly_target_met={str(bool(report.get('shadow_monthly_target_met'))).lower()}"
+            f"shadow_monthly_projection_valid={str(bool(report.get('shadow_monthly_projection_valid'))).lower()} "
+            f"shadow_monthly_target_met={str(bool(report.get('shadow_monthly_target_met'))).lower()} "
+            f"promotion_ready={str(bool(report.get('promotion_ready'))).lower()}"
         )
         for item in report.get("failures") or []:
             print(f"FAIL {item}")

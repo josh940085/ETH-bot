@@ -261,10 +261,13 @@ def _build_shadow_paper_return(rows):
     }
 
 
-def _build_shadow_monthly_projection(shadow_paper, span_hours):
+def _build_shadow_monthly_projection(shadow_paper, span_hours, *, min_projection_span_hours=24.0):
     span_hours = max(0.0, _safe_float(span_hours, 0.0))
+    min_projection_span_hours = max(0.0, _safe_float(min_projection_span_hours, 24.0))
     paper_return_pct = _safe_float(shadow_paper.get("shadow_paper_return_pct"), 0.0)
-    if span_hours <= 0.0 or _safe_int(shadow_paper.get("shadow_paper_intervals"), 0) <= 0:
+    paper_intervals = _safe_int(shadow_paper.get("shadow_paper_intervals"), 0)
+    projection_valid = span_hours >= min_projection_span_hours and paper_intervals > 0
+    if span_hours <= 0.0 or paper_intervals <= 0:
         projected_monthly_pct = 0.0
     else:
         projected_monthly_pct = paper_return_pct * (MONTHLY_PROJECTION_HOURS / span_hours)
@@ -276,9 +279,11 @@ def _build_shadow_monthly_projection(shadow_paper, span_hours):
     return {
         "shadow_projected_monthly_return_pct": round(projected_monthly_pct, 4),
         "shadow_monthly_target_pct": round(MONTHLY_TARGET_PCT, 4),
-        "shadow_monthly_target_met": projected_monthly_pct >= MONTHLY_TARGET_PCT,
+        "shadow_monthly_projection_valid": projection_valid,
+        "shadow_monthly_target_met": projection_valid and projected_monthly_pct >= MONTHLY_TARGET_PCT,
         "shadow_monthly_target_progress_pct": round(target_progress_pct, 4),
         "shadow_monthly_projection_hours": round(MONTHLY_PROJECTION_HOURS, 4),
+        "shadow_monthly_min_projection_span_hours": round(min_projection_span_hours, 4),
     }
 
 
@@ -412,11 +417,14 @@ def build_readiness_report(
         flat_time_pct = flat_sample_pct
         shadow_active_time_pct = shadow_active_sample_pct
         shadow_flat_time_pct = shadow_flat_sample_pct
-    shadow_paper = _build_shadow_paper_return(valid_rows)
-    shadow_projection = _build_shadow_monthly_projection(shadow_paper, span_hours)
-
     min_records = max(1, _safe_int(min_records, 48))
     min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
+    shadow_paper = _build_shadow_paper_return(valid_rows)
+    shadow_projection = _build_shadow_monthly_projection(
+        shadow_paper,
+        span_hours,
+        min_projection_span_hours=min_span_hours,
+    )
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
         warnings.append(f"sample count collecting: rows={len(valid_rows)} < {min_records}")
@@ -431,8 +439,7 @@ def build_readiness_report(
     if span_hours >= min_span_hours and shadow_paper["shadow_paper_intervals"] > 0 and shadow_paper["shadow_paper_return_pct"] < 0:
         warnings.append(f"shadow paper return negative: {shadow_paper['shadow_paper_return_pct']:.4f}%")
     if (
-        span_hours >= min_span_hours
-        and shadow_paper["shadow_paper_intervals"] > 0
+        shadow_projection["shadow_monthly_projection_valid"]
         and not shadow_projection["shadow_monthly_target_met"]
     ):
         warnings.append(
@@ -443,6 +450,7 @@ def build_readiness_report(
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
+    promotion_ready = ready and shadow_projection["shadow_monthly_target_met"]
     status = "ready" if ready else "collecting"
     if failures:
         status = "invalid"
@@ -450,6 +458,7 @@ def build_readiness_report(
         "schema_version": 1,
         "status": status,
         "ready": ready,
+        "promotion_ready": promotion_ready,
         "failures": failures,
         "warnings": warnings,
         "rows": len(valid_rows),
