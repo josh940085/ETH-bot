@@ -5,15 +5,18 @@ import verify_monthly5_readiness
 
 
 class VerifyMonthly5ReadinessTests(unittest.TestCase):
-    def _spec(self):
-        return {
+    def _spec(self, avg_flat_time_pct=None):
+        spec = {
             "strategy_id": monthly5_shadow.STRATEGY_ID,
             "backtest_evidence": {
                 "candidate_name": monthly5_shadow.SELECTED_CANDIDATE,
             },
         }
+        if avg_flat_time_pct is not None:
+            spec["backtest_evidence"]["avg_flat_time_pct"] = avg_flat_time_pct
+        return spec
 
-    def _row(self, ts, *, action="evaluate_long", plan="normal_long_selector"):
+    def _row(self, ts, *, action="evaluate_long", plan="normal_long_selector", position_open=False):
         return {
             "schema_version": 1,
             "strategy_id": monthly5_shadow.STRATEGY_ID,
@@ -30,6 +33,8 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             "market_bias": "bullish",
             "market_state": "chop",
             "guard_allowed": True,
+            "position_open": position_open,
+            "position_notional": 100.0 if position_open else 0.0,
         }
 
     def test_collecting_when_history_is_valid_but_small(self):
@@ -62,6 +67,22 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["status"], "ready")
         self.assertTrue(report["ready"])
         self.assertEqual(report["evaluate_rows"], 5)
+
+    def test_collecting_when_flat_time_exceeds_backtest_cap(self):
+        rows = [self._row(1000 + idx * 900, position_open=(idx == 0)) for idx in range(5)]
+
+        report = verify_monthly5_readiness._history_readiness(
+            rows,
+            self._spec(avg_flat_time_pct=50.0),
+            min_records=5,
+            min_span_hours=1.0,
+            max_age_sec=None,
+        )
+
+        self.assertEqual(report["status"], "collecting")
+        self.assertFalse(report["ready"])
+        self.assertEqual(report["flat_sample_pct"], 80.0)
+        self.assertTrue(any("flat sample pct high" in item for item in report["warnings"]))
 
     def test_invalid_when_history_breaks_shadow_safety(self):
         row = self._row(1000)

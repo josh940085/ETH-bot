@@ -5985,6 +5985,7 @@ def _build_monthly5_readiness_panel_state():
             min_records=_safe_int(os.getenv("MONTHLY5_READINESS_MIN_RECORDS"), 48),
             min_span_hours=_safe_float(os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS"), 24.0),
             max_age_sec=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_AGE_SEC"), 900.0),
+            max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
         )
         return {
             "schema_version": 1,
@@ -5995,8 +5996,13 @@ def _build_monthly5_readiness_panel_state():
             "latest_age_sec": round(_safe_float(report.get("latest_age_sec"), 0.0), 1),
             "evaluate_rows": _safe_int(report.get("evaluate_rows"), 0),
             "risk_rows": _safe_int(report.get("risk_rows"), 0),
+            "open_rows": _safe_int(report.get("open_rows"), 0),
+            "flat_rows": _safe_int(report.get("flat_rows"), 0),
+            "open_sample_pct": round(_safe_float(report.get("open_sample_pct"), 0.0), 4),
+            "flat_sample_pct": round(_safe_float(report.get("flat_sample_pct"), 0.0), 4),
             "min_records": _safe_int(report.get("min_records"), 48),
             "min_span_hours": round(_safe_float(report.get("min_span_hours"), 24.0), 4),
+            "max_flat_time_pct": round(_safe_float(report.get("max_flat_time_pct"), 41.65), 4),
             "selected_plan_counts": dict(report.get("selected_plan_counts") or {}),
             "shadow_action_counts": dict(report.get("shadow_action_counts") or {}),
             "mode_counts": dict(report.get("mode_counts") or {}),

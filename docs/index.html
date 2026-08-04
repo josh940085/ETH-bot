@@ -2878,6 +2878,8 @@
     const minSpanHours = Number.isFinite(Number(state.min_span_hours)) ? Number(state.min_span_hours) : 24;
     const evaluateRows = Number.isFinite(Number(state.evaluate_rows)) ? Number(state.evaluate_rows) : 0;
     const riskRows = Number.isFinite(Number(state.risk_rows)) ? Number(state.risk_rows) : 0;
+    const flatPct = Number.isFinite(Number(state.flat_sample_pct)) ? Number(state.flat_sample_pct) : 0;
+    const maxFlatPct = Number.isFinite(Number(state.max_flat_time_pct)) ? Number(state.max_flat_time_pct) : 41.65;
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
     const label = status === "ready" || ready ? "可審核" : (status === "invalid" ? "異常" : "收集中");
@@ -2890,6 +2892,7 @@
         <div class="service-row"><span>升級狀態</span><span class="service-state ${tone}"><i class="service-dot"></i>${label}</span></div>
         <div class="service-row"><span>樣本</span><strong>${rows}/${minRecords} (${rowProgress.toFixed(0)}%)</strong></div>
         <div class="service-row"><span>跨度</span><strong>${spanHours.toFixed(2)}/${minSpanHours.toFixed(0)}h (${spanProgress.toFixed(0)}%)</strong></div>
+        <div class="service-row"><span>空倉</span><strong>${flatPct.toFixed(1)}% / ${maxFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
       </div>
       <div class="command-meta">${warningText}</div>`;

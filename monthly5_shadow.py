@@ -191,6 +191,7 @@ def build_readiness_report(
     min_records=48,
     min_span_hours=24.0,
     max_age_sec=900.0,
+    max_flat_time_pct=None,
     now_ts=None,
 ):
     failures = []
@@ -255,9 +256,17 @@ def build_readiness_report(
         for row in valid_rows
         if str(row.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}
     ]
+    open_rows = [
+        row
+        for row in valid_rows
+        if bool(row.get("position_open", False)) or _safe_float(row.get("position_notional"), 0.0) > 0
+    ]
+    open_sample_pct = (len(open_rows) / len(valid_rows)) * 100.0
+    flat_sample_pct = 100.0 - open_sample_pct
 
     min_records = max(1, _safe_int(min_records, 48))
     min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
+    flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
         warnings.append(f"sample count collecting: rows={len(valid_rows)} < {min_records}")
     if span_hours < min_span_hours:
@@ -266,8 +275,11 @@ def build_readiness_report(
         warnings.append("no evaluate_long/evaluate_short/reduced_exposure samples yet")
     if not risk_rows:
         warnings.append("no live risk-mode samples yet")
+    if flat_cap is not None and flat_sample_pct > flat_cap:
+        warnings.append(f"flat sample pct high: {flat_sample_pct:.2f}% > {flat_cap:.2f}%")
 
-    ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows)
+    flat_ok = flat_cap is None or flat_sample_pct <= flat_cap
+    ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
     status = "ready" if ready else "collecting"
     if failures:
         status = "invalid"
@@ -286,8 +298,13 @@ def build_readiness_report(
         "market_bias_counts": dict(sorted(market_bias_counts.items())),
         "risk_rows": len(risk_rows),
         "evaluate_rows": len(evaluate_rows),
+        "open_rows": len(open_rows),
+        "flat_rows": len(valid_rows) - len(open_rows),
+        "open_sample_pct": round(max(0.0, open_sample_pct), 4),
+        "flat_sample_pct": round(max(0.0, flat_sample_pct), 4),
         "min_records": min_records,
         "min_span_hours": min_span_hours,
+        "max_flat_time_pct": flat_cap,
         "max_age_sec": max_age_sec,
     }
 
