@@ -109,6 +109,13 @@ def _failures(summary: dict, spec: dict) -> list[str]:
         failures.append(f"monthly row count mismatch: got {len(rows)}, want {expected_total_months}")
 
     floor = float((spec.get("objective") or {}).get("monthly_return_floor_pct", 5.0))
+    monthly_ge_5 = sum(1 for row in rows if isinstance(row, dict) and float(row.get("return_pct", -1000.0)) >= floor)
+    monthly_ge_0 = sum(1 for row in rows if isinstance(row, dict) and float(row.get("return_pct", -1000.0)) >= 0.0)
+    if monthly_ge_5 != int(best.get("months_ge_5", -1)):
+        failures.append(f"summary/monthly months_ge_5 mismatch: got {monthly_ge_5}, summary {best.get('months_ge_5')}")
+    if monthly_ge_0 != int(best.get("months_ge_0", -1)):
+        failures.append(f"summary/monthly months_ge_0 mismatch: got {monthly_ge_0}, summary {best.get('months_ge_0')}")
+
     monthly_failed = [
         row
         for row in rows
@@ -127,6 +134,13 @@ def _failures(summary: dict, spec: dict) -> list[str]:
     ]
     if len(complete_rows) != complete_months:
         failures.append(f"complete monthly row count mismatch: got {len(complete_rows)}, want {complete_months}")
+    computed_complete_months_ge_5 = sum(
+        1 for row in complete_rows if float(row.get("return_pct", -1000.0)) >= floor
+    )
+    if computed_complete_months_ge_5 != complete_months_ge_5:
+        failures.append(
+            f"complete_months_ge_5 mismatch: got {computed_complete_months_ge_5}, want {complete_months_ge_5}"
+        )
     complete_failed = [
         row
         for row in complete_rows

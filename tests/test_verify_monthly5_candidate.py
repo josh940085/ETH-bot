@@ -114,6 +114,15 @@ class VerifyMonthly5CandidateTests(unittest.TestCase):
 
         self.assertTrue(any("complete monthly rows below" in failure for failure in failures))
 
+    def test_candidate_verifier_rejects_summary_month_count_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary, spec = self._write_inputs(Path(tmpdir))
+            summary["top"][0]["months_ge_5"] = 3
+
+            failures = verify_monthly5_candidate._failures(summary, spec)
+
+        self.assertTrue(any("months_ge_5 mismatch" in failure for failure in failures))
+
     def test_candidate_verifier_rejects_leverage_above_cap(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             rows = [
