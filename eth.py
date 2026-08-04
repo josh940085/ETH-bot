@@ -7580,6 +7580,34 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     sweep_low = bool(decision.get("sweep_low"))
     sweep_high = bool(decision.get("sweep_high"))
     score_value = _safe_float(score, 0.5)
+    news_bias = _safe_float(decision.get("news_bias"), 0.0)
+    event_risk = _safe_int(decision.get("event_risk"), 0)
+    learned_entry_logic = (
+        decision.get("learned_entry_logic")
+        if isinstance(decision.get("learned_entry_logic"), dict)
+        else {}
+    )
+    learned_reasons = [str(reason) for reason in learned_entry_logic.get("reasons") or []]
+    high_pressure_wait_short = direction == "long" and any(
+        "高位靠近壓力" in reason and "空方確認" in reason
+        for reason in learned_reasons
+    )
+    strict_breakout_margin = max(
+        3.5,
+        _safe_float(os.getenv("HIGH_PRESSURE_LONG_STRICT_BREAKOUT_MARGIN", 3.5), 3.5),
+    )
+    breakout_quality_score = _safe_float(decision.get("breakout_quality_score"), 0.0)
+    breakout_quality_required = _safe_float(decision.get("breakout_quality_required"), 3.0)
+    high_pressure_long_allowed = (
+        not high_pressure_wait_short
+        or (
+            htf >= 0
+            and mid_trend >= 0
+            and breakout_quality_score >= breakout_quality_required + strict_breakout_margin
+            and news_bias >= 0
+            and event_risk <= 0
+        )
+    )
 
     bull_reclaim = (
         decision.get("multitimeframe_bull_reclaim")
@@ -7612,8 +7640,6 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
             0.003,
             _safe_float(os.getenv("DAILY_MIN_ANCHOR_BEAR_SHORT_MAX_RISK_RATE", 0.015), 0.015),
         )
-        news_bias = _safe_float(decision.get("news_bias"), 0.0)
-        event_risk = _safe_int(decision.get("event_risk"), 0)
         if (
             direction == "short"
             and host_mode == "breakdown_after_support_tests"
@@ -7703,8 +7729,6 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     if market_phase == "range_base" and risk_rate > 0:
         repeated_support = _safe_int(decision.get("repeated_support_tests"), 0)
         repeated_resistance = _safe_int(decision.get("repeated_resistance_tests"), 0)
-        news_bias = _safe_float(decision.get("news_bias"), 0.0)
-        event_risk = _safe_int(decision.get("event_risk"), 0)
         max_tested_break_risk = max(
             0.008,
             _safe_float(
@@ -7712,6 +7736,12 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
                 0.012,
             ),
         )
+        if (
+            high_pressure_wait_short
+            and not high_pressure_long_allowed
+            and host_mode == "breakout_after_pressure_tests"
+        ):
+            decision["daily_anchor_block_reason"] = "high_pressure_wait_short_confirmation"
         tested_range_break = (
             _is_truthy(os.getenv("DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_ENABLED", "1"))
             and host_conf >= 0.64
@@ -7722,6 +7752,7 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
                 (
                     direction == "long"
                     and host_mode == "breakout_after_pressure_tests"
+                    and high_pressure_long_allowed
                     and range_pos >= 0.65
                     and score_value >= 0.68
                     and not (htf == -1 and mid_trend == -1)
@@ -7810,8 +7841,6 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
             and 0 < risk_rate <= max_quality_risk
         )
         repeated_support = _safe_int(decision.get("repeated_support_tests"), 0)
-        news_bias = _safe_float(decision.get("news_bias"), 0.0)
-        event_risk = _safe_int(decision.get("event_risk"), 0)
         btc_change = _safe_float(decision.get("btc_change"), 0.0)
         max_tested_short_risk = max(
             max_risk,
@@ -7901,6 +7930,14 @@ def _daily_anchor_guard_should_wait(final, score, decision=None):
     )
     flow_confirms = volume_spike and ((direction == "long" and buy_pressure) or (direction == "short" and sell_pressure))
     profile_confirms = profile_edge >= 0.05
+
+    if (
+        high_pressure_wait_short
+        and not high_pressure_long_allowed
+        and host_mode == "breakout_after_pressure_tests"
+    ):
+        decision["daily_anchor_block_reason"] = "high_pressure_wait_short_confirmation"
+        return True
 
     if high_score and (positive_edge or host_confirms or pressure_break or flow_confirms or profile_confirms):
         return False
@@ -17473,6 +17510,22 @@ def run_bot():
                 and abs(score - 0.5) < 0.22
             ):
                 final = "觀望（假突破風控攔截）"
+
+            learned_reasons = [
+                str(reason)
+                for reason in (learned_entry_logic.get("reasons") or [])
+            ] if isinstance(learned_entry_logic, dict) else []
+            if (
+                not final.startswith("觀望")
+                and not daily_min_trade
+                and "做多" in final
+                and str(host_opening_logic.get("mode") or "") == "breakout_after_pressure_tests"
+                and any("高位靠近壓力" in reason and "空方確認" in reason for reason in learned_reasons)
+                and breakout_quality_score
+                < breakout_quality_required
+                + max(3.5, _safe_float(os.getenv("HIGH_PRESSURE_LONG_STRICT_BREAKOUT_MARGIN", 3.5), 3.5))
+            ):
+                final = "觀望（高位壓力等待空方確認）"
 
             # ===== 多週期壓力/支撐阻擋：靠近關鍵反向區域先觀望 =====
             support_hits = _safe_int(sr_analysis.get("support_hits"), 0)

@@ -544,6 +544,95 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertTrue(decision["daily_anchor_quality_signal"])
         self.assertEqual(decision["general_entry_relaxation"], "range_tested_break")
 
+    def test_daily_anchor_blocks_high_pressure_wait_short_breakout_long(self):
+        decision = {
+            "market_profile": {"phase": "range_base"},
+            "risk_rate": 0.011,
+            "net_edge_rate_est": 0.021,
+            "position_size": 0.15,
+            "max_position_size": 0.20,
+            "host_opening_logic": {
+                "mode": "breakout_after_pressure_tests",
+                "confidence": 0.88,
+                "range_pos": 0.82,
+            },
+            "learned_entry_logic": {
+                "direction": "long",
+                "long_setup": 4.48,
+                "short_setup": 1.00,
+                "reasons": [
+                    "高位靠近壓力，優先等空方確認",
+                    "壓力連續測試後放量突破，偏多",
+                ],
+            },
+            "htf": 1,
+            "mid_trend": 1,
+            "resistance_hits": 4,
+            "repeated_resistance_tests": 4,
+            "breakout_quality_score": 6.8,
+            "breakout_quality_required": 3.5,
+            "news_bias": 0,
+            "event_risk": 0,
+        }
+
+        with patch.dict(
+            eth.os.environ,
+            {"DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_ENABLED": "1"},
+            clear=False,
+        ):
+            should_wait = eth._daily_anchor_guard_should_wait(
+                "🚀 做多",
+                0.90,
+                decision,
+            )
+
+        self.assertTrue(should_wait)
+        self.assertEqual(
+            decision["daily_anchor_block_reason"],
+            "high_pressure_wait_short_confirmation",
+        )
+        self.assertNotIn("general_entry_relaxation", decision)
+
+    def test_daily_anchor_allows_extreme_quality_high_pressure_breakout_long(self):
+        decision = {
+            "market_profile": {"phase": "range_base"},
+            "risk_rate": 0.011,
+            "net_edge_rate_est": 0.021,
+            "position_size": 0.15,
+            "max_position_size": 0.20,
+            "host_opening_logic": {
+                "mode": "breakout_after_pressure_tests",
+                "confidence": 0.88,
+                "range_pos": 0.82,
+            },
+            "learned_entry_logic": {
+                "reasons": ["高位靠近壓力，優先等空方確認"],
+            },
+            "htf": 1,
+            "mid_trend": 1,
+            "resistance_hits": 4,
+            "repeated_resistance_tests": 4,
+            "breakout_quality_score": 7.1,
+            "breakout_quality_required": 3.5,
+            "news_bias": 0,
+            "event_risk": 0,
+        }
+
+        with patch.dict(
+            eth.os.environ,
+            {"DAILY_MIN_ANCHOR_RANGE_TESTED_BREAK_ENABLED": "1"},
+            clear=False,
+        ):
+            should_wait = eth._daily_anchor_guard_should_wait(
+                "🚀 做多",
+                0.90,
+                decision,
+            )
+
+        self.assertFalse(should_wait)
+        self.assertEqual(decision["position_size"], 0.02)
+        self.assertEqual(decision["general_entry_relaxation"], "range_tested_break")
+
     def test_daily_anchor_keeps_event_risk_block_for_tested_range_break(self):
         decision = {
             "market_profile": {"phase": "range_base"},
