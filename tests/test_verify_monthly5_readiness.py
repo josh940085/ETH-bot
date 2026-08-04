@@ -168,6 +168,28 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["shadow_paper_short_intervals"], 1)
         self.assertAlmostEqual(report["shadow_paper_return_pct"], 14.7619, places=4)
         self.assertEqual(report["shadow_paper_win_rate_pct"], 100.0)
+        self.assertTrue(report["shadow_monthly_target_met"])
+        self.assertGreater(report["shadow_projected_monthly_return_pct"], 5.0)
+
+    def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
+        rows = [
+            self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.1, max_leverage=1),
+            self._row(1000 + 24 * 3600, action="wait", plan="normal_wait", mark_price=100.1),
+        ]
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=2,
+            min_span_hours=24.0,
+            max_age_sec=None,
+            now_ts=1000 + 24 * 3600,
+        )
+
+        self.assertFalse(report["shadow_monthly_target_met"])
+        self.assertAlmostEqual(report["shadow_projected_monthly_return_pct"], 0.3, places=4)
+        self.assertTrue(any("shadow monthly projection below target" in item for item in report["warnings"]))
 
     def test_invalid_when_history_breaks_shadow_safety(self):
         row = self._row(1000)

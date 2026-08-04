@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
 MONTHLY_LOCK_PCT = 5.0
+MONTHLY_TARGET_PCT = 5.0
+MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
 INTRADAY_STOP_PCT = -8.0
 POST_LOCK_EXPOSURE_SCALE = 0.15
@@ -259,6 +261,27 @@ def _build_shadow_paper_return(rows):
     }
 
 
+def _build_shadow_monthly_projection(shadow_paper, span_hours):
+    span_hours = max(0.0, _safe_float(span_hours, 0.0))
+    paper_return_pct = _safe_float(shadow_paper.get("shadow_paper_return_pct"), 0.0)
+    if span_hours <= 0.0 or _safe_int(shadow_paper.get("shadow_paper_intervals"), 0) <= 0:
+        projected_monthly_pct = 0.0
+    else:
+        projected_monthly_pct = paper_return_pct * (MONTHLY_PROJECTION_HOURS / span_hours)
+    target_progress_pct = (
+        (projected_monthly_pct / MONTHLY_TARGET_PCT) * 100.0
+        if MONTHLY_TARGET_PCT > 0
+        else 0.0
+    )
+    return {
+        "shadow_projected_monthly_return_pct": round(projected_monthly_pct, 4),
+        "shadow_monthly_target_pct": round(MONTHLY_TARGET_PCT, 4),
+        "shadow_monthly_target_met": projected_monthly_pct >= MONTHLY_TARGET_PCT,
+        "shadow_monthly_target_progress_pct": round(target_progress_pct, 4),
+        "shadow_monthly_projection_hours": round(MONTHLY_PROJECTION_HOURS, 4),
+    }
+
+
 def build_readiness_report(
     rows,
     *,
@@ -390,6 +413,7 @@ def build_readiness_report(
         shadow_active_time_pct = shadow_active_sample_pct
         shadow_flat_time_pct = shadow_flat_sample_pct
     shadow_paper = _build_shadow_paper_return(valid_rows)
+    shadow_projection = _build_shadow_monthly_projection(shadow_paper, span_hours)
 
     min_records = max(1, _safe_int(min_records, 48))
     min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
@@ -406,6 +430,16 @@ def build_readiness_report(
         warnings.append(f"shadow flat time pct high: {shadow_flat_time_pct:.2f}% > {flat_cap:.2f}%")
     if span_hours >= min_span_hours and shadow_paper["shadow_paper_intervals"] > 0 and shadow_paper["shadow_paper_return_pct"] < 0:
         warnings.append(f"shadow paper return negative: {shadow_paper['shadow_paper_return_pct']:.4f}%")
+    if (
+        span_hours >= min_span_hours
+        and shadow_paper["shadow_paper_intervals"] > 0
+        and not shadow_projection["shadow_monthly_target_met"]
+    ):
+        warnings.append(
+            "shadow monthly projection below target: "
+            f"{shadow_projection['shadow_projected_monthly_return_pct']:.4f}% < "
+            f"{shadow_projection['shadow_monthly_target_pct']:.4f}%"
+        )
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
@@ -447,6 +481,7 @@ def build_readiness_report(
         "weighted_shadow_active_sec": round(max(0.0, weighted_shadow_active_sec), 4),
         "weighted_shadow_flat_sec": round(max(0.0, weighted_shadow_flat_sec), 4),
         **shadow_paper,
+        **shadow_projection,
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,

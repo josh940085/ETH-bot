@@ -74,7 +74,9 @@ def main() -> int:
             f"shadow_flat_time_pct={report.get('shadow_flat_time_pct', 0.0)} "
             f"actual_flat_time_pct={report.get('actual_flat_time_pct', 0.0)} "
             f"shadow_paper_return_pct={report.get('shadow_paper_return_pct', 0.0)} "
-            f"shadow_paper_intervals={report.get('shadow_paper_intervals', 0)}"
+            f"shadow_paper_intervals={report.get('shadow_paper_intervals', 0)} "
+            f"shadow_projected_monthly_return_pct={report.get('shadow_projected_monthly_return_pct', 0.0)} "
+            f"shadow_monthly_target_met={str(bool(report.get('shadow_monthly_target_met'))).lower()}"
         )
         for item in report.get("failures") or []:
             print(f"FAIL {item}")
