@@ -83,8 +83,12 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures.extend(verify_monthly5_runtime._verify_spec_and_summary(spec))
             failures.extend(verify_monthly5_runtime._verify_shadow_state("shadow", shadow, spec, None))
             failures.extend(verify_monthly5_runtime._verify_guard_scenarios())
+            failures.extend(verify_monthly5_runtime._verify_end_to_end_scenarios())
 
         self.assertEqual(failures, [])
+
+    def test_runtime_verifier_end_to_end_scenarios_pass(self):
+        self.assertEqual(verify_monthly5_runtime._verify_end_to_end_scenarios(), [])
 
     def test_runtime_verifier_rejects_candidate_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
