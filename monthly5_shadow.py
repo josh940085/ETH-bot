@@ -421,6 +421,18 @@ def build_readiness_report(
     valid_rows = [row for row in rows if isinstance(row, dict)]
     if len(valid_rows) != len(rows or []):
         failures.append("history contains non-object rows")
+    equity_shock_rows = [
+        row
+        for row in valid_rows
+        if "equity_valid" not in row
+        and (
+            _safe_float(row.get("monthly_pnl_pct"), 0.0) <= -80.0
+            or _safe_float(row.get("intraday_pnl_pct"), 0.0) <= -80.0
+        )
+    ]
+    if equity_shock_rows:
+        valid_rows = [row for row in valid_rows if row not in equity_shock_rows]
+        warnings.append(f"ignored invalid legacy equity shock rows={len(equity_shock_rows)}")
     if not valid_rows:
         failures.append("history has no rows")
         return {
