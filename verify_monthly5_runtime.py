@@ -337,14 +337,19 @@ def _verify_end_to_end_scenarios() -> list[str]:
 
     profile_wait_selection = _bullish_profile_wait_selection(reset)
     _require(
-        profile_wait_selection.get("selected_plan") == "profile_quality_wait",
+        profile_wait_selection.get("selected_plan") == "profile_quality_shadow_probe",
         failures,
-        "e2e profile-bad host wait must not count as monthly5 entry shadow",
+        "e2e strong profile-bad host wait must use low exposure shadow probe",
     )
     _require(
-        profile_wait_selection.get("shadow_action") == "wait",
+        profile_wait_selection.get("shadow_action") == "evaluate_long",
         failures,
-        "e2e profile-bad host wait must keep monthly5 shadow flat",
+        "e2e strong profile-bad host wait must collect long shadow evidence",
+    )
+    _require(
+        _safe_float(profile_wait_selection.get("exposure_cap")) == monthly5_shadow.PROFILE_QUALITY_PROBE_EXPOSURE_CAP,
+        failures,
+        "e2e profile-quality shadow probe exposure cap must match spec",
     )
 
     locked = monthly5_shadow.update_shadow_state(

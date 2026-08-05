@@ -265,14 +265,31 @@ class Monthly5ShadowTests(unittest.TestCase):
         )
 
         self.assertEqual(selection["market_bias"], "bullish")
-        self.assertEqual(selection["selected_plan"], "profile_quality_wait")
-        self.assertEqual(selection["shadow_action"], "wait")
-        self.assertEqual(selection["exposure_cap"], 0.0)
+        self.assertEqual(selection["selected_plan"], "profile_quality_shadow_probe")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["exposure_cap"], monthly5_shadow.PROFILE_QUALITY_PROBE_EXPOSURE_CAP)
         self.assertEqual(selection["suppressed_plan"], "normal_long_selector")
         self.assertEqual(selection["suppressed_action"], "evaluate_long")
         self.assertEqual(selection["suppressed_key"], "normal_long_selector|evaluate_long|bullish|chop")
         self.assertEqual(selection["suppressed_exposure_cap"], 0.35)
         self.assertIn("chop_market_reduce", selection["reason_codes"])
+        self.assertIn("profile_quality_shadow_probe", selection["reason_codes"])
+
+    def test_market_selection_still_waits_when_profile_quality_bad_and_bias_is_not_strong(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_execution_reason="觀望（MLX回測輪廓不佳）",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 0.0},
+            host_logic={},
+            macro_alignment={"score": 0.0, "hard_block": False},
+            donchian_state={"state": "chop", "action": "reduce"},
+        )
+
+        self.assertEqual(selection["market_bias"], "bullish")
+        self.assertEqual(selection["selected_plan"], "profile_quality_wait")
+        self.assertEqual(selection["shadow_action"], "wait")
+        self.assertEqual(selection["exposure_cap"], 0.0)
         self.assertIn("profile_quality_wait", selection["reason_codes"])
 
     def test_market_selection_uses_recovery_long_flat_only_when_bullish(self):

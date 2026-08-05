@@ -6226,6 +6226,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         or "profile_quality_recovery_probe" in reason_codes
         or "mixed_bias_shadow_probe" in reason_codes
         or "context_grace_shadow_probe" in reason_codes
+        or "profile_quality_shadow_probe" in reason_codes
     ):
         return {
             "applied": False,

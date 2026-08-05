@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
-SELECTOR_POLICY_VERSION = 4
+SELECTOR_POLICY_VERSION = 5
 MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
@@ -21,6 +21,9 @@ MIXED_BIAS_PROBE_MIN_SCORE = 1.8
 MIXED_BIAS_PROBE_MAX_GAP = 0.6
 CONTEXT_GRACE_PROBE_EXPOSURE_CAP = 0.08
 CONTEXT_GRACE_PROBE_MAX_AGE_SEC = 900
+PROFILE_QUALITY_PROBE_EXPOSURE_CAP = 0.08
+PROFILE_QUALITY_PROBE_MIN_SCORE = 4.0
+PROFILE_QUALITY_PROBE_MAX_OPPOSING_SCORE = 0.5
 SUPPRESSED_RECOVERY_MIN_INTERVALS = 12
 RECOVERY_PROBE_MIN_INTERVALS = 12
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
@@ -1560,11 +1563,30 @@ def build_market_selection(
         profile_suppressed_action = shadow_action
         profile_suppressed_key = "|".join((selected_plan, shadow_action, market_bias, market_state))
         profile_suppressed_exposure_cap = exposure_cap
+        profile_strong_bias_probe = (
+            (
+                shadow_action == "evaluate_long"
+                and market_bias == "bullish"
+                and bull_score >= PROFILE_QUALITY_PROBE_MIN_SCORE
+                and bear_score <= PROFILE_QUALITY_PROBE_MAX_OPPOSING_SCORE
+            )
+            or (
+                shadow_action == "evaluate_short"
+                and market_bias == "bearish"
+                and bear_score >= PROFILE_QUALITY_PROBE_MIN_SCORE
+                and bull_score <= PROFILE_QUALITY_PROBE_MAX_OPPOSING_SCORE
+            )
+        )
         if profile_suppressed_key in recovering_keys or profile_suppressed_key in probe_candidate_keys:
             selected_plan = "profile_quality_recovery_probe"
             exposure_cap = round(min(exposure_cap, RECOVERY_PROBE_EXPOSURE_CAP), 4)
             reason_codes.append("profile_quality_recovery_probe")
             rationale = "profile 品質擋單候選近期 counterfactual 轉正，僅做 shadow 低曝險恢復探測"
+        elif profile_strong_bias_probe:
+            selected_plan = "profile_quality_shadow_probe"
+            exposure_cap = round(min(exposure_cap, PROFILE_QUALITY_PROBE_EXPOSURE_CAP), 4)
+            reason_codes.append("profile_quality_shadow_probe")
+            rationale = "profile 品質不佳但多週期單邊分數很強，僅用低曝險 shadow probe 驗證是否可恢復"
         else:
             selected_plan = "profile_quality_wait"
             shadow_action = "wait"
