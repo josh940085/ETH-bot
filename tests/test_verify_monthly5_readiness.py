@@ -369,6 +369,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             report["shadow_suppressed_recovery_remaining_intervals"],
             monthly5_shadow.SUPPRESSED_RECOVERY_MIN_INTERVALS - 3,
         )
+        self.assertEqual(report["shadow_recovery_probe_state"], "collecting")
 
     def test_recovery_probe_success_and_failure_keys(self):
         success_rows = []
@@ -399,6 +400,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             "normal_long_selector|evaluate_long|bullish|chop",
             success["shadow_recovery_probe_success_keys"],
         )
+        self.assertEqual(success["shadow_recovery_probe_state"], "probe_success")
         self.assertEqual(success["shadow_recovery_probe_failed_count"], 0)
 
         failure_rows = []
@@ -429,6 +431,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             "normal_long_selector|evaluate_long|bullish|chop",
             failure["shadow_recovery_probe_failed_keys"],
         )
+        self.assertEqual(failure["shadow_recovery_probe_state"], "probe_failed")
         self.assertIn(
             "normal_long_selector|evaluate_long|bullish|chop",
             failure["shadow_active_underperforming_plan_keys"],
