@@ -580,6 +580,14 @@ def build_readiness_report(
         0,
         SUPPRESSED_RECOVERY_MIN_INTERVALS - suppressed_observed_intervals,
     )
+    recovery_probe_observed_intervals = sum(
+        _safe_int(item.get("intervals"), 0)
+        for item in rolling_probe_grouped_paper["shadow_grouped_paper_returns"]
+    )
+    recovery_probe_remaining_intervals = max(
+        0,
+        RECOVERY_PROBE_MIN_INTERVALS - recovery_probe_observed_intervals,
+    )
     recovering_keys = set(rolling_suppressed_grouped_paper["shadow_recovering_plan_keys"])
     probe_failed_keys = set(rolling_probe_grouped_paper["shadow_underperforming_plan_keys"])
     probe_success_keys = set(rolling_probe_grouped_paper["shadow_recovering_plan_keys"])
@@ -707,6 +715,8 @@ def build_readiness_report(
         "shadow_recovery_probe_failed_count": len(probe_failed_keys),
         "shadow_recovery_probe_grouped_paper_returns": list(rolling_probe_grouped_paper["shadow_grouped_paper_returns"]),
         "shadow_recovery_probe_min_intervals": RECOVERY_PROBE_MIN_INTERVALS,
+        "shadow_recovery_probe_observed_intervals": recovery_probe_observed_intervals,
+        "shadow_recovery_probe_remaining_intervals": recovery_probe_remaining_intervals,
         "shadow_recovery_probe_state": recovery_probe_state,
         "min_records": min_records,
         "min_span_hours": min_span_hours,
