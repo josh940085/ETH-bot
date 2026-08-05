@@ -110,7 +110,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertIn("observed_target_gap_pct", details["shadow_projection_not_valid"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))
 
-    def test_default_readiness_min_span_is_twelve_hours(self):
+    def test_default_readiness_min_span_is_eight_hours(self):
         report = monthly5_shadow.build_readiness_report(
             [self._row(1000, action="evaluate_long", plan="normal_long_selector")],
             strategy_id=monthly5_shadow.STRATEGY_ID,
@@ -120,9 +120,9 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             now_ts=1000,
         )
 
-        self.assertEqual(monthly5_shadow.READINESS_MIN_SPAN_HOURS, 12.0)
-        self.assertEqual(verify_monthly5_readiness.DEFAULT_MIN_SPAN_HOURS, 12.0)
-        self.assertEqual(report["min_span_hours"], 12.0)
+        self.assertEqual(monthly5_shadow.READINESS_MIN_SPAN_HOURS, 8.0)
+        self.assertEqual(verify_monthly5_readiness.DEFAULT_MIN_SPAN_HOURS, 8.0)
+        self.assertEqual(report["min_span_hours"], 8.0)
         self.assertIn("sample_span", report["promotion_blockers"])
 
     def test_readiness_blocks_proxy_selector_when_spec_requires_similar_day(self):
