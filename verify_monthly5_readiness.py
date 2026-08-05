@@ -37,6 +37,7 @@ def main() -> int:
     parser.add_argument("--max-age-sec", type=float, default=DEFAULT_MAX_AGE_SEC)
     parser.add_argument("--max-flat-time-pct", type=float, default=None)
     parser.add_argument("--require-ready", action="store_true")
+    parser.add_argument("--require-promotion-ready", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
@@ -77,11 +78,13 @@ def main() -> int:
             f"shadow_flat_time_pct={report.get('shadow_flat_time_pct', 0.0)} "
             f"actual_flat_time_pct={report.get('actual_flat_time_pct', 0.0)} "
             f"shadow_paper_return_pct={report.get('shadow_paper_return_pct', 0.0)} "
+            f"shadow_observed_target_gap_pct={report.get('shadow_observed_target_gap_pct', 0.0)} "
             f"shadow_paper_intervals={report.get('shadow_paper_intervals', 0)} "
             f"shadow_projected_monthly_return_pct={report.get('shadow_projected_monthly_return_pct', 0.0)} "
             f"shadow_monthly_projection_valid={str(bool(report.get('shadow_monthly_projection_valid'))).lower()} "
             f"shadow_monthly_target_met={str(bool(report.get('shadow_monthly_target_met'))).lower()} "
             f"shadow_rolling_paper_return_pct={report.get('shadow_rolling_paper_return_pct', 0.0)} "
+            f"shadow_rolling_observed_target_gap_pct={report.get('shadow_rolling_observed_target_gap_pct', 0.0)} "
             f"shadow_rolling_projected_monthly_return_pct={report.get('shadow_rolling_projected_monthly_return_pct', 0.0)} "
             f"shadow_rolling_monthly_target_met={str(bool(report.get('shadow_rolling_monthly_target_met'))).lower()} "
             f"shadow_activation_rows={report.get('shadow_activation_rows', 0)} "
@@ -109,7 +112,11 @@ def main() -> int:
             print(f"FAIL {item}")
         for item in report.get("warnings") or []:
             print(f"WARN {item}")
-    if report.get("failures") or (args.require_ready and not report.get("ready")):
+    if (
+        report.get("failures")
+        or (args.require_ready and not report.get("ready"))
+        or (args.require_promotion_ready and not report.get("promotion_ready"))
+    ):
         return 1
     return 0
 

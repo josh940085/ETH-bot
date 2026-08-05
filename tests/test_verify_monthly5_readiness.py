@@ -1,4 +1,9 @@
+import json
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import monthly5_shadow
 import verify_monthly5_readiness
@@ -715,6 +720,71 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
 
         self.assertEqual(report["status"], "invalid")
         self.assertTrue(any("unsafe shadow rows" in item for item in report["failures"]))
+
+    def test_cli_require_promotion_ready_fails_when_only_ready(self):
+        rows = [
+            self._row(
+                1000,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=100.0,
+                exposure_cap=0.1,
+                max_leverage=5,
+            ),
+            self._row(
+                1000 + 24 * 3600,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=120.0,
+                exposure_cap=0.1,
+                max_leverage=5,
+            ),
+            self._row(
+                1000 + 48 * 3600,
+                action="wait",
+                plan="normal_wait",
+                mark_price=119.0,
+                exposure_cap=0.1,
+                max_leverage=5,
+            ),
+        ]
+        spec = self._spec(avg_flat_time_pct=100.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            spec_path = tmp / "spec.json"
+            history_path = tmp / "history.jsonl"
+            spec_path.write_text(json.dumps(spec), encoding="utf-8")
+            history_path.write_text(
+                "\n".join(json.dumps(row) for row in rows),
+                encoding="utf-8",
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "verify_monthly5_readiness.py",
+                    "--spec",
+                    str(spec_path),
+                    "--history",
+                    str(history_path),
+                    "--min-records",
+                    "3",
+                    "--min-span-hours",
+                    "24",
+                    "--max-age-sec",
+                    "9999999999",
+                    "--require-promotion-ready",
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ready=true", result.stdout)
+        self.assertIn("promotion_ready=false", result.stdout)
+        self.assertIn("shadow_rolling_monthly_target", result.stdout)
 
 
 if __name__ == "__main__":

@@ -1035,6 +1035,8 @@ def _check_monthly5_readiness():
     ]
     if os.getenv("MONTHLY5_REQUIRE_READY", "0").strip().lower() in {"1", "true", "yes", "on"}:
         command.append("--require-ready")
+    if os.getenv("MONTHLY5_REQUIRE_PROMOTION_READY", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        command.append("--require-promotion-ready")
     result = _run_command(command, timeout=60)
     output = (result.stdout or "").strip()
     if result.returncode != 0:

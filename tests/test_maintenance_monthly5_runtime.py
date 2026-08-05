@@ -96,6 +96,20 @@ class Monthly5MaintenanceTests(unittest.TestCase):
 
         self.assertIn("--require-ready", run_command.call_args.args[0])
 
+    def test_monthly5_readiness_check_can_require_promotion_ready(self):
+        command_result = SimpleNamespace(
+            returncode=0,
+            stdout="PASS monthly5_readiness status=ready ready=true promotion_ready=true rows=48 span_hours=24.0\n",
+        )
+
+        with (
+            patch.dict(maintenance.os.environ, {"MONTHLY5_REQUIRE_PROMOTION_READY": "1"}),
+            patch.object(maintenance, "_run_command", return_value=command_result) as run_command,
+        ):
+            maintenance._check_monthly5_readiness()
+
+        self.assertIn("--require-promotion-ready", run_command.call_args.args[0])
+
 
 if __name__ == "__main__":
     unittest.main()
