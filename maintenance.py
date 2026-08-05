@@ -55,6 +55,7 @@ CHECK_NAME_ZH = {
     "telegram_watch_risk": "Telegram 發送風險",
     "model_health": "交易模型健康狀態",
     "strategy_strictness": "策略嚴苛度",
+    "monthly5_candidate": "月報酬5%歷史候選審核",
     "monthly5_runtime": "月報酬5%策略一致性",
     "monthly5_readiness": "月報酬5%實盤樣本準備度",
     "smoke_backtest": "策略快速回測",
@@ -971,6 +972,21 @@ def _check_py_compile():
     }
 
 
+def _check_monthly5_candidate():
+    result = _run_command(
+        [sys.executable, "verify_monthly5_candidate.py"],
+        timeout=60,
+    )
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        raise RuntimeError(output or "monthly5 candidate verifier failed")
+    detail = output.splitlines()[-1] if output else "monthly5 candidate verifier passed"
+    return {
+        "status": "ok",
+        "detail": detail,
+    }
+
+
 def _check_monthly5_runtime():
     max_age_sec = max(
         60,
@@ -1769,6 +1785,7 @@ def main():
         ("market_kline_source", _check_market_kline_source),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
+        ("monthly5_candidate", _check_monthly5_candidate),
         ("monthly5_runtime", _check_monthly5_runtime),
         ("monthly5_readiness", _check_monthly5_readiness),
         ("telegram_policy", _check_telegram_policy_and_repair),

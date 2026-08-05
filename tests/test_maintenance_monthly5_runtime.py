@@ -6,6 +6,32 @@ import maintenance
 
 
 class Monthly5MaintenanceTests(unittest.TestCase):
+    def test_monthly5_candidate_check_wraps_verifier_pass(self):
+        command_result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "PASS postlock_scale0.15_floor_pdaystopNone months_ge_5=79 "
+                "complete_months_ge_5=79/79 complete_hit_rate_pct=100.0 max_leverage_used=5\n"
+            ),
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result) as run_command:
+            result = maintenance._check_monthly5_candidate()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("complete_months_ge_5=79/79", result["detail"])
+        self.assertIn("verify_monthly5_candidate.py", run_command.call_args.args[0])
+
+    def test_monthly5_candidate_check_raises_on_verifier_failure(self):
+        command_result = SimpleNamespace(
+            returncode=1,
+            stdout="FAIL complete monthly rows below 5.0%\n",
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result):
+            with self.assertRaisesRegex(RuntimeError, "complete monthly rows below"):
+                maintenance._check_monthly5_candidate()
+
     def test_monthly5_runtime_check_wraps_verifier_pass(self):
         command_result = SimpleNamespace(
             returncode=0,
