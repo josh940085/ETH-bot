@@ -6651,6 +6651,13 @@ def sync_position_panel(current_price=None):
         _safe_float(payload.get("binance_mark_price"), last_price)
     )
     monthly5_readiness_state = _build_monthly5_readiness_panel_state()
+    monthly5_position_guard_state = dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {})
+    if not active_trade.get("open"):
+        monthly5_position_guard_state = monthly5_shadow.build_position_guard(
+            monthly5_shadow_state,
+            current_size=0.0,
+        )
+        POSITION_PANEL_STATE["monthly5_position_guard"] = monthly5_position_guard_state
     payload.update(
         {
             "execution_priority": "real_order" if _real_order_priority_enabled() else "strategy_signal",
@@ -6692,7 +6699,7 @@ def sync_position_panel(current_price=None):
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
             "monthly5_shadow": dict(monthly5_shadow_state or {}),
             "monthly5_execution_guard": dict(POSITION_PANEL_STATE.get("monthly5_execution_guard") or {}),
-            "monthly5_position_guard": dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {}),
+            "monthly5_position_guard": dict(monthly5_position_guard_state or {}),
             "monthly5_signal_override": dict(POSITION_PANEL_STATE.get("monthly5_signal_override") or {}),
             "monthly5_readiness": dict(monthly5_readiness_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),

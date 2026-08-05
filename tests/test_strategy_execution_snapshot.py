@@ -868,6 +868,8 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(payload["monthly5_execution_guard"]["adjusted_size"], 0.15)
         self.assertEqual(payload["monthly5_readiness"]["status"], "collecting")
+        self.assertEqual(payload["monthly5_position_guard"]["reason_code"], "flat")
+        self.assertEqual(payload["monthly5_position_guard"]["current_size"], 0.0)
 
     def test_monthly5_position_guard_reduces_local_position_to_cap(self):
         eth.active_trade.update(
