@@ -6076,7 +6076,8 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         "觀望（壓力連測未突破）",
     )
     rr_wait_candidate = final == "觀望（RR不足）"
-    if final not in allowed_wait_reasons and not rr_wait_candidate:
+    profile_wait_candidate = final == "觀望（MLX回測輪廓不佳）"
+    if final not in allowed_wait_reasons and not rr_wait_candidate and not profile_wait_candidate:
         return {"applied": False, "reason": "protected_wait_reason", "final": final}
 
     selection = {}
@@ -6202,6 +6203,64 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
                 "breakout_quality_score": round(breakout_quality, 4),
                 "min_breakout_quality": round(min_breakout_quality, 4),
                 "breakout_confirmed": breakout_confirmed,
+                "selected_plan": selected_plan,
+            }
+
+    if profile_wait_candidate:
+        market_bias = str(selection.get("market_bias") or "")
+        bull_score = _safe_float(selection.get("bull_score"), 0.0)
+        bear_score = _safe_float(selection.get("bear_score"), 0.0)
+        score_gap = abs(bull_score - bear_score)
+        net_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
+        min_net_edge = _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_PROFILE_WAIT_MIN_NET_EDGE", 0.003), 0.003)
+        min_score_gap = max(
+            0.0,
+            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_PROFILE_WAIT_MIN_SCORE_GAP", 2.0), 2.0),
+        )
+        breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
+        breakout_confirmed = bool(decision.get("breakout_confirmed", False))
+        breakout_quality = _safe_float(decision.get("breakout_quality_score"), 0.0)
+        breakout_required = max(
+            0.0,
+            _safe_float(decision.get("breakout_quality_required"), 3.5),
+        )
+        direction_prob = ai_long_prob if direction == "long" else ai_short_prob
+        min_direction_prob = max(
+            0.5,
+            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_PROFILE_WAIT_MIN_DIRECTION_PROB", 0.65), 0.65),
+        )
+        bias_matches = (
+            (direction == "long" and market_bias == "bullish" and bull_score > bear_score)
+            or (direction == "short" and market_bias == "bearish" and bear_score > bull_score)
+        )
+        breakout_ok = (
+            not breakout_attempt
+            or breakout_confirmed
+            or breakout_quality >= breakout_required
+        )
+        if (
+            not bias_matches
+            or score_gap < min_score_gap
+            or net_edge < min_net_edge
+            or not breakout_ok
+            or direction_prob < min_direction_prob
+        ):
+            return {
+                "applied": False,
+                "reason": "monthly5_profile_wait_quality_block",
+                "final": final,
+                "direction": direction,
+                "market_bias": market_bias,
+                "bull_score": round(bull_score, 4),
+                "bear_score": round(bear_score, 4),
+                "min_score_gap": round(min_score_gap, 4),
+                "net_edge_rate_est": round(net_edge, 6),
+                "min_net_edge_rate_est": round(min_net_edge, 6),
+                "breakout_quality_score": round(breakout_quality, 4),
+                "breakout_quality_required": round(breakout_required, 4),
+                "breakout_confirmed": breakout_confirmed,
+                "direction_prob": round(direction_prob, 4),
+                "min_direction_prob": round(min_direction_prob, 4),
                 "selected_plan": selected_plan,
             }
 
