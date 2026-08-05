@@ -1019,6 +1019,28 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(override["applied"])
         self.assertEqual(override["reason"], "monthly5_not_entry")
 
+    def test_monthly5_micro_probe_does_not_promote_plain_wait(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（等支撐跌破或承接確認）",
+            "event_risk": 0,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": eth.monthly5_shadow.UNDERPERFORMING_MICRO_PROBE_EXPOSURE_CAP,
+                "reason_codes": ["underperforming_micro_probe"],
+            }
+        }
+
+        with patch.object(eth.time, "time", return_value=2000.0):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertFalse(override["applied"])
+        self.assertEqual(override["reason"], "micro_probe_requires_host_signal")
+
     def test_monthly5_market_selection_confirmation_skips_breakout_retest(self):
         decision = {
             "final": "📈 月報酬5%策略做多",

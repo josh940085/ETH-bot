@@ -6068,6 +6068,13 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     selected_plan = str(selection.get("selected_plan") or "")
     if selected_plan in {"underperforming_wait", "macro_block_wait", "risk_off"}:
         return {"applied": False, "reason": "monthly5_plan_blocked", "selected_plan": selected_plan}
+    reason_codes = {str(code) for code in selection.get("reason_codes") or [] if code}
+    if "underperforming_micro_probe" in reason_codes:
+        return {
+            "applied": False,
+            "reason": "micro_probe_requires_host_signal",
+            "selected_plan": selected_plan,
+        }
 
     macro_alignment = decision.get("macro_indicator_alignment") if isinstance(decision.get("macro_indicator_alignment"), dict) else {}
     if bool(macro_alignment.get("hard_block", False)):
