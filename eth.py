@@ -5939,6 +5939,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                 else dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {})
             ),
             underperforming_plan_keys=readiness_report.get("shadow_active_underperforming_plan_keys") or [],
+            recovering_plan_keys=readiness_report.get("shadow_suppressed_recovering_plan_keys") or [],
         )
         guard = monthly5_shadow.build_execution_guard(
             snapshot,
@@ -6054,6 +6055,10 @@ def _build_monthly5_readiness_panel_state():
             "shadow_active_underperforming_plan_keys": list(report.get("shadow_active_underperforming_plan_keys") or [])[:5],
             "shadow_active_underperforming_plan_count": _safe_int(report.get("shadow_active_underperforming_plan_count"), 0),
             "shadow_active_grouped_paper_returns": list(report.get("shadow_active_grouped_paper_returns") or [])[:5],
+            "shadow_suppressed_recovering_plan_keys": list(report.get("shadow_suppressed_recovering_plan_keys") or [])[:5],
+            "shadow_suppressed_recovering_plan_count": _safe_int(report.get("shadow_suppressed_recovering_plan_count"), 0),
+            "shadow_suppressed_grouped_paper_returns": list(report.get("shadow_suppressed_grouped_paper_returns") or [])[:5],
+            "shadow_suppressed_recovery_min_intervals": _safe_int(report.get("shadow_suppressed_recovery_min_intervals"), 6),
             "shadow_group_min_intervals": _safe_int(report.get("shadow_group_min_intervals"), 12),
             "min_records": _safe_int(report.get("min_records"), 48),
             "min_span_hours": round(_safe_float(report.get("min_span_hours"), 24.0), 4),

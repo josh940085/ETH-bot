@@ -290,6 +290,50 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["shadow_active_underperforming_plan_count"], 0)
         self.assertEqual(report["shadow_active_underperforming_plan_keys"], [])
 
+    def test_suppressed_recovering_plan_removes_active_underperforming_key(self):
+        rows = []
+        for idx in range(13):
+            row = self._row(
+                1000 + idx * 60,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=100.0 - idx,
+                exposure_cap=0.5,
+                max_leverage=1,
+            )
+            rows.append(row)
+        base_ts = 1000 + 3600
+        for idx in range(7):
+            row = self._row(
+                base_ts + idx * 60,
+                action="wait",
+                plan="underperforming_wait",
+                mark_price=90.0 + idx,
+                exposure_cap=0.0,
+                max_leverage=1,
+            )
+            row["suppressed_plan"] = "normal_long_selector"
+            row["suppressed_action"] = "evaluate_long"
+            row["suppressed_key"] = "normal_long_selector|evaluate_long|bullish|chop"
+            row["suppressed_exposure_cap"] = 0.5
+            rows.append(row)
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=20,
+            min_span_hours=0.1,
+            max_age_sec=None,
+            now_ts=base_ts + 6 * 60,
+        )
+
+        self.assertIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            report["shadow_suppressed_recovering_plan_keys"],
+        )
+        self.assertEqual(report["shadow_active_underperforming_plan_count"], 0)
+
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [
             self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.1, max_leverage=1),

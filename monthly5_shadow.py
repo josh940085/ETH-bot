@@ -13,6 +13,8 @@ MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
 ROLLING_WINDOW_HOURS = 24.0
+RECOVERY_PROBE_EXPOSURE_CAP = 0.15
+SUPPRESSED_RECOVERY_MIN_INTERVALS = 6
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
 INTRADAY_STOP_PCT = -8.0
 POST_LOCK_EXPOSURE_SCALE = 0.15
@@ -151,6 +153,10 @@ def build_history_record(snapshot, guard=None):
         "selected_plan": str(selection.get("selected_plan") or ""),
         "shadow_action": str(selection.get("shadow_action") or ""),
         "exposure_cap": round(_safe_float(selection.get("exposure_cap"), 0.0), 4),
+        "suppressed_plan": str(selection.get("suppressed_plan") or ""),
+        "suppressed_action": str(selection.get("suppressed_action") or ""),
+        "suppressed_key": str(selection.get("suppressed_key") or ""),
+        "suppressed_exposure_cap": round(_safe_float(selection.get("suppressed_exposure_cap"), 0.0), 4),
         "strategy_signal": str(selection.get("strategy_signal") or ""),
         "guard_allowed": bool(guard.get("allowed", True)),
         "guard_reason_code": str(guard.get("reason_code") or ""),
@@ -206,7 +212,7 @@ def _shadow_paper_direction(row):
     return 0
 
 
-def _shadow_paper_intervals(rows):
+def _shadow_paper_intervals(rows, *, suppressed=False):
     timed_rows = sorted(
         (row for row in rows if isinstance(row, dict) and _safe_int(row.get("updated_ts"), 0) > 0),
         key=lambda row: _safe_int(row.get("updated_ts"), 0),
@@ -218,7 +224,14 @@ def _shadow_paper_intervals(rows):
         if row.get("guard_allowed") is False:
             continue
         direction = _shadow_paper_direction(row)
+        selected_plan = str(row.get("selected_plan") or "")
+        shadow_action = str(row.get("shadow_action") or "")
         exposure_cap = max(0.0, min(1.0, _safe_float(row.get("exposure_cap"), 0.0)))
+        if suppressed:
+            shadow_action = str(row.get("suppressed_action") or "")
+            selected_plan = str(row.get("suppressed_plan") or "")
+            exposure_cap = max(0.0, min(1.0, _safe_float(row.get("suppressed_exposure_cap"), 0.0)))
+            direction = 1 if shadow_action == "evaluate_long" else -1 if shadow_action == "evaluate_short" else 0
         leverage = max(0.0, min(5.0, _safe_float(row.get("max_leverage"), 5.0)))
         start_price = _safe_float(row.get("mark_price"), 0.0)
         end_price = _safe_float(next_row.get("mark_price"), 0.0)
@@ -229,8 +242,8 @@ def _shadow_paper_intervals(rows):
             {
                 "return_pct": interval_pct,
                 "direction": direction,
-                "selected_plan": str(row.get("selected_plan") or ""),
-                "shadow_action": str(row.get("shadow_action") or ""),
+                "selected_plan": selected_plan,
+                "shadow_action": shadow_action,
                 "market_bias": str(row.get("market_bias") or ""),
                 "market_state": str(row.get("market_state") or ""),
             }
@@ -238,8 +251,8 @@ def _shadow_paper_intervals(rows):
     return intervals
 
 
-def _build_shadow_paper_return(rows):
-    intervals = _shadow_paper_intervals(rows)
+def _build_shadow_paper_return(rows, *, suppressed=False):
+    intervals = _shadow_paper_intervals(rows, suppressed=suppressed)
     total_return_pct = 0.0
     cumulative_pct = 0.0
     peak_pct = 0.0
@@ -280,9 +293,9 @@ def _build_shadow_paper_return(rows):
     }
 
 
-def _build_grouped_paper_return(rows, *, min_intervals=12, max_groups=5):
+def _build_grouped_paper_return(rows, *, min_intervals=12, max_groups=5, suppressed=False):
     grouped = defaultdict(lambda: {"return_pct": 0.0, "intervals": 0, "wins": 0, "losses": 0})
-    for interval in _shadow_paper_intervals(rows):
+    for interval in _shadow_paper_intervals(rows, suppressed=suppressed):
         key = (
             str(interval.get("selected_plan") or ""),
             str(interval.get("shadow_action") or ""),
@@ -322,10 +335,18 @@ def _build_grouped_paper_return(rows, *, min_intervals=12, max_groups=5):
         if item["intervals"] >= max(1, _safe_int(min_intervals, 12))
         and item["return_pct"] < 0.0
     ]
+    recovering = [
+        item
+        for item in groups
+        if item["intervals"] >= max(1, _safe_int(min_intervals, 12))
+        and item["return_pct"] > 0.0
+    ]
     return {
         "shadow_grouped_paper_returns": groups[: max(1, _safe_int(max_groups, 5))],
         "shadow_underperforming_plan_keys": [item["key"] for item in weak[: max(1, _safe_int(max_groups, 5))]],
         "shadow_underperforming_plan_count": len(weak),
+        "shadow_recovering_plan_keys": [item["key"] for item in recovering[: max(1, _safe_int(max_groups, 5))]],
+        "shadow_recovering_plan_count": len(recovering),
         "shadow_group_min_intervals": max(1, _safe_int(min_intervals, 12)),
     }
 
@@ -536,6 +557,17 @@ def build_readiness_report(
     )
     grouped_paper = _build_grouped_paper_return(valid_rows)
     rolling_grouped_paper = _build_grouped_paper_return(rolling_rows)
+    rolling_suppressed_grouped_paper = _build_grouped_paper_return(
+        rolling_rows,
+        min_intervals=SUPPRESSED_RECOVERY_MIN_INTERVALS,
+        suppressed=True,
+    )
+    recovering_keys = set(rolling_suppressed_grouped_paper["shadow_recovering_plan_keys"])
+    active_underperforming_keys = [
+        key
+        for key in rolling_grouped_paper["shadow_underperforming_plan_keys"]
+        if key not in recovering_keys
+    ]
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
         warnings.append(f"sample count collecting: rows={len(valid_rows)} < {min_records}")
@@ -567,10 +599,10 @@ def build_readiness_report(
             f"{rolling_projection['shadow_projected_monthly_return_pct']:.4f}% < "
             f"{rolling_projection['shadow_monthly_target_pct']:.4f}%"
         )
-    if rolling_grouped_paper["shadow_underperforming_plan_count"] > 0:
+    if active_underperforming_keys:
         warnings.append(
             "shadow active underperforming plan groups: "
-            + ", ".join(rolling_grouped_paper["shadow_underperforming_plan_keys"][:2])
+            + ", ".join(active_underperforming_keys[:2])
         )
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
@@ -626,9 +658,13 @@ def build_readiness_report(
         **_prefix_metrics("shadow_rolling", rolling_paper),
         **_prefix_metrics("shadow_rolling", rolling_projection),
         **grouped_paper,
-        "shadow_active_underperforming_plan_keys": list(rolling_grouped_paper["shadow_underperforming_plan_keys"]),
-        "shadow_active_underperforming_plan_count": rolling_grouped_paper["shadow_underperforming_plan_count"],
+        "shadow_active_underperforming_plan_keys": list(active_underperforming_keys),
+        "shadow_active_underperforming_plan_count": len(active_underperforming_keys),
         "shadow_active_grouped_paper_returns": list(rolling_grouped_paper["shadow_grouped_paper_returns"]),
+        "shadow_suppressed_recovering_plan_keys": list(rolling_suppressed_grouped_paper["shadow_recovering_plan_keys"]),
+        "shadow_suppressed_recovering_plan_count": rolling_suppressed_grouped_paper["shadow_recovering_plan_count"],
+        "shadow_suppressed_grouped_paper_returns": list(rolling_suppressed_grouped_paper["shadow_grouped_paper_returns"]),
+        "shadow_suppressed_recovery_min_intervals": SUPPRESSED_RECOVERY_MIN_INTERVALS,
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,
@@ -772,6 +808,7 @@ def build_market_selection(
     macro_alignment=None,
     donchian_state=None,
     underperforming_plan_keys=None,
+    recovering_plan_keys=None,
 ):
     shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
     strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
@@ -866,7 +903,24 @@ def build_market_selection(
         for key in (underperforming_plan_keys or [])
         if str(key)
     }
+    recovering_keys = {
+        str(key)
+        for key in (recovering_plan_keys or [])
+        if str(key)
+    }
+    suppressed_plan = ""
+    suppressed_action = ""
+    suppressed_key = ""
+    suppressed_exposure_cap = 0.0
+    if shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in recovering_keys:
+        exposure_cap = round(min(exposure_cap, RECOVERY_PROBE_EXPOSURE_CAP), 4)
+        reason_codes.append("underperforming_recovery_probe")
+        rationale = "近期假想恢復表現轉正，使用低曝險探測是否可恢復月報酬5%策略"
     if shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in underperforming_keys:
+        suppressed_plan = selected_plan
+        suppressed_action = shadow_action
+        suppressed_key = selection_key
+        suppressed_exposure_cap = exposure_cap
         reason_codes.append("underperforming_plan_wait")
         selected_plan = "underperforming_wait"
         shadow_action = "wait"
@@ -883,6 +937,10 @@ def build_market_selection(
         "selected_plan": selected_plan,
         "shadow_action": shadow_action,
         "exposure_cap": round(exposure_cap, 4),
+        "suppressed_plan": suppressed_plan,
+        "suppressed_action": suppressed_action,
+        "suppressed_key": suppressed_key,
+        "suppressed_exposure_cap": round(suppressed_exposure_cap, 4),
         "max_leverage": min(5, max(0, _safe_int(shadow_state.get("max_leverage"), 5))),
         "strategy_signal": str(strategy_signal or "wait"),
         "strategy_execution_reason": str(strategy_execution_reason or ""),

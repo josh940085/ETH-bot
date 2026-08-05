@@ -2899,8 +2899,9 @@
     const groupedReturns = Array.isArray(state.shadow_grouped_paper_returns) ? state.shadow_grouped_paper_returns : [];
     const weakestGroup = groupedReturns.length && groupedReturns[0] && typeof groupedReturns[0] === "object" ? groupedReturns[0] : null;
     const activeWeakCount = Number.isFinite(Number(state.shadow_active_underperforming_plan_count)) ? Number(state.shadow_active_underperforming_plan_count) : 0;
+    const recoveringCount = Number.isFinite(Number(state.shadow_suppressed_recovering_plan_count)) ? Number(state.shadow_suppressed_recovering_plan_count) : 0;
     const weakestGroupLabel = weakestGroup
-      ? `${String(weakestGroup.selected_plan || "-").replace(/^normal_/, "")} ${Number(weakestGroup.return_pct || 0).toFixed(2)}% (${Number(weakestGroup.intervals || 0)}) active:${activeWeakCount}`
+      ? `${String(weakestGroup.selected_plan || "-").replace(/^normal_/, "")} ${Number(weakestGroup.return_pct || 0).toFixed(2)}% (${Number(weakestGroup.intervals || 0)}) active:${activeWeakCount} probe:${recoveringCount}`
       : "-";
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
