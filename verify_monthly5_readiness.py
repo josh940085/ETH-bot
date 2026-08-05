@@ -16,6 +16,9 @@ DEFAULT_MAX_AGE_SEC = 900.0
 
 def _history_readiness(rows: list[dict], spec: dict, *, min_records: int, min_span_hours: float, max_age_sec: float | None):
     evidence = spec.get("backtest_evidence") if isinstance(spec.get("backtest_evidence"), dict) else {}
+    policy = spec.get("policy") if isinstance(spec.get("policy"), dict) else {}
+    selector = policy.get("selector") if isinstance(policy.get("selector"), dict) else {}
+    normal_selector = selector.get("normal") if isinstance(selector.get("normal"), dict) else {}
     max_flat_time_pct = evidence.get("avg_flat_time_pct")
     return monthly5_shadow.build_readiness_report(
         rows,
@@ -25,6 +28,7 @@ def _history_readiness(rows: list[dict], spec: dict, *, min_records: int, min_sp
         min_span_hours=min_span_hours,
         max_age_sec=max_age_sec,
         max_flat_time_pct=max_flat_time_pct,
+        required_selector_source=str(normal_selector.get("type") or ""),
     )
 
 
@@ -60,6 +64,9 @@ def main() -> int:
             min_span_hours=max(0.0, args.min_span_hours),
             max_age_sec=args.max_age_sec,
             max_flat_time_pct=args.max_flat_time_pct,
+            required_selector_source=str(
+                (((spec.get("policy") or {}).get("selector") or {}).get("normal") or {}).get("type") or ""
+            ),
         )
     if args.json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
@@ -71,6 +78,9 @@ def main() -> int:
             f"rows={report.get('rows', 0)} "
             f"min_selector_policy_version={report.get('min_selector_policy_version', 0)} "
             f"ignored_legacy_selector_policy_rows={report.get('ignored_legacy_selector_policy_rows', 0)} "
+            f"required_selector_source={report.get('required_selector_source', '')} "
+            f"selector_policy_aligned={str(bool(report.get('selector_policy_aligned', True))).lower()} "
+            f"selector_policy_proxy_rows={report.get('selector_policy_proxy_rows', 0)} "
             f"span_hours={report.get('span_hours', 0.0)} "
             f"sample_count_remaining={report.get('sample_count_remaining', 0)} "
             f"sample_count_ready_ts={report.get('sample_count_ready_ts', 0)} "

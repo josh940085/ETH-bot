@@ -146,6 +146,16 @@ def _verify_shadow_state(name: str, shadow: dict, spec: dict, max_age_sec: float
             failures,
             f"{name} selector policy version stale",
         )
+        _require(
+            str(selection.get("selector_source") or ""),
+            failures,
+            f"{name} selector_source missing",
+        )
+        _require(
+            str(selection.get("selector_policy_source") or ""),
+            failures,
+            f"{name} selector_policy_source missing",
+        )
         _require(_safe_float(selection.get("max_leverage")) <= 5.0, failures, f"{name} selection leverage exceeds 5x")
         _require(0.0 <= _safe_float(selection.get("exposure_cap"), -1.0) <= 1.0, failures, f"{name} exposure cap out of range")
         _require(str(selection.get("selected_plan") or ""), failures, f"{name} selected_plan missing")
@@ -173,6 +183,8 @@ def _verify_shadow_history(name: str, rows: list[dict], latest_shadow: dict, spe
         failures,
         f"{name} history selector policy version stale",
     )
+    _require(str(latest.get("selector_source") or ""), failures, f"{name} history selector_source missing")
+    _require(str(latest.get("selector_policy_source") or ""), failures, f"{name} history selector_policy_source missing")
     _require(0.0 <= _safe_float(latest.get("exposure_cap"), -1.0) <= 1.0, failures, f"{name} history exposure cap out of range")
     _require(str(latest.get("selected_plan") or ""), failures, f"{name} history selected_plan missing")
     _require(str(latest.get("shadow_action") or ""), failures, f"{name} history shadow_action missing")

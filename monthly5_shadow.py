@@ -9,7 +9,10 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
-SELECTOR_POLICY_VERSION = 6
+SELECTOR_POLICY_VERSION = 7
+RESEARCH_SELECTOR_SOURCE = "similar_day_selector"
+LIVE_SELECTOR_SOURCE = "market_score_proxy_shadow"
+SELECTOR_ALIGNMENT = "proxy_shadow_pending_similar_day"
 MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
@@ -172,6 +175,9 @@ def build_history_record(snapshot, guard=None):
         "selected_plan": str(selection.get("selected_plan") or ""),
         "shadow_action": str(selection.get("shadow_action") or ""),
         "exposure_cap": round(_safe_float(selection.get("exposure_cap"), 0.0), 4),
+        "selector_source": str(selection.get("selector_source") or ""),
+        "selector_policy_source": str(selection.get("selector_policy_source") or ""),
+        "selector_alignment": str(selection.get("selector_alignment") or ""),
         "suppressed_plan": str(selection.get("suppressed_plan") or ""),
         "suppressed_action": str(selection.get("suppressed_action") or ""),
         "suppressed_key": str(selection.get("suppressed_key") or ""),
@@ -685,6 +691,7 @@ def build_readiness_report(
     max_age_sec=900.0,
     max_flat_time_pct=None,
     min_selector_policy_version=SELECTOR_POLICY_VERSION,
+    required_selector_source=None,
     now_ts=None,
 ):
     failures = []
@@ -841,6 +848,15 @@ def build_readiness_report(
     action_counts = Counter(str(row.get("shadow_action") or "") for row in valid_rows)
     mode_counts = Counter(str(row.get("mode") or "") for row in valid_rows)
     market_bias_counts = Counter(str(row.get("market_bias") or "") for row in valid_rows)
+    selector_source_counts = Counter(str(row.get("selector_source") or "unknown") for row in valid_rows)
+    required_selector_source = str(required_selector_source or "").strip()
+    selector_policy_proxy_rows = [
+        row
+        for row in valid_rows
+        if required_selector_source
+        and str(row.get("selector_source") or "") != required_selector_source
+    ]
+    selector_policy_aligned = not selector_policy_proxy_rows
     risk_rows = [
         row
         for row in valid_rows
@@ -1055,6 +1071,12 @@ def build_readiness_report(
             "shadow active underperforming plan groups: "
             + ", ".join(active_underperforming_keys[:2])
         )
+    if selector_policy_proxy_rows:
+        warnings.append(
+            "selector source not aligned with research policy: "
+            f"{len(selector_policy_proxy_rows)} rows use "
+            + ", ".join(sorted(selector_source_counts)[:3])
+        )
 
     shadow_flat_time_gap_pct = (
         max(0.0, shadow_flat_time_pct - flat_cap)
@@ -1062,7 +1084,14 @@ def build_readiness_report(
         else 0.0
     )
     flat_ok = flat_cap is None or shadow_flat_time_gap_pct <= 0.0
-    ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
+    ready = (
+        not failures
+        and len(valid_rows) >= min_records
+        and span_hours >= min_span_hours
+        and bool(evaluate_rows)
+        and flat_ok
+        and selector_policy_aligned
+    )
     sample_count_remaining = max(0, min_records - len(valid_rows))
     sample_count_progress_pct = min(100.0, (len(valid_rows) / min_records) * 100.0) if min_records > 0 else 100.0
     sample_span_remaining_hours = max(0.0, min_span_hours - span_hours)
@@ -1103,6 +1132,8 @@ def build_readiness_report(
         promotion_blockers.append("active_underperforming_plan")
     if recovery_probe_state in {"collecting", "probe_ready", "probing", "probe_failed"}:
         promotion_blockers.append(f"recovery_probe_{recovery_probe_state}")
+    if not selector_policy_aligned:
+        promotion_blockers.append("selector_policy_proxy")
 
     def _blocker_detail(code):
         code = str(code or "")
@@ -1204,6 +1235,15 @@ def build_readiness_report(
                 "remaining_intervals": recovery_probe_remaining_intervals,
                 "detail": "低效策略組需完成恢復探測後才可 promotion",
             }
+        if code == "selector_policy_proxy":
+            return {
+                "code": code,
+                "label": "selector 實作來源",
+                "current": ", ".join(sorted(selector_source_counts)[:3]),
+                "target": required_selector_source,
+                "proxy_rows": len(selector_policy_proxy_rows),
+                "detail": "live shadow 必須接上研究回測使用的 selector source 後才可 promotion",
+            }
         return {
             "code": code,
             "label": code,
@@ -1249,6 +1289,10 @@ def build_readiness_report(
         "shadow_action_counts": dict(sorted(action_counts.items())),
         "mode_counts": dict(sorted(mode_counts.items())),
         "market_bias_counts": dict(sorted(market_bias_counts.items())),
+        "selector_source_counts": dict(sorted(selector_source_counts.items())),
+        "required_selector_source": required_selector_source,
+        "selector_policy_aligned": selector_policy_aligned,
+        "selector_policy_proxy_rows": len(selector_policy_proxy_rows),
         "risk_rows": len(risk_rows),
         "evaluate_rows": len(evaluate_rows),
         "shadow_active_rows": len(shadow_active_rows),
@@ -1727,6 +1771,9 @@ def build_market_selection(
     return {
         "schema_version": 1,
         "selector_policy_version": SELECTOR_POLICY_VERSION,
+        "selector_source": LIVE_SELECTOR_SOURCE,
+        "selector_policy_source": RESEARCH_SELECTOR_SOURCE,
+        "selector_alignment": SELECTOR_ALIGNMENT,
         "market_bias": market_bias,
         "bull_score": bull_score,
         "bear_score": bear_score,

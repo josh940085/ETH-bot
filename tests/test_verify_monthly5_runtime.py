@@ -100,6 +100,9 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             "promotion_blockers": ["sample_span"],
             "market_selection": {
                 "selector_policy_version": monthly5_shadow.SELECTOR_POLICY_VERSION,
+                "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+                "selector_policy_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+                "selector_alignment": "research_selector",
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
                 "exposure_cap": 0.35,

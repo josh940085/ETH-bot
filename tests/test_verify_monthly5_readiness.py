@@ -46,6 +46,9 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             "exposure_cap": exposure_cap,
             "selected_plan": plan,
             "shadow_action": action,
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "selector_policy_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "selector_alignment": "research_selector",
             "market_bias": "bullish",
             "market_state": "chop",
             "guard_allowed": True,
@@ -106,6 +109,32 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertIn("shadow_projection_not_valid", details)
         self.assertIn("observed_target_gap_pct", details["shadow_projection_not_valid"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))
+
+    def test_readiness_blocks_proxy_selector_when_spec_requires_similar_day(self):
+        rows = [
+            self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0),
+            self._row(1000 + 24 * 3600, action="evaluate_long", plan="normal_long_selector", mark_price=120.0),
+        ]
+        for row in rows:
+            row["selector_source"] = monthly5_shadow.LIVE_SELECTOR_SOURCE
+            row["selector_policy_source"] = monthly5_shadow.RESEARCH_SELECTOR_SOURCE
+            row["selector_alignment"] = monthly5_shadow.SELECTOR_ALIGNMENT
+        spec = self._spec(avg_flat_time_pct=100.0)
+        spec["policy"] = {"selector": {"normal": {"type": monthly5_shadow.RESEARCH_SELECTOR_SOURCE}}}
+
+        report = verify_monthly5_readiness._history_readiness(
+            rows,
+            spec,
+            min_records=2,
+            min_span_hours=24.0,
+            max_age_sec=None,
+        )
+
+        self.assertFalse(report["ready"])
+        self.assertFalse(report["selector_policy_aligned"])
+        self.assertEqual(report["selector_policy_proxy_rows"], 2)
+        self.assertEqual(report["required_selector_source"], monthly5_shadow.RESEARCH_SELECTOR_SOURCE)
+        self.assertIn("selector_policy_proxy", report["promotion_blockers"])
 
     def test_readiness_estimates_sample_count_ready_ts_from_median_interval(self):
         rows = [
