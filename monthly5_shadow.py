@@ -139,6 +139,7 @@ def build_history_record(snapshot, guard=None):
         "mode": str(snapshot.get("mode") or ""),
         "monthly_pnl_pct": round(_safe_float(snapshot.get("monthly_pnl_pct"), 0.0), 4),
         "intraday_pnl_pct": round(_safe_float(snapshot.get("intraday_pnl_pct"), 0.0), 4),
+        "equity_valid": bool(snapshot.get("equity_valid", True)),
         "lock_reached": bool(snapshot.get("lock_reached", False)),
         "floor_guard_required": bool(snapshot.get("floor_guard_required", False)),
         "intraday_stop_active": bool(snapshot.get("intraday_stop_active", False)),
@@ -728,10 +729,12 @@ def build_readiness_report(
 def _account_equity(*, wallet_balance, margin_balance, unrealized_pnl):
     margin = _safe_float(margin_balance, 0.0)
     if margin > 0:
-        return margin
+        return margin, True
     wallet = _safe_float(wallet_balance, 0.0)
+    if wallet <= 0:
+        return 0.0, False
     unrealized = _safe_float(unrealized_pnl, 0.0)
-    return max(0.0, wallet + unrealized)
+    return max(0.0, wallet + unrealized), True
 
 
 def update_shadow_state(
@@ -751,11 +754,13 @@ def update_shadow_state(
     month_key = month_key_from_ts(now)
     day_key = day_key_from_ts(now)
     previous = previous if isinstance(previous, dict) else {}
-    equity = round(_account_equity(
+    raw_equity, equity_valid = _account_equity(
         wallet_balance=wallet_balance,
         margin_balance=margin_balance,
         unrealized_pnl=unrealized_pnl,
-    ), 8)
+    )
+    previous_equity = _safe_float(previous.get("current_equity"), 0.0)
+    equity = round(raw_equity if equity_valid or previous_equity <= 0 else previous_equity, 8)
 
     month_changed = previous.get("month_key") != month_key
     day_changed = previous.get("day_key") != day_key
@@ -775,6 +780,8 @@ def update_shadow_state(
     floor_guard_required = lock_reached and monthly_pnl_pct < MONTHLY_LOCK_PCT
 
     reasons = []
+    if not equity_valid:
+        reasons.append("equity_unavailable")
     if intraday_stop_active:
         reasons.append("intraday_stop")
     if recovery_active:
@@ -813,6 +820,7 @@ def update_shadow_state(
         "month_start_equity": round(month_start_equity, 8),
         "day_start_equity": round(day_start_equity, 8),
         "current_equity": equity,
+        "equity_valid": bool(equity_valid),
         "monthly_pnl_pct": monthly_pnl_pct,
         "intraday_pnl_pct": intraday_pnl_pct,
         "month_high_pnl_pct": month_high_pnl_pct,

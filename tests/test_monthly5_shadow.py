@@ -84,6 +84,32 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertTrue(state["intraday_stop_active"])
         self.assertEqual(state["suggested_exposure_scale"], 0.0)
 
+    def test_missing_account_equity_does_not_trigger_false_intraday_stop(self):
+        previous = {
+            "month_key": "2026-08",
+            "day_key": "2026-08-05",
+            "month_start_equity": 1000.0,
+            "day_start_equity": 1000.0,
+            "current_equity": 1000.0,
+        }
+        state = monthly5_shadow.update_shadow_state(
+            previous,
+            now_ts=taipei_ts("2026-08-05T16:05:00"),
+            wallet_balance=0.0,
+            margin_balance=0.0,
+            unrealized_pnl=-0.04,
+            position_open=True,
+            position_side="long",
+            position_notional=64.0,
+        )
+
+        self.assertFalse(state["equity_valid"])
+        self.assertEqual(state["current_equity"], 1000.0)
+        self.assertEqual(state["monthly_pnl_pct"], 0.0)
+        self.assertEqual(state["intraday_pnl_pct"], 0.0)
+        self.assertFalse(state["intraday_stop_active"])
+        self.assertEqual(state["mode"], "normal")
+
     def test_persistence_round_trip(self):
         payload = {"strategy_id": monthly5_shadow.STRATEGY_ID, "mode": "normal"}
         with tempfile.TemporaryDirectory() as tmpdir:
