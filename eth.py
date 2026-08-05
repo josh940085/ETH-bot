@@ -5943,6 +5943,11 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
         )
         if position_open and not decision:
+            active_underperforming_keys = {
+                str(key)
+                for key in (readiness_report.get("shadow_active_underperforming_plan_keys") or [])
+                if str(key)
+            }
             entry_selection = (
                 active_trade.get("monthly5_entry_selection")
                 if isinstance(active_trade.get("monthly5_entry_selection"), dict)
@@ -5962,6 +5967,24 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                 )
                 reason_codes = set(str(code) for code in market_selection.get("reason_codes") or [] if code)
                 reason_codes.add("entry_selection_preserved")
+                selection_key = "|".join(
+                    (
+                        str(market_selection.get("selected_plan") or ""),
+                        str(market_selection.get("shadow_action") or ""),
+                        str(market_selection.get("market_bias") or ""),
+                        str(market_selection.get("market_state") or ""),
+                    )
+                )
+                if selection_key in active_underperforming_keys:
+                    market_selection["exposure_cap"] = round(
+                        min(
+                            _safe_float(market_selection.get("exposure_cap"), 1.0),
+                            monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP,
+                        ),
+                        4,
+                    )
+                    reason_codes.add("active_underperforming_position_cap")
+                    market_selection["rationale"] = "持倉同類市場組近期負報酬，降至低曝險觀察"
                 market_selection["reason_codes"] = sorted(reason_codes)
         snapshot["market_selection"] = market_selection
         guard = monthly5_shadow.build_execution_guard(
