@@ -1139,6 +1139,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -1169,6 +1170,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": True},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -1195,6 +1197,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -1229,6 +1232,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -1247,6 +1251,48 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(override["direction"], "long")
         self.assertEqual(override["position_size"], 0.15)
 
+    def test_monthly5_signal_override_requires_promotion_ready(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（RR不足）",
+            "score": 0.51,
+            "atr": 80.0,
+            "event_risk": 0,
+            "ai_prob": 0.52,
+            "ai_long_prob": 0.53,
+            "ai_short_prob": 0.47,
+            "net_edge_rate_est": 0.0012,
+            "breakout_attempt": 0,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "promotion_ready": False,
+            "promotion_blockers": ["sample_span"],
+            "promotion_blocker_details": [
+                {
+                    "code": "sample_span",
+                    "label": "樣本時間",
+                    "remaining_hours": 12.7,
+                }
+            ],
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.35,
+                "reason_codes": ["underperforming_probe_success"],
+            },
+        }
+
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "", "last_close_ts": 0}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertFalse(override["applied"])
+        self.assertEqual(override["reason"], "monthly5_promotion_not_ready")
+        self.assertIn("sample_span", override["promotion_blockers"])
+
     def test_monthly5_signal_override_blocks_rr_wait_when_edge_or_breakout_is_weak(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
         decision = {
@@ -1261,6 +1307,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -1297,6 +1344,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -1336,6 +1384,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -1365,6 +1414,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "underperforming_wait",
                 "shadow_action": "wait",
@@ -1389,6 +1439,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "macro_indicator_alignment": {"hard_block": False},
         }
         monthly5_state = {
+            "promotion_ready": True,
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",

@@ -181,6 +181,43 @@ class StrategyWaitConditionsTests(unittest.TestCase):
         self.assertEqual(result[0]["target"], "低於 10.0s")
         self.assertIn("Mark Price", result[0]["detail"])
 
+    def test_monthly5_override_gate_explains_promotion_not_ready(self):
+        decision = {
+            "final": "觀望（MLX回測輪廓不佳）",
+            "monthly5_signal_override": {
+                "applied": False,
+                "reason": "monthly5_promotion_not_ready",
+                "promotion_blocker_details": [
+                    {
+                        "code": "sample_span",
+                        "label": "樣本時間",
+                        "remaining_hours": 12.7,
+                    },
+                    {
+                        "code": "shadow_projection_not_valid",
+                        "label": "月化投影有效性",
+                        "observed_target_gap_pct": 0.3455,
+                    },
+                ],
+            },
+        }
+
+        with patch.dict(
+            eth.POSITION_PANEL_STATE,
+            {"last_close_reason": "", "last_sl_review": {}},
+            clear=False,
+        ):
+            result = eth._build_strategy_wait_conditions(
+                decision,
+                64129.6,
+                "waiting",
+                "觀望（MLX回測輪廓不佳）",
+            )
+
+        self.assertEqual(result[0]["key"], "monthly5_override_gate")
+        self.assertEqual(result[0]["current"], "樣本時間、月化投影有效性；缺口 0.3455%")
+        self.assertEqual(result[0]["target"], "promotion_ready=true")
+
 
 if __name__ == "__main__":
     unittest.main()

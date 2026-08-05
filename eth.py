@@ -6025,6 +6025,9 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             max_age_sec=None,
             max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
         )
+        snapshot["promotion_ready"] = bool(readiness_report.get("promotion_ready", False))
+        snapshot["promotion_blockers"] = list(readiness_report.get("promotion_blockers") or [])
+        snapshot["promotion_blocker_details"] = list(readiness_report.get("promotion_blocker_details") or [])
         market_selection = monthly5_shadow.build_market_selection(
             snapshot,
             strategy_signal=effective_strategy_signal,
@@ -6221,6 +6224,17 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
             "applied": False,
             "reason": "micro_probe_requires_host_signal",
             "selected_plan": selected_plan,
+        }
+    if (
+        _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1"))
+        and not bool(monthly5_state.get("promotion_ready", False))
+    ):
+        return {
+            "applied": False,
+            "reason": "monthly5_promotion_not_ready",
+            "selected_plan": selected_plan,
+            "promotion_blockers": list(monthly5_state.get("promotion_blockers") or [])[:5],
+            "promotion_blocker_details": list(monthly5_state.get("promotion_blocker_details") or [])[:5],
         }
 
     macro_alignment = decision.get("macro_indicator_alignment") if isinstance(decision.get("macro_indicator_alignment"), dict) else {}
@@ -10026,6 +10040,22 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
             elif override_reason == "monthly5_plan_blocked":
                 current = str(override.get("selected_plan") or override_reason)
                 target = "月報酬5%市場選擇解除阻擋"
+            elif override_reason == "monthly5_promotion_not_ready":
+                details = [
+                    item
+                    for item in (override.get("promotion_blocker_details") or [])
+                    if isinstance(item, dict)
+                ]
+                labels = [str(item.get("label") or item.get("code") or "") for item in details if str(item.get("label") or item.get("code") or "")]
+                gap_items = [
+                    item
+                    for item in details
+                    if "observed_target_gap_pct" in item
+                ]
+                current = "、".join(labels[:2]) if labels else "promotion_ready=false"
+                if gap_items:
+                    current = f"{current}；缺口 {gap_items[0].get('observed_target_gap_pct')}%"
+                target = "promotion_ready=true"
             add_condition(
                 "monthly5_override_gate",
                 "月報酬5%接管安全",
