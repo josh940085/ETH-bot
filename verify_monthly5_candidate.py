@@ -43,6 +43,74 @@ def _pick_leverage(top_pick: str) -> int | None:
     return int(match.group(1))
 
 
+def _candidate_audit(summary: dict, spec: dict) -> dict:
+    evidence = spec.get("backtest_evidence") or {}
+    top = summary.get("top") or []
+    if not top or not isinstance(top[0], dict):
+        return {}
+    best = top[0]
+    expected_name = str(evidence.get("candidate_name") or "")
+    monthly_path = Path(str(evidence.get("source_monthly") or ""))
+    monthly = _load_json(monthly_path) if monthly_path.exists() else {}
+    rows = monthly.get(expected_name)
+    if not isinstance(rows, list):
+        rows = []
+
+    floor = float((spec.get("objective") or {}).get("monthly_return_floor_pct", 5.0))
+    complete_months_end = str(evidence.get("complete_months_end") or "")
+    complete_rows = [
+        row
+        for row in rows
+        if isinstance(row, dict) and str(row.get("month") or "") <= complete_months_end
+    ]
+    complete_ge_floor = [
+        row
+        for row in complete_rows
+        if float(row.get("return_pct", -1000.0)) >= floor
+    ]
+    latest_row = rows[-1] if rows and isinstance(rows[-1], dict) else {}
+    worst_complete = (
+        min(complete_rows, key=lambda row: float(row.get("return_pct", 0.0)))
+        if complete_rows
+        else {}
+    )
+    leverages = [
+        leverage
+        for row in rows
+        if isinstance(row, dict)
+        for leverage in [_pick_leverage(str(row.get("top_pick") or ""))]
+        if leverage is not None
+    ]
+    complete_hit_rate_pct = (
+        (len(complete_ge_floor) / len(complete_rows)) * 100.0
+        if complete_rows
+        else 0.0
+    )
+    return {
+        "name": str(best.get("name") or ""),
+        "period_start": str(evidence.get("period_start") or ""),
+        "period_end": str(evidence.get("period_end") or ""),
+        "complete_months_end": complete_months_end,
+        "complete_months": len(complete_rows),
+        "complete_months_ge_floor": len(complete_ge_floor),
+        "complete_hit_rate_pct": round(complete_hit_rate_pct, 4),
+        "months": len(rows),
+        "months_ge_5": int(best.get("months_ge_5", 0)),
+        "months_ge_0": int(best.get("months_ge_0", 0)),
+        "total_pct": round(float(best.get("total_pct", 0.0)), 4),
+        "avg_month_pct": round(float(best.get("avg_month_pct", 0.0)), 4),
+        "avg_flat_time_pct": round(float(best.get("avg_flat_time_pct", 0.0)), 4),
+        "worst_intramonth_pnl_pct": round(float(best.get("worst_intramonth_pnl_pct", 0.0)), 4),
+        "worst_complete_month": str(worst_complete.get("month") or ""),
+        "worst_complete_return_pct": round(float(worst_complete.get("return_pct", 0.0)), 4) if worst_complete else 0.0,
+        "latest_month": str(latest_row.get("month") or ""),
+        "latest_month_return_pct": round(float(latest_row.get("return_pct", 0.0)), 4) if latest_row else 0.0,
+        "latest_month_flat_time_pct": round(float(latest_row.get("flat_time_pct", 0.0)), 4) if latest_row else 0.0,
+        "max_leverage_used": max(leverages) if leverages else 0,
+        "floor_pct": floor,
+    }
+
+
 def _failures(summary: dict, spec: dict) -> list[str]:
     evidence = spec.get("backtest_evidence") or {}
     top = summary.get("top") or []
@@ -188,10 +256,19 @@ def main() -> int:
         return 1
 
     best = summary["top"][0]
+    audit = _candidate_audit(summary, spec)
     print(
         "PASS "
         f"{best.get('name')} months_ge_5={best.get('months_ge_5')} "
         f"months_ge_0={best.get('months_ge_0')} "
+        f"complete_months_ge_5={audit.get('complete_months_ge_floor', 0)}/{audit.get('complete_months', 0)} "
+        f"complete_hit_rate_pct={audit.get('complete_hit_rate_pct', 0.0)} "
+        f"total_pct={audit.get('total_pct', 0.0)} "
+        f"latest_month={audit.get('latest_month', '')} "
+        f"latest_month_return_pct={audit.get('latest_month_return_pct', 0.0)} "
+        f"worst_complete_month={audit.get('worst_complete_month', '')} "
+        f"worst_complete_return_pct={audit.get('worst_complete_return_pct', 0.0)} "
+        f"max_leverage_used={audit.get('max_leverage_used', 0)} "
         f"worst_intramonth_pnl_pct={best.get('worst_intramonth_pnl_pct')} "
         f"avg_flat_time_pct={best.get('avg_flat_time_pct')}"
     )

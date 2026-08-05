@@ -83,6 +83,20 @@ class VerifyMonthly5CandidateTests(unittest.TestCase):
 
         self.assertEqual(failures, [])
 
+    def test_candidate_audit_reports_complete_month_hit_rate_and_latest_month(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            summary, spec = self._write_inputs(Path(tmpdir))
+
+            audit = verify_monthly5_candidate._candidate_audit(summary, spec)
+
+        self.assertEqual(audit["complete_months_ge_floor"], 2)
+        self.assertEqual(audit["complete_months"], 2)
+        self.assertEqual(audit["complete_hit_rate_pct"], 100.0)
+        self.assertEqual(audit["latest_month"], "2020-03")
+        self.assertEqual(audit["latest_month_return_pct"], 1.0)
+        self.assertEqual(audit["worst_complete_month"], "2020-01")
+        self.assertEqual(audit["max_leverage_used"], 5)
+
     def test_candidate_verifier_rejects_complete_month_below_floor(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             rows = [
