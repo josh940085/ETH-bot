@@ -96,6 +96,7 @@ def main() -> int:
             f"shadow_suppressed_recovery_remaining_intervals={report.get('shadow_suppressed_recovery_remaining_intervals', 0)} "
             f"shadow_recovery_probe_state={report.get('shadow_recovery_probe_state', '')} "
             f"shadow_recovery_probe_success_count={report.get('shadow_recovery_probe_success_count', 0)} "
+            f"shadow_recovery_probe_candidate_count={report.get('shadow_recovery_probe_candidate_count', 0)} "
             f"shadow_recovery_probe_failed_count={report.get('shadow_recovery_probe_failed_count', 0)} "
             f"shadow_recovery_probe_observed_intervals={report.get('shadow_recovery_probe_observed_intervals', 0)} "
             f"shadow_recovery_probe_remaining_intervals={report.get('shadow_recovery_probe_remaining_intervals', 0)} "

@@ -14,6 +14,7 @@ MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
 ROLLING_WINDOW_HOURS = 24.0
 RECOVERY_PROBE_EXPOSURE_CAP = 0.15
+UNDERPERFORMING_MICRO_PROBE_EXPOSURE_CAP = 0.05
 SUPPRESSED_RECOVERY_MIN_INTERVALS = 12
 RECOVERY_PROBE_MIN_INTERVALS = 12
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
@@ -357,6 +358,32 @@ def _build_grouped_paper_return(rows, *, min_intervals=12, max_groups=5, suppres
     }
 
 
+def _candidate_probe_keys(grouped_paper, *, min_intervals=None, min_win_rate_pct=50.0):
+    min_intervals = max(
+        1,
+        _safe_int(
+            min_intervals,
+            max(1, RECOVERY_PROBE_MIN_INTERVALS // 2),
+        ),
+    )
+    min_win_rate_pct = max(0.0, min(100.0, _safe_float(min_win_rate_pct, 50.0)))
+    candidates = []
+    for item in grouped_paper.get("shadow_grouped_paper_returns") or []:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "")
+        if not key:
+            continue
+        if _safe_int(item.get("intervals"), 0) < min_intervals:
+            continue
+        if _safe_float(item.get("return_pct"), 0.0) <= 0.0:
+            continue
+        if _safe_float(item.get("win_rate_pct"), 0.0) < min_win_rate_pct:
+            continue
+        candidates.append(key)
+    return candidates
+
+
 def _build_shadow_monthly_projection(shadow_paper, span_hours, *, min_projection_span_hours=24.0):
     span_hours = max(0.0, _safe_float(span_hours, 0.0))
     min_projection_span_hours = max(0.0, _safe_float(min_projection_span_hours, 24.0))
@@ -639,6 +666,11 @@ def build_readiness_report(
         _safe_int(item.get("intervals"), 0)
         for item in rolling_probe_grouped_paper["shadow_grouped_paper_returns"]
     )
+    recovery_probe_candidate_min_intervals = max(1, RECOVERY_PROBE_MIN_INTERVALS // 2)
+    probe_candidate_keys = _candidate_probe_keys(
+        rolling_probe_grouped_paper,
+        min_intervals=recovery_probe_candidate_min_intervals,
+    )
     recovery_probe_remaining_intervals = max(
         0,
         RECOVERY_PROBE_MIN_INTERVALS - recovery_probe_observed_intervals,
@@ -810,6 +842,9 @@ def build_readiness_report(
         "shadow_suppressed_recovery_progress_pct": round(max(0.0, suppressed_recovery_progress_pct), 4),
         "shadow_recovery_probe_success_keys": list(probe_success_keys),
         "shadow_recovery_probe_success_count": len(probe_success_keys),
+        "shadow_recovery_probe_candidate_keys": list(probe_candidate_keys),
+        "shadow_recovery_probe_candidate_count": len(probe_candidate_keys),
+        "shadow_recovery_probe_candidate_min_intervals": recovery_probe_candidate_min_intervals,
         "shadow_recovery_probe_failed_keys": list(probe_failed_keys),
         "shadow_recovery_probe_failed_count": len(probe_failed_keys),
         "shadow_recovery_probe_grouped_paper_returns": list(rolling_probe_grouped_paper["shadow_grouped_paper_returns"]),
@@ -970,6 +1005,7 @@ def build_market_selection(
     underperforming_plan_keys=None,
     recovering_plan_keys=None,
     probe_success_plan_keys=None,
+    probe_candidate_plan_keys=None,
 ):
     shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
     strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
@@ -1074,6 +1110,11 @@ def build_market_selection(
         for key in (probe_success_plan_keys or [])
         if str(key)
     }
+    probe_candidate_keys = {
+        str(key)
+        for key in (probe_candidate_plan_keys or [])
+        if str(key)
+    }
     suppressed_plan = ""
     suppressed_action = ""
     suppressed_key = ""
@@ -1089,7 +1130,17 @@ def build_market_selection(
         recovery_probe = True
         recovery_probe_key = selection_key
         rationale = "近期假想恢復表現轉正，使用低曝險探測是否可恢復月報酬5%策略"
-    if shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in underperforming_keys:
+    if (
+        shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"}
+        and selection_key in underperforming_keys
+        and selection_key in probe_candidate_keys
+    ):
+        exposure_cap = round(min(exposure_cap, UNDERPERFORMING_MICRO_PROBE_EXPOSURE_CAP), 4)
+        reason_codes.append("underperforming_micro_probe")
+        recovery_probe = True
+        recovery_probe_key = selection_key
+        rationale = "同類市場仍偏弱但低曝險探測半程轉正，僅允許5%倉位驗證以降低空倉"
+    elif shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in underperforming_keys:
         suppressed_plan = selected_plan
         suppressed_action = shadow_action
         suppressed_key = selection_key

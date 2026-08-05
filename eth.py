@@ -5941,6 +5941,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             underperforming_plan_keys=readiness_report.get("shadow_active_underperforming_plan_keys") or [],
             recovering_plan_keys=readiness_report.get("shadow_suppressed_recovering_plan_keys") or [],
             probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
+            probe_candidate_plan_keys=readiness_report.get("shadow_recovery_probe_candidate_keys") or [],
         )
         if position_open and not decision:
             active_underperforming_keys = {
@@ -6238,6 +6239,9 @@ def _build_monthly5_readiness_panel_state():
             "shadow_suppressed_recovery_progress_pct": round(_safe_float(report.get("shadow_suppressed_recovery_progress_pct"), 0.0), 4),
             "shadow_recovery_probe_success_keys": list(report.get("shadow_recovery_probe_success_keys") or [])[:5],
             "shadow_recovery_probe_success_count": _safe_int(report.get("shadow_recovery_probe_success_count"), 0),
+            "shadow_recovery_probe_candidate_keys": list(report.get("shadow_recovery_probe_candidate_keys") or [])[:5],
+            "shadow_recovery_probe_candidate_count": _safe_int(report.get("shadow_recovery_probe_candidate_count"), 0),
+            "shadow_recovery_probe_candidate_min_intervals": _safe_int(report.get("shadow_recovery_probe_candidate_min_intervals"), 6),
             "shadow_recovery_probe_failed_keys": list(report.get("shadow_recovery_probe_failed_keys") or [])[:5],
             "shadow_recovery_probe_failed_count": _safe_int(report.get("shadow_recovery_probe_failed_count"), 0),
             "shadow_recovery_probe_grouped_paper_returns": list(report.get("shadow_recovery_probe_grouped_paper_returns") or [])[:5],

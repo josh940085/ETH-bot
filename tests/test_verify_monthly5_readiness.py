@@ -490,6 +490,42 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         )
         self.assertAlmostEqual(report["shadow_recovery_probe_progress_pct"], 25.0, places=4)
 
+    def test_recovery_probe_candidate_keys_after_positive_half_probe(self):
+        rows = []
+        for idx in range((monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS // 2) + 1):
+            row = self._row(
+                1000 + idx * 60,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=100.0 + idx,
+                exposure_cap=monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP,
+                max_leverage=1,
+            )
+            row["recovery_probe"] = True
+            row["recovery_probe_key"] = "normal_long_selector|evaluate_long|bullish|chop"
+            rows.append(row)
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=len(rows),
+            min_span_hours=0.01,
+            max_age_sec=None,
+            now_ts=1000 + (len(rows) - 1) * 60,
+        )
+
+        self.assertEqual(report["shadow_recovery_probe_state"], "probing")
+        self.assertIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            report["shadow_recovery_probe_candidate_keys"],
+        )
+        self.assertEqual(report["shadow_recovery_probe_candidate_count"], 1)
+        self.assertEqual(
+            report["shadow_recovery_probe_candidate_min_intervals"],
+            monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS // 2,
+        )
+
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [
             self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.1, max_leverage=1),
