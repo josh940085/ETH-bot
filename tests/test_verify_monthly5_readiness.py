@@ -528,6 +528,55 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             failure["shadow_active_underperforming_plan_keys"],
         )
 
+    def test_probe_failure_takes_priority_over_suppressed_recovery(self):
+        rows = []
+        key = "normal_long_selector|evaluate_long|bullish|chop"
+        base_ts = 1000
+        for idx in range(monthly5_shadow.SUPPRESSED_RECOVERY_MIN_INTERVALS + 1):
+            row = self._row(
+                base_ts + idx * 60,
+                action="wait",
+                plan="underperforming_wait",
+                mark_price=90.0 + idx,
+                exposure_cap=0.0,
+                max_leverage=1,
+            )
+            row["suppressed_plan"] = "normal_long_selector"
+            row["suppressed_action"] = "evaluate_long"
+            row["suppressed_key"] = key
+            row["suppressed_exposure_cap"] = 0.5
+            rows.append(row)
+
+        probe_base_ts = base_ts + 30 * 60
+        for idx in range(monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS + 1):
+            row = self._row(
+                probe_base_ts + idx * 60,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=120.0 - idx,
+                exposure_cap=monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP,
+                max_leverage=1,
+            )
+            row["recovery_probe"] = True
+            row["recovery_probe_key"] = key
+            rows.append(row)
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=len(rows),
+            min_span_hours=0.01,
+            max_age_sec=None,
+            now_ts=probe_base_ts + monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS * 60,
+        )
+
+        self.assertEqual(report["shadow_recovery_probe_state"], "probe_failed")
+        self.assertIn(key, report["shadow_recovery_probe_failed_keys"])
+        self.assertIn(key, report["shadow_active_underperforming_plan_keys"])
+        self.assertNotIn(key, report["shadow_suppressed_recovering_plan_keys"])
+        self.assertIn("active_underperforming_plan", report["promotion_blockers"])
+
     def test_probe_success_removes_matching_active_underperforming_key(self):
         rows = []
         for idx in range(13):

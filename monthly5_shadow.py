@@ -979,6 +979,7 @@ def build_readiness_report(
     recovering_keys = set(rolling_suppressed_grouped_paper["shadow_recovering_plan_keys"])
     probe_failed_keys = set(rolling_probe_grouped_paper["shadow_underperforming_plan_keys"])
     probe_success_keys = set(rolling_probe_grouped_paper["shadow_recovering_plan_keys"])
+    effective_recovering_keys = recovering_keys - probe_failed_keys - probe_success_keys
     if probe_failed_keys:
         recovery_probe_state = "probe_failed"
     elif probe_success_keys:
@@ -994,10 +995,10 @@ def build_readiness_report(
     active_underperforming_keys = sorted(
         (
             set(rolling_grouped_paper["shadow_underperforming_plan_keys"])
-            | probe_failed_keys
         )
-        - recovering_keys
+        - effective_recovering_keys
         - probe_success_keys
+        | probe_failed_keys
     )
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
@@ -1266,8 +1267,8 @@ def build_readiness_report(
         "shadow_active_underperforming_plan_keys": list(active_underperforming_keys),
         "shadow_active_underperforming_plan_count": len(active_underperforming_keys),
         "shadow_active_grouped_paper_returns": list(rolling_grouped_paper["shadow_grouped_paper_returns"]),
-        "shadow_suppressed_recovering_plan_keys": list(rolling_suppressed_grouped_paper["shadow_recovering_plan_keys"]),
-        "shadow_suppressed_recovering_plan_count": rolling_suppressed_grouped_paper["shadow_recovering_plan_count"],
+        "shadow_suppressed_recovering_plan_keys": sorted(effective_recovering_keys),
+        "shadow_suppressed_recovering_plan_count": len(effective_recovering_keys),
         "shadow_suppressed_grouped_paper_returns": list(rolling_suppressed_grouped_paper["shadow_grouped_paper_returns"]),
         "shadow_suppressed_recovery_min_intervals": SUPPRESSED_RECOVERY_MIN_INTERVALS,
         "shadow_suppressed_observed_intervals": suppressed_observed_intervals,
