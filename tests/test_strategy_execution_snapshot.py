@@ -1357,20 +1357,23 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                     "shadow_action": "wait",
                     "exposure_cap": 1.0,
                 },
-            ),
+            ) as build_market_selection,
             patch.object(eth.monthly5_shadow, "save_state"),
             patch.object(eth.monthly5_shadow, "append_history"),
         ):
             snapshot = eth._update_monthly5_shadow_panel_state(
                 64000.0,
-                strategy_signal="long",
+                decision={"final": "觀望（測試持倉刷新）"},
+                strategy_signal="wait",
                 strategy_execution_reason="position_open",
             )
 
         selection = snapshot["market_selection"]
         self.assertEqual(selection["selected_plan"], "normal_long_selector")
         self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["strategy_signal"], "long")
         self.assertIn("entry_selection_preserved", selection["reason_codes"])
+        self.assertEqual(build_market_selection.call_args.kwargs["strategy_signal"], "long")
 
     def test_monthly5_shadow_caps_preserved_position_when_entry_group_underperforms(self):
         eth.active_trade.update(

@@ -5882,7 +5882,12 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
         position_open = bool(active_trade.get("open")) or position_qty > 0
         position_side = str(
             active_trade.get("direction") or POSITION_PANEL_STATE.get("direction") or ""
-        )
+        ).lower()
+        effective_strategy_signal = str(
+            strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait"
+        ).lower()
+        if position_open and position_side in {"long", "short"}:
+            effective_strategy_signal = position_side
         snapshot = monthly5_shadow.update_shadow_state(
             previous,
             now_ts=time.time(),
@@ -5908,7 +5913,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
         )
         market_selection = monthly5_shadow.build_market_selection(
             snapshot,
-            strategy_signal=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait"),
+            strategy_signal=effective_strategy_signal,
             strategy_execution_reason=str(
                 strategy_execution_reason
                 or POSITION_PANEL_STATE.get("strategy_execution_reason")
@@ -5943,7 +5948,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
             probe_candidate_plan_keys=readiness_report.get("shadow_recovery_probe_candidate_keys") or [],
         )
-        if position_open and not decision:
+        if position_open:
             active_underperforming_keys = {
                 str(key)
                 for key in (readiness_report.get("shadow_active_underperforming_plan_keys") or [])
@@ -5956,7 +5961,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             )
             if str(entry_selection.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}:
                 market_selection = dict(entry_selection)
-                market_selection["strategy_signal"] = str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait")
+                market_selection["strategy_signal"] = effective_strategy_signal
                 market_selection["strategy_execution_reason"] = str(
                     strategy_execution_reason
                     or POSITION_PANEL_STATE.get("strategy_execution_reason")
@@ -5990,7 +5995,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
         snapshot["market_selection"] = market_selection
         guard = monthly5_shadow.build_execution_guard(
             snapshot,
-            direction=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or ""),
+            direction=effective_strategy_signal,
             requested_size=_safe_float((decision or {}).get("position_size"), 0.0),
         )
         POSITION_PANEL_STATE["monthly5_execution_guard"] = guard
