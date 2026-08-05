@@ -181,7 +181,7 @@ def _open_position_wait_row(row):
     if not isinstance(row, dict):
         return False
     side = str(row.get("position_side") or "").lower()
-    if side not in {"long", "short"}:
+    if side not in {"", "long", "short"}:
         return False
     if not (bool(row.get("position_open", False)) or _safe_float(row.get("position_notional"), 0.0) > 0.0):
         return False
@@ -210,7 +210,11 @@ def _apply_active_selection(row, selection):
     for key in ("market_bias", "market_state", "selected_plan", "shadow_action", "exposure_cap"):
         patched[key] = selection.get(key, patched.get(key))
     side = str(patched.get("position_side") or "").lower()
-    patched["strategy_signal"] = side if side in {"long", "short"} else str(selection.get("strategy_signal") or patched.get("strategy_signal") or "")
+    selection_signal = str(selection.get("strategy_signal") or "").lower()
+    if side not in {"long", "short"} and selection_signal in {"long", "short"}:
+        patched["position_side"] = selection_signal
+        side = selection_signal
+    patched["strategy_signal"] = side if side in {"long", "short"} else str(selection_signal or patched.get("strategy_signal") or "")
     return patched
 
 
@@ -224,28 +228,32 @@ def _carry_forward_active_position_rows(rows):
         key=lambda item: (_safe_int(item[1].get("updated_ts"), 0), item[0]),
     )
     last_selection_by_side = {}
+    last_selection_any = {}
     patched_by_idx = {}
     for idx, row in timed_rows:
         side = str(row.get("position_side") or "").lower()
-        if _open_position_wait_row(row) and side in last_selection_by_side:
-            row = _apply_active_selection(row, last_selection_by_side[side])
+        if _open_position_wait_row(row):
+            selection = last_selection_by_side.get(side) if side in {"long", "short"} else {}
+            row = _apply_active_selection(row, selection or last_selection_any)
+            side = str(row.get("position_side") or "").lower()
         if _active_shadow_action(row) and side in {"long", "short"}:
-            last_selection_by_side[side] = _selection_from_active_row(row)
+            selection = _selection_from_active_row(row)
+            last_selection_by_side[side] = selection
+            last_selection_any = selection
         patched_by_idx[idx] = row
     return [patched_by_idx.get(idx, row) for idx, row in enumerate(rows or [])]
 
 
 def _latest_active_selection(rows, side):
     side = str(side or "").lower()
-    if side not in {"long", "short"}:
-        return {}
     timed_rows = sorted(
         (row for row in rows or [] if isinstance(row, dict)),
         key=lambda row: _safe_int(row.get("updated_ts"), 0),
         reverse=True,
     )
     for row in timed_rows:
-        if str(row.get("position_side") or "").lower() == side and _active_shadow_action(row):
+        row_side = str(row.get("position_side") or "").lower()
+        if _active_shadow_action(row) and (side not in {"long", "short"} or row_side == side):
             return _selection_from_active_row(row)
     return {}
 

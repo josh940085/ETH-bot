@@ -192,6 +192,50 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(rows[-1]["strategy_signal"], "long")
         self.assertEqual(rows[-1]["exposure_cap"], 0.35)
 
+    def test_history_append_infers_side_for_open_position_wait_row(self):
+        active = monthly5_shadow.update_shadow_state(
+            {},
+            now_ts=taipei_ts("2026-08-05T12:00:00"),
+            margin_balance=1000.0,
+            mark_price=112000.0,
+            position_open=True,
+            position_side="long",
+            position_notional=100.0,
+        )
+        active["market_selection"] = {
+            "market_bias": "bullish",
+            "market_state": "chop",
+            "selected_plan": "normal_long_selector",
+            "shadow_action": "evaluate_long",
+            "exposure_cap": 0.35,
+            "strategy_signal": "long",
+        }
+        wait = monthly5_shadow.update_shadow_state(
+            active,
+            now_ts=taipei_ts("2026-08-05T12:05:01"),
+            margin_balance=1001.0,
+            mark_price=112100.0,
+            position_open=True,
+            position_side="",
+            position_notional=100.0,
+        )
+        wait["market_selection"] = {
+            "selected_plan": "normal_wait",
+            "shadow_action": "wait",
+            "exposure_cap": 1.0,
+            "strategy_signal": "wait",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "history.jsonl"
+            monthly5_shadow.append_history(path, active, {"allowed": True}, min_interval_sec=0)
+            monthly5_shadow.append_history(path, wait, {"allowed": True}, min_interval_sec=0)
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(rows[-1]["position_side"], "long")
+        self.assertEqual(rows[-1]["selected_plan"], "normal_long_selector")
+        self.assertEqual(rows[-1]["shadow_action"], "evaluate_long")
+
     def test_market_selection_chooses_normal_long_for_bullish_context(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},

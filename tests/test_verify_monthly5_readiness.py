@@ -668,6 +668,27 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["shadow_flat_sample_pct"], 0.0)
         self.assertGreater(report["shadow_paper_intervals"], 1)
 
+    def test_readiness_infers_side_for_open_position_wait_rows(self):
+        entry = self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, position_open=True)
+        entry["strategy_signal"] = "long"
+        entry["position_side"] = "long"
+        stale_wait = self._row(1300, action="wait", plan="normal_wait", mark_price=101.0, position_open=True)
+        stale_wait["strategy_signal"] = "wait"
+        stale_wait["position_side"] = ""
+
+        report = monthly5_shadow.build_readiness_report(
+            [entry, stale_wait],
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=2,
+            min_span_hours=0.0,
+            max_age_sec=None,
+            now_ts=1300,
+        )
+
+        self.assertEqual(report["evaluate_rows"], 2)
+        self.assertEqual(report["shadow_flat_sample_pct"], 0.0)
+
     def test_invalid_when_history_breaks_shadow_safety(self):
         row = self._row(1000)
         row["max_leverage"] = 6
