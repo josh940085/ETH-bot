@@ -9963,6 +9963,32 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
     else:
         add_condition("strategy_gate", "策略條件", reason_text.replace("觀望（", "").rstrip("）"), "下一輪策略評估通過", "等待新的已驗證行情快照")
 
+    sl_review = POSITION_PANEL_STATE.get("last_sl_review")
+    opposite_review = (
+        sl_review.get("opposite_direction_review")
+        if isinstance(sl_review, dict) and isinstance(sl_review.get("opposite_direction_review"), dict)
+        else {}
+    )
+    if (
+        str(POSITION_PANEL_STATE.get("last_close_reason") or "").upper() == "SL"
+        and opposite_review
+        and not bool(opposite_review.get("ready_for_fresh_evaluation", False))
+    ):
+        opposite = str(opposite_review.get("opposite_direction") or "")
+        label = "反向做空" if opposite == "short" else "反向做多" if opposite == "long" else "反向檢查"
+        missing = [
+            str(item)
+            for item in (opposite_review.get("missing_conditions") or [])
+            if str(item)
+        ]
+        add_condition(
+            "post_sl_opposite",
+            label,
+            "、".join(missing[:3]) if missing else "條件未完整",
+            "反向趨勢、突破、宏觀與機率同時成立",
+            "SL 後只重新評估反向機會，不自動反手；仍需正常 RR/TP/SL 與 Binance Mark Price 驗證",
+        )
+
     reclaim = decision.get("multitimeframe_bull_reclaim")
     reclaim = reclaim if isinstance(reclaim, dict) else {}
     diagnostics = reclaim.get("diagnostics") if isinstance(reclaim.get("diagnostics"), dict) else {}

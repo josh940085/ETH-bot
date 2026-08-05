@@ -16,7 +16,14 @@ class StrategyWaitConditionsTests(unittest.TestCase):
                 "diagnostics": {"required_price": 1943.73},
             },
         }
-        with patch.dict(os.environ, {"TRADE_MIN_ENTRY_RISK_RATE": "0.003"}, clear=False):
+        with (
+            patch.dict(os.environ, {"TRADE_MIN_ENTRY_RISK_RATE": "0.003"}, clear=False),
+            patch.dict(
+                eth.POSITION_PANEL_STATE,
+                {"last_close_reason": "", "last_sl_review": {}},
+                clear=False,
+            ),
+        ):
             result = eth._build_strategy_wait_conditions(
                 decision,
                 1930.76,
@@ -43,6 +50,56 @@ class StrategyWaitConditionsTests(unittest.TestCase):
         self.assertEqual(result[0]["key"], "entry_confirmation")
         self.assertEqual(result[0]["target"], "維持 15 秒")
         self.assertIn("Binance Mark Price", result[0]["detail"])
+
+    def test_recent_sl_opposite_review_is_shown_before_reclaim_hint(self):
+        decision = {
+            "final": "觀望（RR不足）",
+            "rr_at_entry": 1.6,
+            "breakout_attempt": 1,
+            "breakout_quality_score": 0.8,
+            "breakout_quality_required": 3.5,
+            "resistance_break_level": 64147.2,
+            "multitimeframe_bull_reclaim": {
+                "enabled": True,
+                "applied": False,
+                "diagnostics": {"required_price": 64615.15},
+            },
+        }
+        sl_review = {
+            "opposite_direction_review": {
+                "opposite_direction": "short",
+                "ready_for_fresh_evaluation": False,
+                "missing_conditions": [
+                    "4H未轉空",
+                    "反向突破未確認",
+                    "宏觀未支持反向",
+                ],
+            },
+        }
+
+        with patch.dict(
+            eth.POSITION_PANEL_STATE,
+            {
+                "last_close_reason": "SL",
+                "last_sl_review": sl_review,
+            },
+            clear=False,
+        ):
+            result = eth._build_strategy_wait_conditions(
+                decision,
+                64150.5,
+                "waiting",
+                "觀望（RR不足）",
+            )
+
+        self.assertEqual([item["key"] for item in result], [
+            "resistance_breakout",
+            "risk_reward",
+            "post_sl_opposite",
+        ])
+        self.assertEqual(result[2]["label"], "反向做空")
+        self.assertIn("4H未轉空", result[2]["current"])
+        self.assertIn("不自動反手", result[2]["detail"])
 
 
 if __name__ == "__main__":
