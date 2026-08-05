@@ -10004,6 +10004,35 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
                 "bias、期望值、突破品質與方向機率達標",
                 "月報酬5%策略只能接管普通觀望；MLX輪廓不佳時仍需額外品質確認",
             )
+        elif override:
+            override_reason = str(override.get("reason") or "monthly5_not_ready")
+            current = override_reason
+            target = "月報酬5%接管安全門檻通過"
+            if override_reason == "mark_price_stale":
+                price_age = _safe_float(override.get("price_age"), 0.0)
+                max_age = max(
+                    3.0,
+                    _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_PRICE_AGE_SEC", 10.0), 10.0),
+                )
+                current = f"Mark Price {price_age:.1f}s"
+                target = f"低於 {max_age:.1f}s"
+            elif override_reason == "monthly5_wait_override_sl_cooldown":
+                remaining = _safe_float(override.get("cooldown_remaining_sec"), 0.0)
+                current = f"SL冷卻剩 {remaining:.0f}s"
+                target = "冷卻結束後重新評估"
+            elif override_reason == "event_risk":
+                current = f"事件風險 {override.get('event_risk')}"
+                target = "事件風險回到允許範圍"
+            elif override_reason == "monthly5_plan_blocked":
+                current = str(override.get("selected_plan") or override_reason)
+                target = "月報酬5%市場選擇解除阻擋"
+            add_condition(
+                "monthly5_override_gate",
+                "月報酬5%接管安全",
+                current,
+                target,
+                "月報酬5%策略接管前仍需通過 Mark Price、事件風險、SL冷卻與計畫狀態檢查",
+            )
         else:
             add_condition(
                 "strategy_gate",

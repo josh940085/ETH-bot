@@ -146,6 +146,41 @@ class StrategyWaitConditionsTests(unittest.TestCase):
         self.assertIn("期望值 +0.010%<+0.300%", result[1]["current"])
         self.assertIn("突破 2.8/3.5", result[1]["current"])
 
+    def test_monthly5_override_gate_explains_stale_mark_price(self):
+        decision = {
+            "final": "觀望（MLX回測輪廓不佳）",
+            "monthly5_signal_override": {
+                "applied": False,
+                "reason": "mark_price_stale",
+                "price_age": 10.2039,
+            },
+        }
+
+        with (
+            patch.dict(
+                os.environ,
+                {"MONTHLY5_SIGNAL_OVERRIDE_MAX_PRICE_AGE_SEC": "10"},
+                clear=False,
+            ),
+            patch.dict(
+                eth.POSITION_PANEL_STATE,
+                {"last_close_reason": "", "last_sl_review": {}},
+                clear=False,
+            ),
+        ):
+            result = eth._build_strategy_wait_conditions(
+                decision,
+                64129.6,
+                "waiting",
+                "觀望（MLX回測輪廓不佳）",
+            )
+
+        self.assertEqual(result[0]["key"], "monthly5_override_gate")
+        self.assertEqual(result[0]["label"], "月報酬5%接管安全")
+        self.assertEqual(result[0]["current"], "Mark Price 10.2s")
+        self.assertEqual(result[0]["target"], "低於 10.0s")
+        self.assertIn("Mark Price", result[0]["detail"])
+
 
 if __name__ == "__main__":
     unittest.main()
