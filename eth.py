@@ -9121,6 +9121,30 @@ def restore_active_trade_from_panel():
                 "reason_codes": ["restored_from_position_guard"],
                 "rationale": "從持倉風控狀態還原月報酬5%入場選擇",
             }
+    if not monthly5_entry_selection:
+        readiness = raw.get("monthly5_readiness") if isinstance(raw.get("monthly5_readiness"), dict) else {}
+        success_keys = [str(key) for key in readiness.get("shadow_recovery_probe_success_keys") or []]
+        expected_action = "evaluate_long" if direction == "long" else "evaluate_short"
+        restored_key = next(
+            (
+                key
+                for key in success_keys
+                if len(key.split("|")) >= 2 and key.split("|")[1] == expected_action
+            ),
+            "",
+        )
+        if restored_key:
+            parts = restored_key.split("|")
+            monthly5_entry_selection = {
+                "selected_plan": parts[0],
+                "shadow_action": parts[1],
+                "market_bias": parts[2] if len(parts) > 2 else "",
+                "market_state": parts[3] if len(parts) > 3 else "",
+                "exposure_cap": 0.35,
+                "max_leverage": 5,
+                "reason_codes": ["restored_from_probe_success"],
+                "rationale": "從月報酬5%恢復探測成功狀態還原入場選擇",
+            }
     active_trade["monthly5_entry_selection"] = dict(monthly5_entry_selection)
     active_trade["open_time"] = _safe_float(raw.get("open_since_ts"), state_ts or time.time())
     active_trade["tp_sl_adjusted_4h"] = bool(raw.get("tp_sl_adjusted_4h", False))
@@ -9143,7 +9167,9 @@ if LIVE_RUNTIME_ENABLED:
 
     # 重啟後預設清除舊持倉，避免「重新開倉」時仍卡在舊單狀態。
     if str(os.getenv("CLEAR_OLD_TRADE_ON_START", "1")).strip() == "1" and active_trade.get("open"):
-        if _read_pending_training_sample_state_raw():
+        if _safe_float(active_trade.get("position_qty"), 0.0) > 0:
+            print("♻️ 偵測到 Binance 實倉，保留重啟還原持倉狀態")
+        elif _read_pending_training_sample_state_raw():
             print("♻️ 偵測到待學習中的舊持倉，保留持倉狀態以延續 TP/SL 學習")
         else:
             print("♻️ 偵測到重啟後舊持倉，已清除舊單狀態以允許重新開倉")

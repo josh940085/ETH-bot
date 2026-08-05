@@ -745,6 +745,43 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         finally:
             eth.POSITION_PANEL_FILE = old_path
 
+    def test_restore_active_trade_recovers_monthly5_selection_from_probe_success(self):
+        old_path = eth.POSITION_PANEL_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                eth.POSITION_PANEL_FILE = Path(tmpdir) / "position.json"
+                eth.POSITION_PANEL_FILE.write_text(
+                    json.dumps(
+                        {
+                            "open": True,
+                            "direction": "long",
+                            "entry": 64014.9,
+                            "tp": 64201.93,
+                            "sl": 63881.88,
+                            "size_ratio": 0.136,
+                            "binance_qty": 0.001,
+                            "ts": int(eth.time.time()),
+                            "monthly5_readiness": {
+                                "shadow_recovery_probe_success_keys": [
+                                    "normal_long_selector|evaluate_long|bullish|chop"
+                                ]
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                eth.restore_active_trade_from_panel()
+
+            self.assertTrue(eth.active_trade["open"])
+            self.assertEqual(eth.active_trade["position_qty"], 0.001)
+            selection = eth.active_trade["monthly5_entry_selection"]
+            self.assertEqual(selection["selected_plan"], "normal_long_selector")
+            self.assertEqual(selection["shadow_action"], "evaluate_long")
+            self.assertIn("restored_from_probe_success", selection["reason_codes"])
+        finally:
+            eth.POSITION_PANEL_FILE = old_path
+
     def test_panel_marks_binance_as_authoritative_for_real_position(self):
         eth.active_trade.update(
             {
