@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from datetime import datetime
@@ -143,6 +144,53 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn('"selected_plan": "normal_long_selector"', rows[0])
         self.assertIn('"guard_allowed": true', rows[0])
+
+    def test_history_append_carries_active_selection_for_open_position_wait_row(self):
+        active = monthly5_shadow.update_shadow_state(
+            {},
+            now_ts=taipei_ts("2026-08-05T12:00:00"),
+            margin_balance=1000.0,
+            mark_price=112000.0,
+            position_open=True,
+            position_side="long",
+            position_notional=100.0,
+        )
+        active["market_selection"] = {
+            "market_bias": "bullish",
+            "market_state": "chop",
+            "selected_plan": "normal_long_selector",
+            "shadow_action": "evaluate_long",
+            "exposure_cap": 0.35,
+            "strategy_signal": "long",
+        }
+        wait = monthly5_shadow.update_shadow_state(
+            active,
+            now_ts=taipei_ts("2026-08-05T12:05:01"),
+            margin_balance=1001.0,
+            mark_price=112100.0,
+            position_open=True,
+            position_side="long",
+            position_notional=100.0,
+        )
+        wait["market_selection"] = {
+            "market_bias": "neutral",
+            "market_state": "",
+            "selected_plan": "normal_wait",
+            "shadow_action": "wait",
+            "exposure_cap": 1.0,
+            "strategy_signal": "wait",
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "history.jsonl"
+            self.assertTrue(monthly5_shadow.append_history(path, active, {"allowed": True}, min_interval_sec=0))
+            self.assertTrue(monthly5_shadow.append_history(path, wait, {"allowed": True}, min_interval_sec=0))
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+        self.assertEqual(rows[-1]["selected_plan"], "normal_long_selector")
+        self.assertEqual(rows[-1]["shadow_action"], "evaluate_long")
+        self.assertEqual(rows[-1]["strategy_signal"], "long")
+        self.assertEqual(rows[-1]["exposure_cap"], 0.35)
 
     def test_market_selection_chooses_normal_long_for_bullish_context(self):
         selection = monthly5_shadow.build_market_selection(

@@ -169,10 +169,97 @@ def build_history_record(snapshot, guard=None):
     }
 
 
+def _active_shadow_action(row):
+    return str((row or {}).get("shadow_action") or "") in {
+        "evaluate_long",
+        "evaluate_short",
+        "reduced_exposure",
+    }
+
+
+def _open_position_wait_row(row):
+    if not isinstance(row, dict):
+        return False
+    side = str(row.get("position_side") or "").lower()
+    if side not in {"long", "short"}:
+        return False
+    if not (bool(row.get("position_open", False)) or _safe_float(row.get("position_notional"), 0.0) > 0.0):
+        return False
+    action = str(row.get("shadow_action") or "")
+    plan = str(row.get("selected_plan") or "")
+    return action == "wait" and plan in {"", "normal_wait"}
+
+
+def _selection_from_active_row(row):
+    if not isinstance(row, dict) or not _active_shadow_action(row):
+        return {}
+    return {
+        "market_bias": str(row.get("market_bias") or ""),
+        "market_state": str(row.get("market_state") or ""),
+        "selected_plan": str(row.get("selected_plan") or ""),
+        "shadow_action": str(row.get("shadow_action") or ""),
+        "exposure_cap": round(_safe_float(row.get("exposure_cap"), 0.0), 4),
+        "strategy_signal": str(row.get("strategy_signal") or row.get("position_side") or "").lower(),
+    }
+
+
+def _apply_active_selection(row, selection):
+    if not isinstance(row, dict) or not isinstance(selection, dict) or not selection:
+        return row
+    patched = dict(row)
+    for key in ("market_bias", "market_state", "selected_plan", "shadow_action", "exposure_cap"):
+        patched[key] = selection.get(key, patched.get(key))
+    side = str(patched.get("position_side") or "").lower()
+    patched["strategy_signal"] = side if side in {"long", "short"} else str(selection.get("strategy_signal") or patched.get("strategy_signal") or "")
+    return patched
+
+
+def _carry_forward_active_position_rows(rows):
+    timed_rows = sorted(
+        (
+            (idx, row)
+            for idx, row in enumerate(rows or [])
+            if isinstance(row, dict)
+        ),
+        key=lambda item: (_safe_int(item[1].get("updated_ts"), 0), item[0]),
+    )
+    last_selection_by_side = {}
+    patched_by_idx = {}
+    for idx, row in timed_rows:
+        side = str(row.get("position_side") or "").lower()
+        if _open_position_wait_row(row) and side in last_selection_by_side:
+            row = _apply_active_selection(row, last_selection_by_side[side])
+        if _active_shadow_action(row) and side in {"long", "short"}:
+            last_selection_by_side[side] = _selection_from_active_row(row)
+        patched_by_idx[idx] = row
+    return [patched_by_idx.get(idx, row) for idx, row in enumerate(rows or [])]
+
+
+def _latest_active_selection(rows, side):
+    side = str(side or "").lower()
+    if side not in {"long", "short"}:
+        return {}
+    timed_rows = sorted(
+        (row for row in rows or [] if isinstance(row, dict)),
+        key=lambda row: _safe_int(row.get("updated_ts"), 0),
+        reverse=True,
+    )
+    for row in timed_rows:
+        if str(row.get("position_side") or "").lower() == side and _active_shadow_action(row):
+            return _selection_from_active_row(row)
+    return {}
+
+
 def append_history(path, snapshot, guard=None, *, min_interval_sec=300):
     record = build_history_record(snapshot, guard)
     history_path = Path(path)
     last = _last_jsonl_record(history_path)
+    if _open_position_wait_row(record):
+        side = str(record.get("position_side") or "").lower()
+        selection = _selection_from_active_row(last)
+        if str(last.get("position_side") or "").lower() != side or not selection:
+            selection = _latest_active_selection(load_history(history_path), side)
+        record = _apply_active_selection(record, selection)
     min_interval = max(0, _safe_int(min_interval_sec, 300))
     if last:
         elapsed = _safe_int(record.get("updated_ts"), 0) - _safe_int(last.get("updated_ts"), 0)
@@ -480,6 +567,7 @@ def build_readiness_report(
     if equity_shock_rows:
         valid_rows = [row for row in valid_rows if row not in equity_shock_rows]
         warnings.append(f"ignored invalid legacy equity shock rows={len(equity_shock_rows)}")
+    valid_rows = _carry_forward_active_position_rows(valid_rows)
     if not valid_rows:
         failures.append("history has no rows")
         return {
