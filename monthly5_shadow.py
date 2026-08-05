@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
-SELECTOR_POLICY_VERSION = 3
+SELECTOR_POLICY_VERSION = 4
 MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
@@ -19,6 +19,8 @@ UNDERPERFORMING_MICRO_PROBE_EXPOSURE_CAP = 0.05
 MIXED_BIAS_PROBE_EXPOSURE_CAP = 0.10
 MIXED_BIAS_PROBE_MIN_SCORE = 1.8
 MIXED_BIAS_PROBE_MAX_GAP = 0.6
+CONTEXT_GRACE_PROBE_EXPOSURE_CAP = 0.08
+CONTEXT_GRACE_PROBE_MAX_AGE_SEC = 900
 SUPPRESSED_RECOVERY_MIN_INTERVALS = 12
 RECOVERY_PROBE_MIN_INTERVALS = 12
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
@@ -1384,6 +1386,8 @@ def build_market_selection(
     recovering_plan_keys=None,
     probe_success_plan_keys=None,
     probe_candidate_plan_keys=None,
+    previous_market_selection=None,
+    previous_market_selection_ts=0,
 ):
     shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
     strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
@@ -1458,6 +1462,33 @@ def build_market_selection(
         for key in (probe_candidate_plan_keys or [])
         if str(key)
     }
+    previous_market_selection = previous_market_selection if isinstance(previous_market_selection, dict) else {}
+    previous_selection_age_sec = _safe_int(shadow_state.get("updated_ts"), 0) - _safe_int(previous_market_selection_ts, 0)
+    previous_shadow_action = str(previous_market_selection.get("shadow_action") or "")
+    previous_plan = str(previous_market_selection.get("selected_plan") or "")
+    previous_exposure_cap = max(0.0, min(1.0, _safe_float(previous_market_selection.get("exposure_cap"), 0.0)))
+    previous_reason_codes = {
+        str(code)
+        for code in previous_market_selection.get("reason_codes") or []
+        if str(code)
+    }
+    previous_selector_usable = (
+        market_bias == "neutral"
+        and mode == "normal"
+        and signal == "wait"
+        and not hard_block
+        and 0 <= previous_selection_age_sec <= CONTEXT_GRACE_PROBE_MAX_AGE_SEC
+        and previous_shadow_action in {"evaluate_long", "evaluate_short"}
+        and previous_plan in {"normal_long_selector", "normal_short_selector"}
+        and previous_exposure_cap > 0.0
+        and previous_reason_codes.isdisjoint(
+            {
+                "underperforming_micro_probe",
+                "profile_quality_recovery_probe",
+                "mixed_bias_shadow_probe",
+            }
+        )
+    )
 
     selected_plan = "normal_wait"
     shadow_action = "wait"
@@ -1501,6 +1532,17 @@ def build_market_selection(
                 rationale = "多空分數接近但空方略強，僅用低曝險 shadow probe 降低空倉時間"
             exposure_cap = round(min(exposure_cap, MIXED_BIAS_PROBE_EXPOSURE_CAP), 4)
             reason_codes.append("mixed_bias_shadow_probe")
+    elif previous_selector_usable:
+        if previous_shadow_action == "evaluate_long":
+            selected_plan = "context_grace_long_probe"
+            shadow_action = "evaluate_long"
+            rationale = "市場暫時轉中性但上一個多方 selector 仍很近，僅用低曝險 shadow probe 延續收樣"
+        else:
+            selected_plan = "context_grace_short_probe"
+            shadow_action = "evaluate_short"
+            rationale = "市場暫時轉中性但上一個空方 selector 仍很近，僅用低曝險 shadow probe 延續收樣"
+        exposure_cap = round(min(exposure_cap, previous_exposure_cap, CONTEXT_GRACE_PROBE_EXPOSURE_CAP), 4)
+        reason_codes.append("context_grace_shadow_probe")
     elif market_bias == "blocked":
         selected_plan = "macro_block_wait"
         shadow_action = "wait"

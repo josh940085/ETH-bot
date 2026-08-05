@@ -6064,6 +6064,8 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             recovering_plan_keys=readiness_report.get("shadow_suppressed_recovering_plan_keys") or [],
             probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
             probe_candidate_plan_keys=readiness_report.get("shadow_recovery_probe_candidate_keys") or [],
+            previous_market_selection=previous.get("market_selection") if isinstance(previous.get("market_selection"), dict) else {},
+            previous_market_selection_ts=_safe_int(previous.get("updated_ts"), 0),
         )
         if position_open:
             active_underperforming_keys = {
@@ -6223,6 +6225,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         "underperforming_micro_probe" in reason_codes
         or "profile_quality_recovery_probe" in reason_codes
         or "mixed_bias_shadow_probe" in reason_codes
+        or "context_grace_shadow_probe" in reason_codes
     ):
         return {
             "applied": False,

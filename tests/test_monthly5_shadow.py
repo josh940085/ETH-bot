@@ -405,6 +405,50 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["exposure_cap"], monthly5_shadow.MIXED_BIAS_PROBE_EXPOSURE_CAP)
         self.assertIn("mixed_bias_shadow_probe", selection["reason_codes"])
 
+    def test_market_selection_extends_recent_context_as_shadow_only_probe(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5, "updated_ts": 2000},
+            strategy_signal="wait",
+            strategy_context={},
+            host_logic={},
+            macro_alignment={"score": 0.0, "hard_block": False},
+            donchian_state={},
+            previous_market_selection={
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "market_bias": "bullish",
+                "market_state": "chop",
+                "exposure_cap": 0.35,
+                "reason_codes": ["chop_market_reduce"],
+            },
+            previous_market_selection_ts=1600,
+        )
+
+        self.assertEqual(selection["market_bias"], "neutral")
+        self.assertEqual(selection["selected_plan"], "context_grace_long_probe")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["exposure_cap"], monthly5_shadow.CONTEXT_GRACE_PROBE_EXPOSURE_CAP)
+        self.assertIn("context_grace_shadow_probe", selection["reason_codes"])
+
+    def test_market_selection_does_not_extend_stale_context(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5, "updated_ts": 3000},
+            strategy_signal="wait",
+            strategy_context={},
+            host_logic={},
+            macro_alignment={"score": 0.0, "hard_block": False},
+            previous_market_selection={
+                "selected_plan": "normal_short_selector",
+                "shadow_action": "evaluate_short",
+                "exposure_cap": 0.35,
+            },
+            previous_market_selection_ts=1000,
+        )
+
+        self.assertEqual(selection["selected_plan"], "normal_wait")
+        self.assertEqual(selection["shadow_action"], "wait")
+        self.assertNotIn("context_grace_shadow_probe", selection["reason_codes"])
+
     def test_market_selection_waits_on_underperforming_plan_key(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
