@@ -2896,6 +2896,12 @@
     const rollingProjectionValid = Boolean(state.shadow_rolling_monthly_projection_valid);
     const rollingTargetMet = Boolean(state.shadow_rolling_monthly_target_met);
     const rollingTargetLabel = rollingProjectionValid ? (rollingTargetMet ? "OK" : "WAIT") : "樣本不足";
+    const activationSpanHours = Number.isFinite(Number(state.shadow_activation_span_hours)) ? Number(state.shadow_activation_span_hours) : 0;
+    const activationPaperReturnPct = Number.isFinite(Number(state.shadow_activation_paper_return_pct)) ? Number(state.shadow_activation_paper_return_pct) : 0;
+    const activationProjectedMonthlyPct = Number.isFinite(Number(state.shadow_activation_projected_monthly_return_pct)) ? Number(state.shadow_activation_projected_monthly_return_pct) : 0;
+    const activationProjectionValid = Boolean(state.shadow_activation_monthly_projection_valid);
+    const activationTargetMet = Boolean(state.shadow_activation_monthly_target_met);
+    const activationTargetLabel = activationProjectionValid ? (activationTargetMet ? "OK" : "WAIT") : "樣本不足";
     const groupedReturns = Array.isArray(state.shadow_grouped_paper_returns) ? state.shadow_grouped_paper_returns : [];
     const weakestGroup = groupedReturns.length && groupedReturns[0] && typeof groupedReturns[0] === "object" ? groupedReturns[0] : null;
     const activeWeakCount = Number.isFinite(Number(state.shadow_active_underperforming_plan_count)) ? Number(state.shadow_active_underperforming_plan_count) : 0;
@@ -2925,6 +2931,7 @@
         <div class="service-row"><span>紙上報酬</span><strong>${paperReturnPct.toFixed(2)}% / ${paperWinRatePct.toFixed(0)}% (${paperIntervals})</strong></div>
         <div class="service-row"><span>月化投影</span><strong>${projectedMonthlyPct.toFixed(2)}% / ${monthlyTargetPct.toFixed(1)}% ${monthlyTargetLabel}</strong></div>
         <div class="service-row"><span>近24h</span><strong>${rollingPaperReturnPct.toFixed(2)}% / ${rollingProjectedMonthlyPct.toFixed(2)}% ${rollingTargetLabel}</strong></div>
+        <div class="service-row"><span>實單段</span><strong>${activationSpanHours.toFixed(2)}h ${activationPaperReturnPct.toFixed(2)}% / ${activationProjectedMonthlyPct.toFixed(2)}% ${activationTargetLabel}</strong></div>
         <div class="service-row"><span>弱勢組</span><strong>${escapeHtml(weakestGroupLabel)}</strong></div>
         <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
       </div>

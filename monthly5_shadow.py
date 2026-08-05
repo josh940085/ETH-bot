@@ -405,6 +405,26 @@ def _rolling_window_rows(rows, *, latest_ts, window_hours=ROLLING_WINDOW_HOURS):
     ]
 
 
+def _activation_rows(rows):
+    timed_rows = sorted(
+        (row for row in rows if isinstance(row, dict) and _safe_int(row.get("updated_ts"), 0) > 0),
+        key=lambda row: _safe_int(row.get("updated_ts"), 0),
+    )
+    start_idx = None
+    for idx, row in enumerate(timed_rows):
+        action = str(row.get("shadow_action") or "")
+        signal = str(row.get("strategy_signal") or "").lower()
+        if (
+            bool(row.get("position_open", False))
+            and _safe_float(row.get("position_notional"), 0.0) > 0.0
+            and signal in {"long", "short"}
+            and action in {"evaluate_long", "evaluate_short", "reduced_exposure"}
+        ):
+            start_idx = idx
+            break
+    return timed_rows[start_idx:] if start_idx is not None else []
+
+
 def build_readiness_report(
     rows,
     *,
@@ -573,6 +593,23 @@ def build_readiness_report(
         rolling_span_hours,
         min_projection_span_hours=min_span_hours,
     )
+    activation_rows = _activation_rows(valid_rows)
+    activation_timestamps = sorted(
+        _safe_int(row.get("updated_ts"), 0)
+        for row in activation_rows
+        if _safe_int(row.get("updated_ts"), 0) > 0
+    )
+    activation_span_hours = (
+        (activation_timestamps[-1] - activation_timestamps[0]) / 3600.0
+        if len(activation_timestamps) >= 2
+        else 0.0
+    )
+    activation_paper = _build_shadow_paper_return(activation_rows)
+    activation_projection = _build_shadow_monthly_projection(
+        activation_paper,
+        activation_span_hours,
+        min_projection_span_hours=min_span_hours,
+    )
     grouped_paper = _build_grouped_paper_return(valid_rows)
     rolling_grouped_paper = _build_grouped_paper_return(rolling_rows)
     rolling_suppressed_grouped_paper = _build_grouped_paper_return(
@@ -712,6 +749,10 @@ def build_readiness_report(
         "shadow_rolling_span_hours": round(max(0.0, rolling_span_hours), 4),
         **_prefix_metrics("shadow_rolling", rolling_paper),
         **_prefix_metrics("shadow_rolling", rolling_projection),
+        "shadow_activation_rows": len(activation_rows),
+        "shadow_activation_span_hours": round(max(0.0, activation_span_hours), 4),
+        **_prefix_metrics("shadow_activation", activation_paper),
+        **_prefix_metrics("shadow_activation", activation_projection),
         **grouped_paper,
         "shadow_active_underperforming_plan_keys": list(active_underperforming_keys),
         "shadow_active_underperforming_plan_count": len(active_underperforming_keys),

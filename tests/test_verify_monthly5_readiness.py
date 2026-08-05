@@ -517,6 +517,28 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["risk_rows"], 0)
         self.assertTrue(any("ignored invalid legacy equity shock rows=1" in item for item in report["warnings"]))
 
+    def test_readiness_reports_activation_segment_after_real_entry(self):
+        before = self._row(1000, action="wait", plan="normal_wait", mark_price=100.0)
+        entry = self._row(1300, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, position_open=True)
+        entry["strategy_signal"] = "long"
+        later = self._row(1600, action="evaluate_long", plan="normal_long_selector", mark_price=101.0, position_open=True)
+        later["strategy_signal"] = "long"
+
+        report = monthly5_shadow.build_readiness_report(
+            [before, entry, later],
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=2,
+            min_span_hours=0.0,
+            max_age_sec=None,
+            now_ts=1600,
+        )
+
+        self.assertEqual(report["shadow_activation_rows"], 2)
+        self.assertAlmostEqual(report["shadow_activation_span_hours"], 300 / 3600, places=4)
+        self.assertGreater(report["shadow_activation_paper_return_pct"], 0.0)
+        self.assertGreater(report["shadow_activation_projected_monthly_return_pct"], 0.0)
+
     def test_invalid_when_history_breaks_shadow_safety(self):
         row = self._row(1000)
         row["max_leverage"] = 6
