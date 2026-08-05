@@ -730,6 +730,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                             "last_close_reason": "SL",
                             "last_close_price": 1900,
                             "close_hits": [{"reason": "SL", "price": 1900, "ts": 1}],
+                            "last_sl_review": {"direction": "long"},
                             "daily_trade_date": "2026-07-30",
                             "daily_trade_opened": True,
                         }
@@ -741,7 +742,42 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             self.assertEqual(state["last_close_reason"], "")
             self.assertEqual(state["last_close_price"], 0.0)
             self.assertEqual(state["close_hits"], [])
+            self.assertEqual(state["last_sl_review"], {})
             self.assertFalse(state["daily_trade_opened"])
+        finally:
+            eth.POSITION_PANEL_FILE = old_path
+
+    def test_position_state_preserves_last_sl_review_for_current_pair(self):
+        old_path = eth.POSITION_PANEL_FILE
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                eth.POSITION_PANEL_FILE = Path(tmpdir) / "position.json"
+                eth.POSITION_PANEL_FILE.write_text(
+                    json.dumps(
+                        {
+                            "pair": eth.DEFAULT_PAIR,
+                            "open": False,
+                            "last_close_reason": "SL",
+                            "last_close_price": 64297.31,
+                            "last_sl_review": {
+                                "direction": "long",
+                                "opposite_direction_review": {
+                                    "opposite_direction": "short",
+                                    "requires_normal_entry_validation": True,
+                                },
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                state = eth._load_position_panel_state()
+
+            self.assertEqual(state["last_close_reason"], "SL")
+            self.assertEqual(state["last_sl_review"]["direction"], "long")
+            self.assertEqual(
+                state["last_sl_review"]["opposite_direction_review"]["opposite_direction"],
+                "short",
+            )
         finally:
             eth.POSITION_PANEL_FILE = old_path
 
