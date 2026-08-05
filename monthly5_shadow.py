@@ -16,6 +16,9 @@ MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
 ROLLING_WINDOW_HOURS = 24.0
 RECOVERY_PROBE_EXPOSURE_CAP = 0.15
 UNDERPERFORMING_MICRO_PROBE_EXPOSURE_CAP = 0.05
+MIXED_BIAS_PROBE_EXPOSURE_CAP = 0.10
+MIXED_BIAS_PROBE_MIN_SCORE = 1.8
+MIXED_BIAS_PROBE_MAX_GAP = 0.6
 SUPPRESSED_RECOVERY_MIN_INTERVALS = 12
 RECOVERY_PROBE_MIN_INTERVALS = 12
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
@@ -1410,6 +1413,19 @@ def build_market_selection(
         selected_plan = "normal_short_selector"
         shadow_action = "evaluate_short"
         rationale = "市場偏空，使用正常相似日策略評估空方機會"
+    elif market_bias == "mixed" and signal == "wait" and max(bull_score, bear_score) >= MIXED_BIAS_PROBE_MIN_SCORE:
+        score_gap = abs(bull_score - bear_score)
+        if score_gap <= MIXED_BIAS_PROBE_MAX_GAP:
+            if bull_score >= bear_score:
+                selected_plan = "mixed_bias_long_probe"
+                shadow_action = "evaluate_long"
+                rationale = "多空分數接近但多方略強，僅用低曝險 shadow probe 降低空倉時間"
+            else:
+                selected_plan = "mixed_bias_short_probe"
+                shadow_action = "evaluate_short"
+                rationale = "多空分數接近但空方略強，僅用低曝險 shadow probe 降低空倉時間"
+            exposure_cap = round(min(exposure_cap, MIXED_BIAS_PROBE_EXPOSURE_CAP), 4)
+            reason_codes.append("mixed_bias_shadow_probe")
     elif market_bias == "blocked":
         selected_plan = "macro_block_wait"
         shadow_action = "wait"

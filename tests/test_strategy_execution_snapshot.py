@@ -1480,6 +1480,29 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(override["applied"])
         self.assertEqual(override["reason"], "micro_probe_requires_host_signal")
 
+    def test_monthly5_mixed_bias_probe_does_not_auto_promote_wait(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（RR不足）",
+            "event_risk": 0,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "promotion_ready": True,
+            "market_selection": {
+                "selected_plan": "mixed_bias_short_probe",
+                "shadow_action": "evaluate_short",
+                "exposure_cap": eth.monthly5_shadow.MIXED_BIAS_PROBE_EXPOSURE_CAP,
+                "reason_codes": ["mixed_bias_shadow_probe"],
+            },
+        }
+
+        with patch.object(eth.time, "time", return_value=2000.0):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertFalse(override["applied"])
+        self.assertEqual(override["reason"], "micro_probe_requires_host_signal")
+
     def test_monthly5_micro_probe_blocks_reentry_after_recent_sl(self):
         shadow_state = {
             "mode": "normal",

@@ -318,6 +318,22 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["exposure_cap"], 0.35)
         self.assertIn("chop_market_reduce", selection["reason_codes"])
 
+    def test_market_selection_uses_low_exposure_probe_for_close_mixed_bias(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": -1, "macro_bias": 1.0},
+            host_logic={"direction": "short", "confidence": 0.8},
+            macro_alignment={"score": 0.0, "hard_block": False},
+            donchian_state={"state": "chop", "action": "reduce"},
+        )
+
+        self.assertEqual(selection["market_bias"], "mixed")
+        self.assertEqual(selection["selected_plan"], "mixed_bias_short_probe")
+        self.assertEqual(selection["shadow_action"], "evaluate_short")
+        self.assertEqual(selection["exposure_cap"], monthly5_shadow.MIXED_BIAS_PROBE_EXPOSURE_CAP)
+        self.assertIn("mixed_bias_shadow_probe", selection["reason_codes"])
+
     def test_market_selection_waits_on_underperforming_plan_key(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},

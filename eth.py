@@ -6219,7 +6219,11 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     if selected_plan in {"underperforming_wait", "macro_block_wait", "risk_off"}:
         return {"applied": False, "reason": "monthly5_plan_blocked", "selected_plan": selected_plan}
     reason_codes = {str(code) for code in selection.get("reason_codes") or [] if code}
-    if "underperforming_micro_probe" in reason_codes or "profile_quality_recovery_probe" in reason_codes:
+    if (
+        "underperforming_micro_probe" in reason_codes
+        or "profile_quality_recovery_probe" in reason_codes
+        or "mixed_bias_shadow_probe" in reason_codes
+    ):
         return {
             "applied": False,
             "reason": "micro_probe_requires_host_signal",
