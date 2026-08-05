@@ -767,6 +767,7 @@ def build_market_selection(
     host_logic=None,
     macro_alignment=None,
     donchian_state=None,
+    underperforming_plan_keys=None,
 ):
     shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
     strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
@@ -855,6 +856,18 @@ def build_market_selection(
     if market_state == "chop" and shadow_action in {"evaluate_long", "evaluate_short"}:
         exposure_cap = round(min(exposure_cap, 0.35), 4)
         reason_codes.append("chop_market_reduce")
+    selection_key = "|".join((selected_plan, shadow_action, market_bias, market_state))
+    underperforming_keys = {
+        str(key)
+        for key in (underperforming_plan_keys or [])
+        if str(key)
+    }
+    if shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in underperforming_keys:
+        reason_codes.append("underperforming_plan_wait")
+        selected_plan = "underperforming_wait"
+        shadow_action = "wait"
+        exposure_cap = 0.0
+        rationale = "近期同類市場選擇已累積負報酬，暫停評估以保護月報酬5%目標"
 
     return {
         "schema_version": 1,

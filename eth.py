@@ -5897,6 +5897,15 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                 (POSITION_PANEL_STATE.get("monthly5_shadow") or {}).get("selected_candidate")
             ),
         )
+        readiness_report = monthly5_shadow.build_readiness_report(
+            monthly5_shadow.load_history(MONTHLY5_SHADOW_HISTORY_PATH),
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=_safe_int(os.getenv("MONTHLY5_READINESS_MIN_RECORDS"), 48),
+            min_span_hours=_safe_float(os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS"), 24.0),
+            max_age_sec=None,
+            max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
+        )
         snapshot["market_selection"] = monthly5_shadow.build_market_selection(
             snapshot,
             strategy_signal=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait"),
@@ -5929,6 +5938,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                 if decision
                 else dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {})
             ),
+            underperforming_plan_keys=readiness_report.get("shadow_underperforming_plan_keys") or [],
         )
         guard = monthly5_shadow.build_execution_guard(
             snapshot,
