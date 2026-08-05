@@ -1269,6 +1269,12 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "event_risk": 0,
             "net_edge_rate_est": 0.003,
             "risk_rate": 0.01,
+            "monthly5_signal_override": {
+                "applied": False,
+                "reason": "monthly5_wait_override_sl_cooldown",
+                "selected_plan": "normal_long_selector",
+                "cooldown_remaining_sec": 321.0,
+            },
         }
 
         eth._update_panel_execution_snapshot(
@@ -1282,6 +1288,10 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         )
         self.assertEqual(eth.POSITION_PANEL_STATE["strategy_macro_alignment"]["score"], 1.3)
         self.assertEqual(eth.POSITION_PANEL_STATE["strategy_context"]["htf"], 1)
+        self.assertEqual(
+            eth.POSITION_PANEL_STATE["monthly5_signal_override"]["reason"],
+            "monthly5_wait_override_sl_cooldown",
+        )
 
         eth._update_panel_execution_snapshot(
             decision, 1871.8, "opened", reason="Binance 實際開單成功", actual_open=True

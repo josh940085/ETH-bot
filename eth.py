@@ -6592,6 +6592,7 @@ def sync_position_panel(current_price=None):
             "monthly5_shadow": dict(monthly5_shadow_state or {}),
             "monthly5_execution_guard": dict(POSITION_PANEL_STATE.get("monthly5_execution_guard") or {}),
             "monthly5_position_guard": dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {}),
+            "monthly5_signal_override": dict(POSITION_PANEL_STATE.get("monthly5_signal_override") or {}),
             "monthly5_readiness": dict(monthly5_readiness_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
@@ -9832,6 +9833,7 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
                 "max_position_size": _safe_float(decision.get("breakout_max_position_size"), 0.0),
             },
             "strategy_wait_conditions": wait_conditions,
+            "monthly5_signal_override": dict(decision.get("monthly5_signal_override") or {}),
         }
     )
 
