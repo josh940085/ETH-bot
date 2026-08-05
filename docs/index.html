@@ -1227,6 +1227,21 @@
       background: #0a0d0c;
     }
 
+    .service-row.full {
+      grid-column: 1 / -1;
+    }
+
+    .service-row strong {
+      min-width: 0;
+      color: #d8ddd8;
+      text-align: right;
+      overflow-wrap: anywhere;
+    }
+
+    .service-row.full strong {
+      text-align: left;
+    }
+
     .service-state {
       display: inline-flex;
       align-items: center;
@@ -1539,6 +1554,8 @@
   let STRATEGY_DONCHIAN_MARKET_STATE = {};
   let STRATEGY_WAIT_CONDITIONS = [];
   let MONTHLY5_READINESS = {};
+  let MONTHLY5_SHADOW = {};
+  let MONTHLY5_SIGNAL_OVERRIDE = {};
   const TELEGRAM_WEBAPP = (window.Telegram && window.Telegram.WebApp) ? Telegram.WebApp : null;
   const TELEGRAM_INIT_DATA = TELEGRAM_WEBAPP ? String(TELEGRAM_WEBAPP.initData || "").trim() : "";
   const HAS_TELEGRAM_AUTH = TELEGRAM_INIT_DATA.length > 0;
@@ -1769,6 +1786,12 @@
       : [];
     MONTHLY5_READINESS = (data.monthly5_readiness && typeof data.monthly5_readiness === "object")
       ? data.monthly5_readiness
+      : {};
+    MONTHLY5_SHADOW = (data.monthly5_shadow && typeof data.monthly5_shadow === "object")
+      ? data.monthly5_shadow
+      : {};
+    MONTHLY5_SIGNAL_OVERRIDE = (data.monthly5_signal_override && typeof data.monthly5_signal_override === "object")
+      ? data.monthly5_signal_override
       : {};
     BINANCE_BREAK_EVEN_PRICE = Number.isFinite(Number(data.binance_break_even_price)) ? Number(data.binance_break_even_price) : BINANCE_BREAK_EVEN_PRICE;
     BINANCE_UNREALIZED_PNL_USDT = Number.isFinite(Number(data.binance_unrealized_pnl_usdt)) ? Number(data.binance_unrealized_pnl_usdt) : null;
@@ -2870,6 +2893,9 @@
 
   function renderMonthly5Readiness() {
     const state = MONTHLY5_READINESS && typeof MONTHLY5_READINESS === "object" ? MONTHLY5_READINESS : {};
+    const shadow = MONTHLY5_SHADOW && typeof MONTHLY5_SHADOW === "object" ? MONTHLY5_SHADOW : {};
+    const selection = shadow.market_selection && typeof shadow.market_selection === "object" ? shadow.market_selection : {};
+    const override = MONTHLY5_SIGNAL_OVERRIDE && typeof MONTHLY5_SIGNAL_OVERRIDE === "object" ? MONTHLY5_SIGNAL_OVERRIDE : {};
     const status = String(state.status || "collecting");
     const ready = Boolean(state.ready);
     const rows = Number.isFinite(Number(state.rows)) ? Number(state.rows) : 0;
@@ -2922,6 +2948,17 @@
       ? `${String(weakestGroup.selected_plan || "-").replace(/^normal_/, "")} ${Number(weakestGroup.return_pct || 0).toFixed(2)}% (${Number(weakestGroup.intervals || 0)}) active:${activeWeakCount} probe:${recoveringCount} wait:${suppressedRemainingIntervals} ${probeState} pwait:${probeRemainingIntervals} ok:${probeSuccessCount} fail:${probeFailedCount}`
       : "-";
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
+    const selectedPlan = String(selection.selected_plan || "-");
+    const shadowAction = String(selection.shadow_action || "wait");
+    const exposureCap = Number.isFinite(Number(selection.exposure_cap)) ? Number(selection.exposure_cap) : 0;
+    const marketBias = String(selection.market_bias || "-");
+    const bullScore = Number.isFinite(Number(selection.bull_score)) ? Number(selection.bull_score).toFixed(1) : "-";
+    const bearScore = Number.isFinite(Number(selection.bear_score)) ? Number(selection.bear_score).toFixed(1) : "-";
+    const overrideReason = String(override.reason || "");
+    const overrideFinal = String(override.final || "");
+    const overrideLabel = overrideReason
+      ? `${override.applied ? "applied" : overrideReason}${overrideFinal ? ` | ${overrideFinal}` : ""}`
+      : "none";
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
     const label = status === "ready" || ready ? "可審核" : (status === "invalid" ? "異常" : "收集中");
     const rowProgress = minRecords > 0 ? clamp((rows / minRecords) * 100, 0, 100) : 0;
@@ -2931,17 +2968,20 @@
       <div class="command-label">MONTHLY 5% READINESS</div>
       <div class="command-service-grid">
         <div class="service-row"><span>升級狀態</span><span class="service-state ${tone}"><i class="service-dot"></i>${label}</span></div>
+        <div class="service-row full"><span>目前選擇</span><strong>${escapeHtml(selectedPlan)} / ${escapeHtml(shadowAction)} / cap ${(exposureCap * 100).toFixed(0)}%</strong></div>
+        <div class="service-row"><span>市場分數</span><strong>${escapeHtml(marketBias)} 多${bullScore} 空${bearScore}</strong></div>
+        <div class="service-row full"><span>接管擋點</span><strong>${escapeHtml(overrideLabel)}</strong></div>
         <div class="service-row"><span>樣本</span><strong>${rows}/${minRecords} (${rowProgress.toFixed(0)}%)</strong></div>
         <div class="service-row"><span>跨度</span><strong>${spanHours.toFixed(2)}/${minSpanHours.toFixed(0)}h (${spanProgress.toFixed(0)}%)</strong></div>
-        <div class="service-row"><span>解除進度</span><strong>span-${spanRemainingHours.toFixed(2)}h count-${countRemaining} probe ${probeProgressPct.toFixed(0)}%/${probeRemainingIntervals} candidate-${probeCandidateCount}</strong></div>
+        <div class="service-row full"><span>解除進度</span><strong>span-${spanRemainingHours.toFixed(2)}h count-${countRemaining} probe ${probeProgressPct.toFixed(0)}%/${probeRemainingIntervals} candidate-${probeCandidateCount}</strong></div>
         <div class="service-row"><span>Shadow 空倉</span><strong>${flatPct.toFixed(1)}% / ${maxFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>實單空倉</span><strong>${actualFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>紙上報酬</span><strong>${paperReturnPct.toFixed(2)}% / ${paperWinRatePct.toFixed(0)}% (${paperIntervals})</strong></div>
         <div class="service-row"><span>月化投影</span><strong>${projectedMonthlyPct.toFixed(2)}% / ${monthlyTargetPct.toFixed(1)}% ${monthlyTargetLabel}</strong></div>
         <div class="service-row"><span>近24h</span><strong>${rollingPaperReturnPct.toFixed(2)}% / ${rollingProjectedMonthlyPct.toFixed(2)}% ${rollingTargetLabel}</strong></div>
         <div class="service-row"><span>實單段</span><strong>${activationSpanHours.toFixed(2)}h ${activationPaperReturnPct.toFixed(2)}% / ${activationProjectedMonthlyPct.toFixed(2)}% ${activationTargetLabel}</strong></div>
-        <div class="service-row"><span>升級阻擋</span><strong>${escapeHtml(promotionBlockerLabel)}</strong></div>
-        <div class="service-row"><span>弱勢組</span><strong>${escapeHtml(weakestGroupLabel)}</strong></div>
+        <div class="service-row full"><span>升級阻擋</span><strong>${escapeHtml(promotionBlockerLabel)}</strong></div>
+        <div class="service-row full"><span>弱勢組</span><strong>${escapeHtml(weakestGroupLabel)}</strong></div>
         <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
       </div>
       <div class="command-meta">${warningText}</div>`;
