@@ -156,6 +156,9 @@ def build_history_record(snapshot, guard=None):
         "position_notional": round(_safe_float(snapshot.get("position_notional"), 0.0), 4),
         "mark_price": round(_safe_float(snapshot.get("mark_price"), 0.0), 4),
         "market_bias": str(selection.get("market_bias") or ""),
+        "market_action": str(selection.get("market_action") or ""),
+        "bull_score": round(_safe_float(selection.get("bull_score"), 0.0), 4),
+        "bear_score": round(_safe_float(selection.get("bear_score"), 0.0), 4),
         "market_state": str(selection.get("market_state") or ""),
         "selector_policy_version": _safe_int(
             selection.get("selector_policy_version"),
@@ -171,6 +174,7 @@ def build_history_record(snapshot, guard=None):
         "recovery_probe": bool(selection.get("recovery_probe", False)),
         "recovery_probe_key": str(selection.get("recovery_probe_key") or ""),
         "strategy_signal": str(selection.get("strategy_signal") or ""),
+        "reason_codes": sorted(str(code) for code in selection.get("reason_codes") or [] if str(code)),
         "guard_allowed": bool(guard.get("allowed", True)),
         "guard_reason_code": str(guard.get("reason_code") or ""),
         "guard_adjusted_size": round(_safe_float(guard.get("adjusted_size"), 0.0), 4),
@@ -203,11 +207,15 @@ def _selection_from_active_row(row):
         return {}
     return {
         "market_bias": str(row.get("market_bias") or ""),
+        "market_action": str(row.get("market_action") or ""),
+        "bull_score": round(_safe_float(row.get("bull_score"), 0.0), 4),
+        "bear_score": round(_safe_float(row.get("bear_score"), 0.0), 4),
         "market_state": str(row.get("market_state") or ""),
         "selector_policy_version": _safe_int(row.get("selector_policy_version"), 0),
         "selected_plan": str(row.get("selected_plan") or ""),
         "shadow_action": str(row.get("shadow_action") or ""),
         "exposure_cap": round(_safe_float(row.get("exposure_cap"), 0.0), 4),
+        "reason_codes": list(row.get("reason_codes") or []),
         "strategy_signal": str(row.get("strategy_signal") or row.get("position_side") or "").lower(),
     }
 
@@ -216,7 +224,18 @@ def _apply_active_selection(row, selection):
     if not isinstance(row, dict) or not isinstance(selection, dict) or not selection:
         return row
     patched = dict(row)
-    for key in ("market_bias", "market_state", "selector_policy_version", "selected_plan", "shadow_action", "exposure_cap"):
+    for key in (
+        "market_bias",
+        "market_action",
+        "bull_score",
+        "bear_score",
+        "market_state",
+        "selector_policy_version",
+        "selected_plan",
+        "shadow_action",
+        "exposure_cap",
+        "reason_codes",
+    ):
         patched[key] = selection.get(key, patched.get(key))
     side = str(patched.get("position_side") or "").lower()
     selection_signal = str(selection.get("strategy_signal") or "").lower()
@@ -487,6 +506,59 @@ def _candidate_probe_keys(grouped_paper, *, min_intervals=None, min_win_rate_pct
             continue
         candidates.append(key)
     return candidates
+
+
+def _weighted_shadow_time_groups(timed_rows, *, now_ts=None, max_groups=8):
+    groups = defaultdict(lambda: {"duration_sec": 0.0, "active": False, "rows": 0})
+    total_sec = 0.0
+    rows = list(timed_rows or [])
+    if len(rows) < 2:
+        return {"active": [], "flat": []}
+    end_ts = max(_safe_float(now_ts, time.time()), _safe_int(rows[-1].get("updated_ts"), 0))
+    for idx, row in enumerate(rows):
+        start_ts = _safe_int(row.get("updated_ts"), 0)
+        next_ts = _safe_int(rows[idx + 1].get("updated_ts"), 0) if idx + 1 < len(rows) else end_ts
+        duration = max(0.0, next_ts - start_ts)
+        if duration <= 0:
+            continue
+        action = str(row.get("shadow_action") or "")
+        exposure_cap = _safe_float(row.get("exposure_cap"), 0.0)
+        active = action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and exposure_cap > 0.0 and row.get("guard_allowed") is not False
+        key = (
+            str(row.get("selected_plan") or ""),
+            action,
+            str(row.get("market_bias") or ""),
+            str(row.get("market_state") or ""),
+        )
+        groups[key]["duration_sec"] += duration
+        groups[key]["active"] = active
+        groups[key]["rows"] += 1
+        total_sec += duration
+    active_groups = []
+    flat_groups = []
+    for key, item in groups.items():
+        duration = _safe_float(item.get("duration_sec"), 0.0)
+        payload = {
+            "key": "|".join(key),
+            "selected_plan": key[0],
+            "shadow_action": key[1],
+            "market_bias": key[2],
+            "market_state": key[3],
+            "duration_sec": round(duration, 4),
+            "time_pct": round((duration / total_sec) * 100.0, 4) if total_sec > 0 else 0.0,
+            "rows": _safe_int(item.get("rows"), 0),
+        }
+        if item.get("active"):
+            active_groups.append(payload)
+        else:
+            flat_groups.append(payload)
+    active_groups.sort(key=lambda item: item["duration_sec"], reverse=True)
+    flat_groups.sort(key=lambda item: item["duration_sec"], reverse=True)
+    max_groups = max(1, _safe_int(max_groups, 8))
+    return {
+        "active": active_groups[:max_groups],
+        "flat": flat_groups[:max_groups],
+    }
 
 
 def _build_shadow_monthly_projection(shadow_paper, span_hours, *, min_projection_span_hours=24.0):
@@ -805,6 +877,7 @@ def build_readiness_report(
         rolling_span_hours,
         min_projection_span_hours=min_span_hours,
     )
+    shadow_time_groups = _weighted_shadow_time_groups(timed_rows, now_ts=now_ts)
     activation_rows = _activation_rows(valid_rows)
     activation_timestamps = sorted(
         _safe_int(row.get("updated_ts"), 0)
@@ -1121,6 +1194,8 @@ def build_readiness_report(
         "weighted_flat_sec": round(max(0.0, weighted_flat_sec), 4),
         "weighted_shadow_active_sec": round(max(0.0, weighted_shadow_active_sec), 4),
         "weighted_shadow_flat_sec": round(max(0.0, weighted_shadow_flat_sec), 4),
+        "shadow_active_time_groups": list(shadow_time_groups["active"]),
+        "shadow_flat_time_groups": list(shadow_time_groups["flat"]),
         **shadow_paper,
         **shadow_projection,
         "shadow_rolling_window_hours": round(ROLLING_WINDOW_HOURS, 4),

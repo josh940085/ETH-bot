@@ -144,6 +144,8 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn('"selected_plan": "normal_long_selector"', rows[0])
         self.assertIn('"guard_allowed": true', rows[0])
+        self.assertIn('"bull_score": 5.0', rows[0])
+        self.assertIn('"reason_codes": []', rows[0])
 
     def test_history_append_carries_active_selection_for_open_position_wait_row(self):
         active = monthly5_shadow.update_shadow_state(
@@ -317,6 +319,75 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["selected_plan"], "normal_long_selector")
         self.assertEqual(selection["exposure_cap"], 0.35)
         self.assertIn("chop_market_reduce", selection["reason_codes"])
+
+    def test_readiness_reports_weighted_shadow_time_groups(self):
+        rows = [
+            {
+                "schema_version": 1,
+                "selector_policy_version": monthly5_shadow.SELECTOR_POLICY_VERSION,
+                "strategy_id": monthly5_shadow.STRATEGY_ID,
+                "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+                "shadow_only": True,
+                "updated_ts": 1000,
+                "mode": "normal",
+                "max_leverage": 5,
+                "selected_plan": "normal_wait",
+                "shadow_action": "wait",
+                "market_bias": "mixed",
+                "market_state": "chop",
+                "exposure_cap": 1.0,
+                "guard_allowed": True,
+                "mark_price": 100.0,
+            },
+            {
+                "schema_version": 1,
+                "selector_policy_version": monthly5_shadow.SELECTOR_POLICY_VERSION,
+                "strategy_id": monthly5_shadow.STRATEGY_ID,
+                "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+                "shadow_only": True,
+                "updated_ts": 1060,
+                "mode": "normal",
+                "max_leverage": 5,
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "market_bias": "bullish",
+                "market_state": "chop",
+                "exposure_cap": 0.35,
+                "guard_allowed": True,
+                "mark_price": 101.0,
+            },
+            {
+                "schema_version": 1,
+                "selector_policy_version": monthly5_shadow.SELECTOR_POLICY_VERSION,
+                "strategy_id": monthly5_shadow.STRATEGY_ID,
+                "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+                "shadow_only": True,
+                "updated_ts": 1120,
+                "mode": "normal",
+                "max_leverage": 5,
+                "selected_plan": "normal_wait",
+                "shadow_action": "wait",
+                "market_bias": "neutral",
+                "market_state": "",
+                "exposure_cap": 1.0,
+                "guard_allowed": True,
+                "mark_price": 102.0,
+            },
+        ]
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=3,
+            min_span_hours=0.01,
+            max_age_sec=None,
+            now_ts=1120,
+        )
+
+        self.assertEqual(report["shadow_flat_time_groups"][0]["key"], "normal_wait|wait|mixed|chop")
+        self.assertEqual(report["shadow_flat_time_groups"][0]["duration_sec"], 60.0)
+        self.assertEqual(report["shadow_active_time_groups"][0]["key"], "normal_long_selector|evaluate_long|bullish|chop")
 
     def test_market_selection_uses_low_exposure_probe_for_close_mixed_bias(self):
         selection = monthly5_shadow.build_market_selection(

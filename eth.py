@@ -6478,6 +6478,8 @@ def _build_monthly5_readiness_panel_state():
             "shadow_active_time_pct": round(_safe_float(report.get("shadow_active_time_pct"), 0.0), 4),
             "shadow_flat_time_pct": round(_safe_float(report.get("shadow_flat_time_pct"), 0.0), 4),
             "weighted_total_sec": round(_safe_float(report.get("weighted_total_sec"), 0.0), 4),
+            "shadow_active_time_groups": list(report.get("shadow_active_time_groups") or [])[:5],
+            "shadow_flat_time_groups": list(report.get("shadow_flat_time_groups") or [])[:5],
             "shadow_paper_return_pct": round(_safe_float(report.get("shadow_paper_return_pct"), 0.0), 4),
             "shadow_paper_max_drawdown_pct": round(_safe_float(report.get("shadow_paper_max_drawdown_pct"), 0.0), 4),
             "shadow_paper_intervals": _safe_int(report.get("shadow_paper_intervals"), 0),
