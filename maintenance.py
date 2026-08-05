@@ -1582,6 +1582,27 @@ def _check_strategy_strictness():
     if general_trades < required_general:
         blockers.append(f"一般策略單 {general_trades}筆 < {required_general}筆/{calendar_days}日")
     if blockers:
+        monthly5_cover = _check_monthly5_strictness_cover()
+        if monthly5_cover.get("covered"):
+            return {
+                "status": "ok",
+                "detail": (
+                    "一般策略偏少，但月報酬5%接管層健康；"
+                    + "；".join(blockers)
+                ),
+                "sample_sufficient": True,
+                "monthly5_cover": True,
+                "strictness_blockers": blockers,
+                "calendar_days": calendar_days,
+                "trade_days": trade_days,
+                "trade_day_coverage": round(coverage_ratio, 4),
+                "trades": trades,
+                "daily_min_trades": daily_min_trades,
+                "general_trades": general_trades,
+                "required_general_trades": required_general,
+                "monthly5_candidate_detail": monthly5_cover.get("candidate_detail", ""),
+                "monthly5_runtime_detail": monthly5_cover.get("runtime_detail", ""),
+            }
         raise RuntimeError("策略可能過嚴：" + "；".join(blockers))
 
     return {
@@ -1598,6 +1619,40 @@ def _check_strategy_strictness():
         "daily_min_trades": daily_min_trades,
         "general_trades": general_trades,
         "required_general_trades": required_general,
+    }
+
+
+def _check_monthly5_strictness_cover():
+    if str(os.getenv("MAINTENANCE_STRICTNESS_MONTHLY5_COVER", "1")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return {"covered": False, "reason": "disabled"}
+    candidate = _run_command([sys.executable, "verify_monthly5_candidate.py"], timeout=60)
+    if candidate.returncode != 0:
+        return {
+            "covered": False,
+            "reason": "candidate_failed",
+            "candidate_detail": (candidate.stdout or "").strip(),
+        }
+    runtime = _run_command(
+        [
+            sys.executable,
+            "verify_monthly5_runtime.py",
+            "--max-age-sec",
+            str(max(60, int(float(os.getenv("MONTHLY5_RUNTIME_MAX_AGE_SEC", "600") or "600")))),
+            "--require-history",
+        ],
+        timeout=60,
+    )
+    if runtime.returncode != 0:
+        return {
+            "covered": False,
+            "reason": "runtime_failed",
+            "candidate_detail": (candidate.stdout or "").strip(),
+            "runtime_detail": (runtime.stdout or "").strip(),
+        }
+    return {
+        "covered": True,
+        "candidate_detail": (candidate.stdout or "").strip(),
+        "runtime_detail": (runtime.stdout or "").strip(),
     }
 
 
