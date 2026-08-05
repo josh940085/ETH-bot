@@ -5940,6 +5940,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             ),
             underperforming_plan_keys=readiness_report.get("shadow_active_underperforming_plan_keys") or [],
             recovering_plan_keys=readiness_report.get("shadow_suppressed_recovering_plan_keys") or [],
+            probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
         )
         guard = monthly5_shadow.build_execution_guard(
             snapshot,
@@ -6061,6 +6062,12 @@ def _build_monthly5_readiness_panel_state():
             "shadow_suppressed_recovery_min_intervals": _safe_int(report.get("shadow_suppressed_recovery_min_intervals"), 6),
             "shadow_suppressed_observed_intervals": _safe_int(report.get("shadow_suppressed_observed_intervals"), 0),
             "shadow_suppressed_recovery_remaining_intervals": _safe_int(report.get("shadow_suppressed_recovery_remaining_intervals"), 0),
+            "shadow_recovery_probe_success_keys": list(report.get("shadow_recovery_probe_success_keys") or [])[:5],
+            "shadow_recovery_probe_success_count": _safe_int(report.get("shadow_recovery_probe_success_count"), 0),
+            "shadow_recovery_probe_failed_keys": list(report.get("shadow_recovery_probe_failed_keys") or [])[:5],
+            "shadow_recovery_probe_failed_count": _safe_int(report.get("shadow_recovery_probe_failed_count"), 0),
+            "shadow_recovery_probe_grouped_paper_returns": list(report.get("shadow_recovery_probe_grouped_paper_returns") or [])[:5],
+            "shadow_recovery_probe_min_intervals": _safe_int(report.get("shadow_recovery_probe_min_intervals"), 6),
             "shadow_group_min_intervals": _safe_int(report.get("shadow_group_min_intervals"), 12),
             "min_records": _safe_int(report.get("min_records"), 48),
             "min_span_hours": round(_safe_float(report.get("min_span_hours"), 24.0), 4),

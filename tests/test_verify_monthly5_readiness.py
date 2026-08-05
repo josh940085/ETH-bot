@@ -370,6 +370,70 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             monthly5_shadow.SUPPRESSED_RECOVERY_MIN_INTERVALS - 3,
         )
 
+    def test_recovery_probe_success_and_failure_keys(self):
+        success_rows = []
+        for idx in range(7):
+            row = self._row(
+                1000 + idx * 60,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=100.0 + idx,
+                exposure_cap=monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP,
+                max_leverage=1,
+            )
+            row["recovery_probe"] = True
+            row["recovery_probe_key"] = "normal_long_selector|evaluate_long|bullish|chop"
+            success_rows.append(row)
+
+        success = monthly5_shadow.build_readiness_report(
+            success_rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=7,
+            min_span_hours=0.01,
+            max_age_sec=None,
+            now_ts=1000 + 6 * 60,
+        )
+
+        self.assertIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            success["shadow_recovery_probe_success_keys"],
+        )
+        self.assertEqual(success["shadow_recovery_probe_failed_count"], 0)
+
+        failure_rows = []
+        for idx in range(7):
+            row = self._row(
+                2000 + idx * 60,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=100.0 - idx,
+                exposure_cap=monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP,
+                max_leverage=1,
+            )
+            row["recovery_probe"] = True
+            row["recovery_probe_key"] = "normal_long_selector|evaluate_long|bullish|chop"
+            failure_rows.append(row)
+
+        failure = monthly5_shadow.build_readiness_report(
+            failure_rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=7,
+            min_span_hours=0.01,
+            max_age_sec=None,
+            now_ts=2000 + 6 * 60,
+        )
+
+        self.assertIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            failure["shadow_recovery_probe_failed_keys"],
+        )
+        self.assertIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            failure["shadow_active_underperforming_plan_keys"],
+        )
+
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [
             self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.1, max_leverage=1),

@@ -2901,8 +2901,10 @@
     const activeWeakCount = Number.isFinite(Number(state.shadow_active_underperforming_plan_count)) ? Number(state.shadow_active_underperforming_plan_count) : 0;
     const recoveringCount = Number.isFinite(Number(state.shadow_suppressed_recovering_plan_count)) ? Number(state.shadow_suppressed_recovering_plan_count) : 0;
     const suppressedRemainingIntervals = Number.isFinite(Number(state.shadow_suppressed_recovery_remaining_intervals)) ? Number(state.shadow_suppressed_recovery_remaining_intervals) : 0;
+    const probeSuccessCount = Number.isFinite(Number(state.shadow_recovery_probe_success_count)) ? Number(state.shadow_recovery_probe_success_count) : 0;
+    const probeFailedCount = Number.isFinite(Number(state.shadow_recovery_probe_failed_count)) ? Number(state.shadow_recovery_probe_failed_count) : 0;
     const weakestGroupLabel = weakestGroup
-      ? `${String(weakestGroup.selected_plan || "-").replace(/^normal_/, "")} ${Number(weakestGroup.return_pct || 0).toFixed(2)}% (${Number(weakestGroup.intervals || 0)}) active:${activeWeakCount} probe:${recoveringCount} wait:${suppressedRemainingIntervals}`
+      ? `${String(weakestGroup.selected_plan || "-").replace(/^normal_/, "")} ${Number(weakestGroup.return_pct || 0).toFixed(2)}% (${Number(weakestGroup.intervals || 0)}) active:${activeWeakCount} probe:${recoveringCount} wait:${suppressedRemainingIntervals} ok:${probeSuccessCount} fail:${probeFailedCount}`
       : "-";
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");

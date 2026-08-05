@@ -216,7 +216,31 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["selected_plan"], "normal_long_selector")
         self.assertEqual(selection["shadow_action"], "evaluate_long")
         self.assertEqual(selection["exposure_cap"], monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP)
+        self.assertTrue(selection["recovery_probe"])
+        self.assertEqual(selection["recovery_probe_key"], "normal_long_selector|evaluate_long|bullish|chop")
         self.assertIn("underperforming_recovery_probe", selection["reason_codes"])
+
+    def test_market_selection_restores_full_cap_after_probe_success(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "chop", "action": "reduce"},
+            recovering_plan_keys=[
+                "normal_long_selector|evaluate_long|bullish|chop",
+            ],
+            probe_success_plan_keys=[
+                "normal_long_selector|evaluate_long|bullish|chop",
+            ],
+        )
+
+        self.assertEqual(selection["selected_plan"], "normal_long_selector")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["exposure_cap"], 0.35)
+        self.assertFalse(selection["recovery_probe"])
+        self.assertIn("underperforming_probe_success", selection["reason_codes"])
 
     def test_market_selection_resumes_when_underperforming_key_expires(self):
         selection = monthly5_shadow.build_market_selection(
