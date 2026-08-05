@@ -5906,7 +5906,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             max_age_sec=None,
             max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
         )
-        snapshot["market_selection"] = monthly5_shadow.build_market_selection(
+        market_selection = monthly5_shadow.build_market_selection(
             snapshot,
             strategy_signal=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait"),
             strategy_execution_reason=str(
@@ -5942,6 +5942,28 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             recovering_plan_keys=readiness_report.get("shadow_suppressed_recovering_plan_keys") or [],
             probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
         )
+        if position_open and not decision:
+            entry_selection = (
+                active_trade.get("monthly5_entry_selection")
+                if isinstance(active_trade.get("monthly5_entry_selection"), dict)
+                else {}
+            )
+            if str(entry_selection.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}:
+                market_selection = dict(entry_selection)
+                market_selection["strategy_signal"] = str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait")
+                market_selection["strategy_execution_reason"] = str(
+                    strategy_execution_reason
+                    or POSITION_PANEL_STATE.get("strategy_execution_reason")
+                    or "持倉中保留月報酬5%入場選擇"
+                )
+                market_selection["rationale"] = str(
+                    market_selection.get("rationale")
+                    or "持倉中保留月報酬5%入場選擇"
+                )
+                reason_codes = set(str(code) for code in market_selection.get("reason_codes") or [] if code)
+                reason_codes.add("entry_selection_preserved")
+                market_selection["reason_codes"] = sorted(reason_codes)
+        snapshot["market_selection"] = market_selection
         guard = monthly5_shadow.build_execution_guard(
             snapshot,
             direction=str(strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or ""),
@@ -6320,6 +6342,7 @@ def sync_position_panel(current_price=None):
             "scale_add_paused": bool(active_trade.get("scale_add_paused", False)),
             "scale_add_pause_reason": str(active_trade.get("scale_add_pause_reason") or ""),
             "scale_add_pause_ts": _safe_int(active_trade.get("scale_add_pause_ts"), 0),
+            "monthly5_entry_selection": dict(active_trade.get("monthly5_entry_selection") or {}),
             "tp_sl_adjusted_4h": bool(active_trade.get("tp_sl_adjusted_4h", False)),
             "last_close_reason": POSITION_PANEL_STATE.get("last_close_reason", ""),
             "last_close_price": round(_safe_float(POSITION_PANEL_STATE.get("last_close_price"), 0.0), 4),
@@ -8969,6 +8992,7 @@ active_trade = {
     "last_scale_skip_notify_key": "",
     "last_scale_skip_notify_ts": 0.0,
     "monthly5_position_guard_ts": 0.0,
+    "monthly5_entry_selection": {},
     "open_time": None,
     "tp_sl_adjusted_4h": False,
     "time_horizon": "short",
@@ -9014,6 +9038,7 @@ def _reset_active_trade_state():
     active_trade["last_scale_skip_notify_key"] = ""
     active_trade["last_scale_skip_notify_ts"] = 0.0
     active_trade["monthly5_position_guard_ts"] = 0.0
+    active_trade["monthly5_entry_selection"] = {}
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
     active_trade["time_horizon"] = "short"
@@ -9078,6 +9103,25 @@ def restore_active_trade_from_panel():
     active_trade["scale_add_paused"] = bool(raw.get("scale_add_paused", False))
     active_trade["scale_add_pause_reason"] = str(raw.get("scale_add_pause_reason") or "")
     active_trade["scale_add_pause_ts"] = _safe_float(raw.get("scale_add_pause_ts"), 0.0)
+    monthly5_entry_selection = (
+        raw.get("monthly5_entry_selection")
+        if isinstance(raw.get("monthly5_entry_selection"), dict)
+        else {}
+    )
+    if not monthly5_entry_selection:
+        monthly5_guard = raw.get("monthly5_position_guard") if isinstance(raw.get("monthly5_position_guard"), dict) else {}
+        selected_plan = str(monthly5_guard.get("selected_plan") or "")
+        shadow_action = str(monthly5_guard.get("shadow_action") or "")
+        if selected_plan and shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"}:
+            monthly5_entry_selection = {
+                "selected_plan": selected_plan,
+                "shadow_action": shadow_action,
+                "exposure_cap": _safe_float(monthly5_guard.get("exposure_cap"), 0.0),
+                "max_leverage": _safe_int(monthly5_guard.get("max_leverage"), 5),
+                "reason_codes": ["restored_from_position_guard"],
+                "rationale": "從持倉風控狀態還原月報酬5%入場選擇",
+            }
+    active_trade["monthly5_entry_selection"] = dict(monthly5_entry_selection)
     active_trade["open_time"] = _safe_float(raw.get("open_since_ts"), state_ts or time.time())
     active_trade["tp_sl_adjusted_4h"] = bool(raw.get("tp_sl_adjusted_4h", False))
     active_trade["time_horizon"] = restored_horizon
@@ -18341,6 +18385,16 @@ def run_bot():
                 active_trade["last_scale_skip_notify_key"] = ""
                 active_trade["last_scale_skip_notify_ts"] = 0.0
                 active_trade["monthly5_position_guard_ts"] = 0.0
+                active_trade["monthly5_entry_selection"] = dict(
+                    (
+                        (
+                            POSITION_PANEL_STATE.get("monthly5_shadow")
+                            if isinstance(POSITION_PANEL_STATE.get("monthly5_shadow"), dict)
+                            else {}
+                        ).get("market_selection")
+                    )
+                    or {}
+                )
                 active_trade["open_time"] = time.time()
                 active_trade["tp_sl_adjusted_4h"] = False
                 active_trade["time_horizon"] = _infer_trade_time_horizon(

@@ -995,6 +995,64 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         self.assertFalse(eth._entry_confirmation_requires_pullback("long", decision))
 
+    def test_monthly5_shadow_preserves_entry_selection_while_position_open(self):
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "long",
+                "monthly5_entry_selection": {
+                    "selected_plan": "normal_long_selector",
+                    "shadow_action": "evaluate_long",
+                    "exposure_cap": 0.35,
+                    "max_leverage": 5,
+                    "reason_codes": ["underperforming_probe_success"],
+                    "rationale": "entry",
+                },
+            }
+        )
+        eth.POSITION_PANEL_STATE["strategy_signal"] = "long"
+        eth.POSITION_PANEL_STATE["binance_qty"] = 0.001
+
+        with (
+            patch.object(eth.monthly5_shadow, "load_state", return_value={}),
+            patch.object(
+                eth.monthly5_shadow,
+                "update_shadow_state",
+                return_value={"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            ),
+            patch.object(eth.monthly5_shadow, "load_history", return_value=[]),
+            patch.object(
+                eth.monthly5_shadow,
+                "build_readiness_report",
+                return_value={
+                    "shadow_active_underperforming_plan_keys": [],
+                    "shadow_suppressed_recovering_plan_keys": [],
+                    "shadow_recovery_probe_success_keys": [],
+                },
+            ),
+            patch.object(
+                eth.monthly5_shadow,
+                "build_market_selection",
+                return_value={
+                    "selected_plan": "normal_wait",
+                    "shadow_action": "wait",
+                    "exposure_cap": 1.0,
+                },
+            ),
+            patch.object(eth.monthly5_shadow, "save_state"),
+            patch.object(eth.monthly5_shadow, "append_history"),
+        ):
+            snapshot = eth._update_monthly5_shadow_panel_state(
+                64000.0,
+                strategy_signal="long",
+                strategy_execution_reason="position_open",
+            )
+
+        selection = snapshot["market_selection"]
+        self.assertEqual(selection["selected_plan"], "normal_long_selector")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertIn("entry_selection_preserved", selection["reason_codes"])
+
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"
