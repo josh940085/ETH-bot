@@ -110,6 +110,19 @@ class Monthly5MaintenanceTests(unittest.TestCase):
 
         self.assertIn("--require-promotion-ready", run_command.call_args.args[0])
 
+    def test_monthly5_readiness_failure_keeps_promotion_blocker_detail(self):
+        command_result = SimpleNamespace(
+            returncode=1,
+            stdout=(
+                "PASS monthly5_readiness status=collecting ready=false promotion_ready=false\n"
+                "BLOCKER code=sample_span label=樣本時間 current=11.2 target=24.0 remaining_hours=12.8\n"
+            ),
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result):
+            with self.assertRaisesRegex(RuntimeError, "remaining_hours=12.8"):
+                maintenance._check_monthly5_readiness()
+
 
 if __name__ == "__main__":
     unittest.main()

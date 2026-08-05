@@ -785,6 +785,8 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertIn("ready=true", result.stdout)
         self.assertIn("promotion_ready=false", result.stdout)
         self.assertIn("shadow_rolling_monthly_target", result.stdout)
+        self.assertIn("BLOCKER code=shadow_rolling_monthly_target", result.stdout)
+        self.assertIn("observed_target_gap_pct", result.stdout)
 
 
 if __name__ == "__main__":

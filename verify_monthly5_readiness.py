@@ -112,6 +112,24 @@ def main() -> int:
             print(f"FAIL {item}")
         for item in report.get("warnings") or []:
             print(f"WARN {item}")
+        for item in report.get("promotion_blocker_details") or []:
+            if not isinstance(item, dict):
+                continue
+            parts = [
+                f"code={item.get('code', '')}",
+                f"label={item.get('label', '')}",
+                f"current={item.get('current', '')}",
+                f"target={item.get('target', '')}",
+            ]
+            if "remaining_hours" in item:
+                parts.append(f"remaining_hours={item.get('remaining_hours')}")
+            if "remaining" in item:
+                parts.append(f"remaining={item.get('remaining')}")
+            if "remaining_intervals" in item:
+                parts.append(f"remaining_intervals={item.get('remaining_intervals')}")
+            if "observed_target_gap_pct" in item:
+                parts.append(f"observed_target_gap_pct={item.get('observed_target_gap_pct')}")
+            print("BLOCKER " + " ".join(str(part) for part in parts))
     if (
         report.get("failures")
         or (args.require_ready and not report.get("ready"))
