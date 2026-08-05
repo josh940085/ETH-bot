@@ -711,11 +711,31 @@ def build_readiness_report(
         if _safe_int(row.get("selector_policy_version"), 0) < min_selector_policy_version
     ]
     if legacy_selector_rows:
+        now_for_legacy = _safe_int(now_ts, int(time.time()))
+        legacy_recent_rows = [
+            row
+            for row in legacy_selector_rows
+            if _safe_int(row.get("updated_ts"), 0) >= now_for_legacy - int(ROLLING_WINDOW_HOURS * 3600)
+        ]
+        legacy_probe_grouped_paper = _build_grouped_paper_return(
+            legacy_recent_rows,
+            min_intervals=RECOVERY_PROBE_MIN_INTERVALS,
+            recovery_probe=True,
+        )
+        legacy_probe_failed_keys = set(legacy_probe_grouped_paper["shadow_underperforming_plan_keys"])
         valid_rows = [row for row in valid_rows if row not in legacy_selector_rows]
         warnings.append(
             "ignored legacy selector policy rows="
             f"{len(legacy_selector_rows)} < v{min_selector_policy_version}"
         )
+        if legacy_probe_failed_keys:
+            warnings.append(
+                "carried legacy failed recovery probe keys: "
+                + ", ".join(sorted(legacy_probe_failed_keys)[:2])
+            )
+    else:
+        legacy_probe_grouped_paper = {"shadow_grouped_paper_returns": [], "shadow_underperforming_plan_keys": []}
+        legacy_probe_failed_keys = set()
     valid_rows = _carry_forward_active_position_rows(valid_rows)
     if not valid_rows:
         return {
@@ -999,6 +1019,7 @@ def build_readiness_report(
         - effective_recovering_keys
         - probe_success_keys
         | probe_failed_keys
+        | legacy_probe_failed_keys
     )
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
@@ -1281,6 +1302,11 @@ def build_readiness_report(
         "shadow_recovery_probe_candidate_min_intervals": recovery_probe_candidate_min_intervals,
         "shadow_recovery_probe_failed_keys": list(probe_failed_keys),
         "shadow_recovery_probe_failed_count": len(probe_failed_keys),
+        "shadow_legacy_recovery_probe_failed_keys": sorted(legacy_probe_failed_keys),
+        "shadow_legacy_recovery_probe_failed_count": len(legacy_probe_failed_keys),
+        "shadow_legacy_recovery_probe_grouped_paper_returns": list(
+            legacy_probe_grouped_paper["shadow_grouped_paper_returns"]
+        ),
         "shadow_recovery_probe_grouped_paper_returns": list(rolling_probe_grouped_paper["shadow_grouped_paper_returns"]),
         "shadow_recovery_probe_min_intervals": RECOVERY_PROBE_MIN_INTERVALS,
         "shadow_recovery_probe_observed_intervals": recovery_probe_observed_intervals,
