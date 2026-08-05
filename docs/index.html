@@ -2896,6 +2896,11 @@
     const rollingProjectionValid = Boolean(state.shadow_rolling_monthly_projection_valid);
     const rollingTargetMet = Boolean(state.shadow_rolling_monthly_target_met);
     const rollingTargetLabel = rollingProjectionValid ? (rollingTargetMet ? "OK" : "WAIT") : "樣本不足";
+    const groupedReturns = Array.isArray(state.shadow_grouped_paper_returns) ? state.shadow_grouped_paper_returns : [];
+    const weakestGroup = groupedReturns.length && groupedReturns[0] && typeof groupedReturns[0] === "object" ? groupedReturns[0] : null;
+    const weakestGroupLabel = weakestGroup
+      ? `${String(weakestGroup.selected_plan || "-").replace(/^normal_/, "")} ${Number(weakestGroup.return_pct || 0).toFixed(2)}% (${Number(weakestGroup.intervals || 0)})`
+      : "-";
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
     const label = status === "ready" || ready ? "可審核" : (status === "invalid" ? "異常" : "收集中");
@@ -2913,6 +2918,7 @@
         <div class="service-row"><span>紙上報酬</span><strong>${paperReturnPct.toFixed(2)}% / ${paperWinRatePct.toFixed(0)}% (${paperIntervals})</strong></div>
         <div class="service-row"><span>月化投影</span><strong>${projectedMonthlyPct.toFixed(2)}% / ${monthlyTargetPct.toFixed(1)}% ${monthlyTargetLabel}</strong></div>
         <div class="service-row"><span>近24h</span><strong>${rollingPaperReturnPct.toFixed(2)}% / ${rollingProjectedMonthlyPct.toFixed(2)}% ${rollingTargetLabel}</strong></div>
+        <div class="service-row"><span>弱勢組</span><strong>${escapeHtml(weakestGroupLabel)}</strong></div>
         <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
       </div>
       <div class="command-meta">${warningText}</div>`;

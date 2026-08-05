@@ -1,7 +1,7 @@
 import json
 import os
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -206,21 +206,12 @@ def _shadow_paper_direction(row):
     return 0
 
 
-def _build_shadow_paper_return(rows):
+def _shadow_paper_intervals(rows):
     timed_rows = sorted(
         (row for row in rows if isinstance(row, dict) and _safe_int(row.get("updated_ts"), 0) > 0),
         key=lambda row: _safe_int(row.get("updated_ts"), 0),
     )
-    total_return_pct = 0.0
-    cumulative_pct = 0.0
-    peak_pct = 0.0
-    max_drawdown_pct = 0.0
-    interval_count = 0
-    win_count = 0
-    loss_count = 0
-    long_count = 0
-    short_count = 0
-    last_interval_pct = 0.0
+    intervals = []
     for idx in range(len(timed_rows) - 1):
         row = timed_rows[idx]
         next_row = timed_rows[idx + 1]
@@ -234,6 +225,33 @@ def _build_shadow_paper_return(rows):
         if direction == 0 or exposure_cap <= 0.0 or leverage <= 0.0 or start_price <= 0.0 or end_price <= 0.0:
             continue
         interval_pct = direction * ((end_price / start_price) - 1.0) * 100.0 * exposure_cap * leverage
+        intervals.append(
+            {
+                "return_pct": interval_pct,
+                "direction": direction,
+                "selected_plan": str(row.get("selected_plan") or ""),
+                "shadow_action": str(row.get("shadow_action") or ""),
+                "market_bias": str(row.get("market_bias") or ""),
+                "market_state": str(row.get("market_state") or ""),
+            }
+        )
+    return intervals
+
+
+def _build_shadow_paper_return(rows):
+    intervals = _shadow_paper_intervals(rows)
+    total_return_pct = 0.0
+    cumulative_pct = 0.0
+    peak_pct = 0.0
+    max_drawdown_pct = 0.0
+    interval_count = 0
+    win_count = 0
+    loss_count = 0
+    long_count = 0
+    short_count = 0
+    last_interval_pct = 0.0
+    for interval in intervals:
+        interval_pct = _safe_float(interval.get("return_pct"), 0.0)
         total_return_pct += interval_pct
         cumulative_pct += interval_pct
         peak_pct = max(peak_pct, cumulative_pct)
@@ -243,7 +261,7 @@ def _build_shadow_paper_return(rows):
             win_count += 1
         elif interval_pct < 0:
             loss_count += 1
-        if direction > 0:
+        if _safe_int(interval.get("direction"), 0) > 0:
             long_count += 1
         else:
             short_count += 1
@@ -259,6 +277,56 @@ def _build_shadow_paper_return(rows):
         "shadow_paper_long_intervals": long_count,
         "shadow_paper_short_intervals": short_count,
         "shadow_paper_last_interval_pct": round(last_interval_pct, 4),
+    }
+
+
+def _build_grouped_paper_return(rows, *, min_intervals=12, max_groups=5):
+    grouped = defaultdict(lambda: {"return_pct": 0.0, "intervals": 0, "wins": 0, "losses": 0})
+    for interval in _shadow_paper_intervals(rows):
+        key = (
+            str(interval.get("selected_plan") or ""),
+            str(interval.get("shadow_action") or ""),
+            str(interval.get("market_bias") or ""),
+            str(interval.get("market_state") or ""),
+        )
+        item = grouped[key]
+        interval_pct = _safe_float(interval.get("return_pct"), 0.0)
+        item["return_pct"] += interval_pct
+        item["intervals"] += 1
+        if interval_pct > 0:
+            item["wins"] += 1
+        elif interval_pct < 0:
+            item["losses"] += 1
+    groups = []
+    for key, item in grouped.items():
+        intervals = max(0, _safe_int(item.get("intervals"), 0))
+        win_rate_pct = (_safe_int(item.get("wins"), 0) / intervals) * 100.0 if intervals else 0.0
+        groups.append(
+            {
+                "key": "|".join(key),
+                "selected_plan": key[0],
+                "shadow_action": key[1],
+                "market_bias": key[2],
+                "market_state": key[3],
+                "return_pct": round(_safe_float(item.get("return_pct"), 0.0), 4),
+                "intervals": intervals,
+                "win_rate_pct": round(win_rate_pct, 4),
+                "wins": _safe_int(item.get("wins"), 0),
+                "losses": _safe_int(item.get("losses"), 0),
+            }
+        )
+    groups.sort(key=lambda item: (item["return_pct"], -item["intervals"]))
+    weak = [
+        item
+        for item in groups
+        if item["intervals"] >= max(1, _safe_int(min_intervals, 12))
+        and item["return_pct"] < 0.0
+    ]
+    return {
+        "shadow_grouped_paper_returns": groups[: max(1, _safe_int(max_groups, 5))],
+        "shadow_underperforming_plan_keys": [item["key"] for item in weak[: max(1, _safe_int(max_groups, 5))]],
+        "shadow_underperforming_plan_count": len(weak),
+        "shadow_group_min_intervals": max(1, _safe_int(min_intervals, 12)),
     }
 
 
@@ -466,6 +534,7 @@ def build_readiness_report(
         rolling_span_hours,
         min_projection_span_hours=min_span_hours,
     )
+    grouped_paper = _build_grouped_paper_return(valid_rows)
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
         warnings.append(f"sample count collecting: rows={len(valid_rows)} < {min_records}")
@@ -496,6 +565,11 @@ def build_readiness_report(
             "shadow rolling 24h projection below target: "
             f"{rolling_projection['shadow_projected_monthly_return_pct']:.4f}% < "
             f"{rolling_projection['shadow_monthly_target_pct']:.4f}%"
+        )
+    if grouped_paper["shadow_underperforming_plan_count"] > 0:
+        warnings.append(
+            "shadow underperforming plan groups: "
+            + ", ".join(grouped_paper["shadow_underperforming_plan_keys"][:2])
         )
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
@@ -550,6 +624,7 @@ def build_readiness_report(
         "shadow_rolling_span_hours": round(max(0.0, rolling_span_hours), 4),
         **_prefix_metrics("shadow_rolling", rolling_paper),
         **_prefix_metrics("shadow_rolling", rolling_projection),
+        **grouped_paper,
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,

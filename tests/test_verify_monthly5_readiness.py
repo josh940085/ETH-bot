@@ -241,6 +241,31 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertFalse(report["promotion_ready"])
         self.assertTrue(any("shadow rolling 24h projection below target" in item for item in report["warnings"]))
 
+    def test_grouped_paper_return_flags_underperforming_plan(self):
+        rows = [
+            self._row(1000 + idx * 60, action="evaluate_long", plan="normal_long_selector", mark_price=100.0 - idx, exposure_cap=0.5, max_leverage=1)
+            for idx in range(13)
+        ]
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=13,
+            min_span_hours=0.1,
+            max_age_sec=None,
+            now_ts=1000 + 12 * 60,
+        )
+
+        self.assertGreaterEqual(report["shadow_underperforming_plan_count"], 1)
+        self.assertIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            report["shadow_underperforming_plan_keys"],
+        )
+        weakest = report["shadow_grouped_paper_returns"][0]
+        self.assertEqual(weakest["selected_plan"], "normal_long_selector")
+        self.assertLess(weakest["return_pct"], 0.0)
+
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [
             self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.1, max_leverage=1),
