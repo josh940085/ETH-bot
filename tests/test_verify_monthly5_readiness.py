@@ -66,6 +66,14 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertAlmostEqual(report["sample_span_remaining_hours"], 1.0, places=4)
         self.assertIn("sample_count", report["promotion_blockers"])
         self.assertIn("sample_span", report["promotion_blockers"])
+        details = {
+            item["code"]: item
+            for item in report["promotion_blocker_details"]
+        }
+        self.assertEqual(details["sample_count"]["remaining"], 4)
+        self.assertAlmostEqual(details["sample_span"]["remaining_hours"], 1.0, places=4)
+        self.assertIn("shadow_projection_not_valid", details)
+        self.assertIn("observed_target_gap_pct", details["shadow_projection_not_valid"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))
 
     def test_ready_when_history_has_enough_span_and_evaluation_samples(self):

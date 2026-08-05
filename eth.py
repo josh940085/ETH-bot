@@ -6430,6 +6430,7 @@ def _build_monthly5_readiness_panel_state():
             "ready": bool(report.get("ready", False)),
             "promotion_ready": bool(report.get("promotion_ready", False)),
             "promotion_blockers": list(report.get("promotion_blockers") or [])[:8],
+            "promotion_blocker_details": list(report.get("promotion_blocker_details") or [])[:8],
             "promotion_blocker_count": _safe_int(report.get("promotion_blocker_count"), 0),
             "rows": _safe_int(report.get("rows"), 0),
             "span_hours": round(_safe_float(report.get("span_hours"), 0.0), 4),

@@ -871,6 +871,113 @@ def build_readiness_report(
         promotion_blockers.append("active_underperforming_plan")
     if recovery_probe_state in {"collecting", "probe_ready", "probing", "probe_failed"}:
         promotion_blockers.append(f"recovery_probe_{recovery_probe_state}")
+
+    def _blocker_detail(code):
+        code = str(code or "")
+        if code == "invalid_history":
+            return {
+                "code": code,
+                "label": "歷史資料無效",
+                "current": "; ".join(failures[:2]) if failures else "invalid",
+                "target": "history valid",
+                "detail": "修正月報酬5% shadow history 後才可 promotion",
+            }
+        if code == "sample_count":
+            return {
+                "code": code,
+                "label": "樣本數",
+                "current": str(len(valid_rows)),
+                "target": str(min_records),
+                "remaining": sample_count_remaining,
+                "detail": "等待更多 shadow history rows",
+            }
+        if code == "sample_span":
+            return {
+                "code": code,
+                "label": "樣本時間",
+                "current": round(max(0.0, span_hours), 4),
+                "target": round(max(0.0, min_span_hours), 4),
+                "remaining_hours": round(max(0.0, sample_span_remaining_hours), 4),
+                "detail": "至少滿 24 小時才允許月化投影作為上線證據",
+            }
+        if code == "no_evaluate_samples":
+            return {
+                "code": code,
+                "label": "評估樣本",
+                "current": len(evaluate_rows),
+                "target": "evaluate_long/evaluate_short/reduced_exposure",
+                "detail": "沒有實際策略評估樣本時不可 promotion",
+            }
+        if code == "shadow_flat_time_high":
+            return {
+                "code": code,
+                "label": "shadow 空倉時間",
+                "current": round(max(0.0, shadow_flat_time_pct), 4),
+                "target": round(flat_cap, 4) if flat_cap is not None else None,
+                "detail": "空倉時間需低於候選策略歷史平均空倉上限",
+            }
+        if code == "shadow_projection_not_valid":
+            return {
+                "code": code,
+                "label": "月化投影有效性",
+                "current": round(max(0.0, span_hours), 4),
+                "target": round(max(0.0, min_span_hours), 4),
+                "observed_target_gap_pct": shadow_projection["shadow_observed_target_gap_pct"],
+                "detail": "樣本時間不足時，shadow projected monthly return 只作參考不作 promotion 證據",
+            }
+        if code == "shadow_monthly_target":
+            return {
+                "code": code,
+                "label": "月化目標",
+                "current": shadow_projection["shadow_projected_monthly_return_pct"],
+                "target": shadow_projection["shadow_monthly_target_pct"],
+                "observed_target_gap_pct": shadow_projection["shadow_observed_target_gap_pct"],
+                "detail": "全量 shadow 月化投影需達 +5%",
+            }
+        if code == "shadow_rolling_projection_not_valid":
+            return {
+                "code": code,
+                "label": "滾動投影有效性",
+                "current": round(max(0.0, rolling_span_hours), 4),
+                "target": round(max(0.0, min_span_hours), 4),
+                "observed_target_gap_pct": rolling_projection["shadow_observed_target_gap_pct"],
+                "detail": "滾動 24 小時樣本不足時不可 promotion",
+            }
+        if code == "shadow_rolling_monthly_target":
+            return {
+                "code": code,
+                "label": "滾動月化目標",
+                "current": rolling_projection["shadow_projected_monthly_return_pct"],
+                "target": rolling_projection["shadow_monthly_target_pct"],
+                "observed_target_gap_pct": rolling_projection["shadow_observed_target_gap_pct"],
+                "detail": "最近 24 小時 shadow 月化投影需達 +5%",
+            }
+        if code == "active_underperforming_plan":
+            return {
+                "code": code,
+                "label": "低效策略組",
+                "current": ", ".join(active_underperforming_keys[:2]),
+                "target": "no active underperforming plan",
+                "detail": "近期仍虧損的市場組不可 promotion",
+            }
+        if code.startswith("recovery_probe_"):
+            return {
+                "code": code,
+                "label": "恢復探測",
+                "current": recovery_probe_state,
+                "target": "probe_success or idle",
+                "remaining_intervals": recovery_probe_remaining_intervals,
+                "detail": "低效策略組需完成恢復探測後才可 promotion",
+            }
+        return {
+            "code": code,
+            "label": code,
+            "current": "",
+            "target": "",
+            "detail": "",
+        }
+
+    promotion_blocker_details = [_blocker_detail(code) for code in promotion_blockers]
     promotion_ready = (
         ready
         and shadow_projection["shadow_monthly_target_met"]
@@ -886,6 +993,7 @@ def build_readiness_report(
         "ready": ready,
         "promotion_ready": promotion_ready,
         "promotion_blockers": promotion_blockers,
+        "promotion_blocker_details": promotion_blocker_details,
         "promotion_blocker_count": len(promotion_blockers),
         "failures": failures,
         "warnings": warnings,
