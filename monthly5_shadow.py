@@ -494,12 +494,20 @@ def _build_shadow_monthly_projection(shadow_paper, span_hours, *, min_projection
         if MONTHLY_TARGET_PCT > 0
         else 0.0
     )
+    observed_target_return_pct = (
+        MONTHLY_TARGET_PCT * (span_hours / MONTHLY_PROJECTION_HOURS)
+        if MONTHLY_PROJECTION_HOURS > 0
+        else 0.0
+    )
+    observed_target_gap_pct = observed_target_return_pct - paper_return_pct
     return {
         "shadow_projected_monthly_return_pct": round(projected_monthly_pct, 4),
         "shadow_monthly_target_pct": round(MONTHLY_TARGET_PCT, 4),
         "shadow_monthly_projection_valid": projection_valid,
         "shadow_monthly_target_met": projection_valid and projected_monthly_pct >= MONTHLY_TARGET_PCT,
         "shadow_monthly_target_progress_pct": round(target_progress_pct, 4),
+        "shadow_observed_target_return_pct": round(observed_target_return_pct, 4),
+        "shadow_observed_target_gap_pct": round(observed_target_gap_pct, 4),
         "shadow_monthly_projection_hours": round(MONTHLY_PROJECTION_HOURS, 4),
         "shadow_monthly_min_projection_span_hours": round(min_projection_span_hours, 4),
     }
