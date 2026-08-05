@@ -1276,6 +1276,10 @@ def build_market_selection(
     exposure_cap = max(0.0, min(1.0, _safe_float(shadow_state.get("suggested_exposure_scale"), 0.0)))
     reason_codes = list(shadow_state.get("reason_codes") or [])
     signal = str(strategy_signal or "wait").lower()
+    profile_quality_wait = (
+        signal == "wait"
+        and "MLX回測輪廓不佳" in str(strategy_execution_reason or "")
+    )
 
     selected_plan = "normal_wait"
     shadow_action = "wait"
@@ -1310,6 +1314,13 @@ def build_market_selection(
         selected_plan = "macro_block_wait"
         shadow_action = "wait"
         rationale = "宏觀或事件風險硬阻擋，等待解除"
+
+    if profile_quality_wait and shadow_action in {"evaluate_long", "evaluate_short"}:
+        selected_plan = "profile_quality_wait"
+        shadow_action = "wait"
+        exposure_cap = 0.0
+        reason_codes.append("profile_quality_wait")
+        rationale = "主策略 MLX 回測輪廓不佳，月報酬5% shadow 等待更高品質接管條件"
 
     if market_state == "chop" and shadow_action in {"evaluate_long", "evaluate_short"}:
         exposure_cap = round(min(exposure_cap, 0.35), 4)

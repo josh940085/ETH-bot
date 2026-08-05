@@ -262,6 +262,18 @@ def _bullish_selection(shadow: dict, *, signal: str = "wait", market_state: str 
     )
 
 
+def _bullish_profile_wait_selection(shadow: dict) -> dict:
+    return monthly5_shadow.build_market_selection(
+        shadow,
+        strategy_signal="wait",
+        strategy_execution_reason="觀望（MLX回測輪廓不佳）",
+        strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.0},
+        host_logic={"direction": "long", "confidence": 0.8},
+        macro_alignment={"score": 1.8, "hard_block": False},
+        donchian_state={"state": "chop", "action": "reduce"},
+    )
+
+
 def _bearish_selection(shadow: dict, *, signal: str = "wait") -> dict:
     return monthly5_shadow.build_market_selection(
         shadow,
@@ -312,6 +324,18 @@ def _verify_end_to_end_scenarios() -> list[str]:
     long_guard = monthly5_shadow.build_execution_guard(normal_short, direction="long", requested_size=0.8)
     _require(short_guard.get("allowed") is True, failures, "e2e bearish short execution must be allowed")
     _require(long_guard.get("reason_code") == "monthly5_direction_mismatch", failures, "e2e bearish market must block long entries")
+
+    profile_wait_selection = _bullish_profile_wait_selection(reset)
+    _require(
+        profile_wait_selection.get("selected_plan") == "profile_quality_wait",
+        failures,
+        "e2e profile-bad host wait must not count as monthly5 entry shadow",
+    )
+    _require(
+        profile_wait_selection.get("shadow_action") == "wait",
+        failures,
+        "e2e profile-bad host wait must keep monthly5 shadow flat",
+    )
 
     locked = monthly5_shadow.update_shadow_state(
         {

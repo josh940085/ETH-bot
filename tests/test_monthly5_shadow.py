@@ -251,6 +251,23 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["shadow_action"], "evaluate_long")
         self.assertEqual(selection["exposure_cap"], 1.0)
 
+    def test_market_selection_waits_when_host_profile_quality_is_bad(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_execution_reason="觀望（MLX回測輪廓不佳）",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "chop", "action": "reduce"},
+        )
+
+        self.assertEqual(selection["market_bias"], "bullish")
+        self.assertEqual(selection["selected_plan"], "profile_quality_wait")
+        self.assertEqual(selection["shadow_action"], "wait")
+        self.assertEqual(selection["exposure_cap"], 0.0)
+        self.assertIn("profile_quality_wait", selection["reason_codes"])
+
     def test_market_selection_uses_recovery_long_flat_only_when_bullish(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "recovery", "suggested_exposure_scale": 0.5, "max_leverage": 5},
