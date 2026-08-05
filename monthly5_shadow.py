@@ -535,6 +535,7 @@ def build_readiness_report(
         min_projection_span_hours=min_span_hours,
     )
     grouped_paper = _build_grouped_paper_return(valid_rows)
+    rolling_grouped_paper = _build_grouped_paper_return(rolling_rows)
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
         warnings.append(f"sample count collecting: rows={len(valid_rows)} < {min_records}")
@@ -566,10 +567,10 @@ def build_readiness_report(
             f"{rolling_projection['shadow_projected_monthly_return_pct']:.4f}% < "
             f"{rolling_projection['shadow_monthly_target_pct']:.4f}%"
         )
-    if grouped_paper["shadow_underperforming_plan_count"] > 0:
+    if rolling_grouped_paper["shadow_underperforming_plan_count"] > 0:
         warnings.append(
-            "shadow underperforming plan groups: "
-            + ", ".join(grouped_paper["shadow_underperforming_plan_keys"][:2])
+            "shadow active underperforming plan groups: "
+            + ", ".join(rolling_grouped_paper["shadow_underperforming_plan_keys"][:2])
         )
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
@@ -625,6 +626,9 @@ def build_readiness_report(
         **_prefix_metrics("shadow_rolling", rolling_paper),
         **_prefix_metrics("shadow_rolling", rolling_projection),
         **grouped_paper,
+        "shadow_active_underperforming_plan_keys": list(rolling_grouped_paper["shadow_underperforming_plan_keys"]),
+        "shadow_active_underperforming_plan_count": rolling_grouped_paper["shadow_underperforming_plan_count"],
+        "shadow_active_grouped_paper_returns": list(rolling_grouped_paper["shadow_grouped_paper_returns"]),
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,

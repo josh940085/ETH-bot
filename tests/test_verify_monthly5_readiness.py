@@ -266,6 +266,30 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(weakest["selected_plan"], "normal_long_selector")
         self.assertLess(weakest["return_pct"], 0.0)
 
+    def test_active_underperforming_plan_expires_after_rolling_window(self):
+        weak_rows = [
+            self._row(1000 + idx * 60, action="evaluate_long", plan="normal_long_selector", mark_price=100.0 - idx, exposure_cap=0.5, max_leverage=1)
+            for idx in range(13)
+        ]
+        later_rows = [
+            self._row(1000 + 48 * 3600 + idx * 60, action="wait", plan="normal_wait", mark_price=90.0)
+            for idx in range(2)
+        ]
+
+        report = monthly5_shadow.build_readiness_report(
+            weak_rows + later_rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=15,
+            min_span_hours=0.1,
+            max_age_sec=None,
+            now_ts=1000 + 48 * 3600 + 60,
+        )
+
+        self.assertGreaterEqual(report["shadow_underperforming_plan_count"], 1)
+        self.assertEqual(report["shadow_active_underperforming_plan_count"], 0)
+        self.assertEqual(report["shadow_active_underperforming_plan_keys"], [])
+
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [
             self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.1, max_leverage=1),

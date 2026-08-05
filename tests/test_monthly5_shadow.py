@@ -196,6 +196,22 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["exposure_cap"], 0.0)
         self.assertIn("underperforming_plan_wait", selection["reason_codes"])
 
+    def test_market_selection_resumes_when_underperforming_key_expires(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "chop", "action": "reduce"},
+            underperforming_plan_keys=[],
+        )
+
+        self.assertEqual(selection["selected_plan"], "normal_long_selector")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["exposure_cap"], 0.35)
+        self.assertNotIn("underperforming_plan_wait", selection["reason_codes"])
+
     def test_execution_guard_blocks_risk_off(self):
         guard = monthly5_shadow.build_execution_guard(
             {

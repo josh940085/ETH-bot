@@ -82,6 +82,7 @@ def main() -> int:
             f"shadow_rolling_projected_monthly_return_pct={report.get('shadow_rolling_projected_monthly_return_pct', 0.0)} "
             f"shadow_rolling_monthly_target_met={str(bool(report.get('shadow_rolling_monthly_target_met'))).lower()} "
             f"shadow_underperforming_plan_count={report.get('shadow_underperforming_plan_count', 0)} "
+            f"shadow_active_underperforming_plan_count={report.get('shadow_active_underperforming_plan_count', 0)} "
             f"promotion_ready={str(bool(report.get('promotion_ready'))).lower()}"
         )
         for item in report.get("failures") or []:
