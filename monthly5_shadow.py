@@ -12,6 +12,7 @@ SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
 MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
+ROLLING_WINDOW_HOURS = 24.0
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
 INTRADAY_STOP_PCT = -8.0
 POST_LOCK_EXPOSURE_SCALE = 0.15
@@ -287,6 +288,28 @@ def _build_shadow_monthly_projection(shadow_paper, span_hours, *, min_projection
     }
 
 
+def _prefix_metrics(prefix, payload):
+    prefixed = {}
+    for key, value in payload.items():
+        name = str(key)
+        if name.startswith("shadow_"):
+            name = name[len("shadow_") :]
+        prefixed[f"{prefix}_{name}"] = value
+    return prefixed
+
+
+def _rolling_window_rows(rows, *, latest_ts, window_hours=ROLLING_WINDOW_HOURS):
+    latest_ts = _safe_int(latest_ts, 0)
+    if latest_ts <= 0:
+        return []
+    cutoff_ts = latest_ts - int(max(0.0, _safe_float(window_hours, ROLLING_WINDOW_HOURS)) * 3600)
+    return [
+        row
+        for row in rows
+        if isinstance(row, dict) and _safe_int(row.get("updated_ts"), 0) >= cutoff_ts
+    ]
+
+
 def build_readiness_report(
     rows,
     *,
@@ -425,6 +448,24 @@ def build_readiness_report(
         span_hours,
         min_projection_span_hours=min_span_hours,
     )
+    latest_ts = timestamps[-1] if timestamps else 0
+    rolling_rows = _rolling_window_rows(valid_rows, latest_ts=latest_ts)
+    rolling_timestamps = sorted(
+        _safe_int(row.get("updated_ts"), 0)
+        for row in rolling_rows
+        if _safe_int(row.get("updated_ts"), 0) > 0
+    )
+    rolling_span_hours = (
+        (rolling_timestamps[-1] - rolling_timestamps[0]) / 3600.0
+        if len(rolling_timestamps) >= 2
+        else 0.0
+    )
+    rolling_paper = _build_shadow_paper_return(rolling_rows)
+    rolling_projection = _build_shadow_monthly_projection(
+        rolling_paper,
+        rolling_span_hours,
+        min_projection_span_hours=min_span_hours,
+    )
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
         warnings.append(f"sample count collecting: rows={len(valid_rows)} < {min_records}")
@@ -447,10 +488,23 @@ def build_readiness_report(
             f"{shadow_projection['shadow_projected_monthly_return_pct']:.4f}% < "
             f"{shadow_projection['shadow_monthly_target_pct']:.4f}%"
         )
+    if (
+        rolling_projection["shadow_monthly_projection_valid"]
+        and not rolling_projection["shadow_monthly_target_met"]
+    ):
+        warnings.append(
+            "shadow rolling 24h projection below target: "
+            f"{rolling_projection['shadow_projected_monthly_return_pct']:.4f}% < "
+            f"{rolling_projection['shadow_monthly_target_pct']:.4f}%"
+        )
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
-    promotion_ready = ready and shadow_projection["shadow_monthly_target_met"]
+    promotion_ready = (
+        ready
+        and shadow_projection["shadow_monthly_target_met"]
+        and rolling_projection["shadow_monthly_target_met"]
+    )
     status = "ready" if ready else "collecting"
     if failures:
         status = "invalid"
@@ -491,6 +545,11 @@ def build_readiness_report(
         "weighted_shadow_flat_sec": round(max(0.0, weighted_shadow_flat_sec), 4),
         **shadow_paper,
         **shadow_projection,
+        "shadow_rolling_window_hours": round(ROLLING_WINDOW_HOURS, 4),
+        "shadow_rolling_rows": len(rolling_rows),
+        "shadow_rolling_span_hours": round(max(0.0, rolling_span_hours), 4),
+        **_prefix_metrics("shadow_rolling", rolling_paper),
+        **_prefix_metrics("shadow_rolling", rolling_projection),
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,

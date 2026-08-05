@@ -2891,6 +2891,11 @@
     const monthlyProjectionValid = Boolean(state.shadow_monthly_projection_valid);
     const monthlyTargetMet = Boolean(state.shadow_monthly_target_met);
     const monthlyTargetLabel = monthlyProjectionValid ? (monthlyTargetMet ? "OK" : "WAIT") : "樣本不足";
+    const rollingPaperReturnPct = Number.isFinite(Number(state.shadow_rolling_paper_return_pct)) ? Number(state.shadow_rolling_paper_return_pct) : 0;
+    const rollingProjectedMonthlyPct = Number.isFinite(Number(state.shadow_rolling_projected_monthly_return_pct)) ? Number(state.shadow_rolling_projected_monthly_return_pct) : 0;
+    const rollingProjectionValid = Boolean(state.shadow_rolling_monthly_projection_valid);
+    const rollingTargetMet = Boolean(state.shadow_rolling_monthly_target_met);
+    const rollingTargetLabel = rollingProjectionValid ? (rollingTargetMet ? "OK" : "WAIT") : "樣本不足";
     const warnings = Array.isArray(state.warnings) ? state.warnings.slice(0, 2) : [];
     const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
     const label = status === "ready" || ready ? "可審核" : (status === "invalid" ? "異常" : "收集中");
@@ -2907,6 +2912,7 @@
         <div class="service-row"><span>實單空倉</span><strong>${actualFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>紙上報酬</span><strong>${paperReturnPct.toFixed(2)}% / ${paperWinRatePct.toFixed(0)}% (${paperIntervals})</strong></div>
         <div class="service-row"><span>月化投影</span><strong>${projectedMonthlyPct.toFixed(2)}% / ${monthlyTargetPct.toFixed(1)}% ${monthlyTargetLabel}</strong></div>
+        <div class="service-row"><span>近24h</span><strong>${rollingPaperReturnPct.toFixed(2)}% / ${rollingProjectedMonthlyPct.toFixed(2)}% ${rollingTargetLabel}</strong></div>
         <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
       </div>
       <div class="command-meta">${warningText}</div>`;

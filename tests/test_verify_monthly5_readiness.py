@@ -213,7 +213,33 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertTrue(report["ready"])
         self.assertTrue(report["shadow_monthly_projection_valid"])
         self.assertTrue(report["shadow_monthly_target_met"])
+        self.assertTrue(report["shadow_rolling_monthly_projection_valid"])
+        self.assertTrue(report["shadow_rolling_monthly_target_met"])
         self.assertTrue(report["promotion_ready"])
+
+    def test_promotion_ready_requires_rolling_24h_target(self):
+        rows = [
+            self._row(1000, action="evaluate_long", plan="normal_long_selector", mark_price=100.0, exposure_cap=0.1, max_leverage=5),
+            self._row(1000 + 24 * 3600, action="evaluate_long", plan="normal_long_selector", mark_price=120.0, exposure_cap=0.1, max_leverage=5),
+            self._row(1000 + 48 * 3600, action="wait", plan="normal_wait", mark_price=119.0),
+        ]
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=3,
+            min_span_hours=24.0,
+            max_age_sec=None,
+            now_ts=1000 + 48 * 3600,
+        )
+
+        self.assertTrue(report["ready"])
+        self.assertTrue(report["shadow_monthly_target_met"])
+        self.assertTrue(report["shadow_rolling_monthly_projection_valid"])
+        self.assertFalse(report["shadow_rolling_monthly_target_met"])
+        self.assertFalse(report["promotion_ready"])
+        self.assertTrue(any("shadow rolling 24h projection below target" in item for item in report["warnings"]))
 
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [
