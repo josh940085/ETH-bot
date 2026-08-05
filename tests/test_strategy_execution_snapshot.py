@@ -1082,6 +1082,73 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(override["applied"])
         self.assertEqual(override["reason"], "monthly5_wait_override_sl_cooldown")
 
+    def test_monthly5_signal_override_can_promote_rr_wait_when_quality_recovers(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（RR不足）",
+            "score": 0.51,
+            "atr": 80.0,
+            "event_risk": 0,
+            "ai_prob": 0.52,
+            "ai_long_prob": 0.53,
+            "ai_short_prob": 0.47,
+            "net_edge_rate_est": 0.0012,
+            "breakout_attempt": 1,
+            "breakout_confirmed": False,
+            "breakout_quality_score": 2.8,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.35,
+                "reason_codes": ["underperforming_probe_success"],
+            }
+        }
+
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "", "last_close_ts": 0}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertTrue(override["applied"])
+        self.assertEqual(override["direction"], "long")
+        self.assertEqual(override["position_size"], 0.15)
+
+    def test_monthly5_signal_override_blocks_rr_wait_when_edge_or_breakout_is_weak(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（RR不足）",
+            "score": 0.51,
+            "atr": 80.0,
+            "event_risk": 0,
+            "net_edge_rate_est": -0.0006,
+            "breakout_attempt": 1,
+            "breakout_confirmed": False,
+            "breakout_quality_score": 2.0,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.35,
+                "reason_codes": ["underperforming_probe_success"],
+            }
+        }
+
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "", "last_close_ts": 0}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertFalse(override["applied"])
+        self.assertEqual(override["reason"], "monthly5_rr_wait_quality_block")
+        self.assertLess(override["net_edge_rate_est"], override["min_net_edge_rate_est"])
+
     def test_monthly5_signal_override_respects_underperforming_wait(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
         decision = {

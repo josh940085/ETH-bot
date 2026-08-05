@@ -6075,7 +6075,8 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         "觀望（支撐連測未跌破）",
         "觀望（壓力連測未突破）",
     )
-    if final not in allowed_wait_reasons:
+    rr_wait_candidate = final == "觀望（RR不足）"
+    if final not in allowed_wait_reasons and not rr_wait_candidate:
         return {"applied": False, "reason": "protected_wait_reason", "final": final}
 
     selection = {}
@@ -6167,6 +6168,42 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         ai_long_prob = _safe_float(decision.get("ai_long_prob"), 0.5)
         ai_prob = max(_safe_float(decision.get("ai_prob"), 0.5), ai_short_prob)
     final_text, sl, tp = auto_fix_trade_plan(final_text, entry, sl, tp, atr)
+
+    if rr_wait_candidate:
+        monthly5_risk = abs(entry - _safe_float(sl, entry))
+        monthly5_reward = abs(_safe_float(tp, entry) - entry)
+        monthly5_rr = monthly5_reward / max(monthly5_risk, 1e-9)
+        min_monthly5_rr = max(
+            1.2,
+            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR_WAIT_MIN_RR", 1.45), 1.45),
+        )
+        net_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
+        min_net_edge = _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR_WAIT_MIN_NET_EDGE", 0.0), 0.0)
+        breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
+        breakout_confirmed = bool(decision.get("breakout_confirmed", False))
+        breakout_quality = _safe_float(decision.get("breakout_quality_score"), 0.0)
+        min_breakout_quality = max(
+            0.0,
+            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR_WAIT_MIN_BREAKOUT_QUALITY", 2.5), 2.5),
+        )
+        if (
+            monthly5_rr < min_monthly5_rr
+            or net_edge < min_net_edge
+            or (breakout_attempt and not breakout_confirmed and breakout_quality < min_breakout_quality)
+        ):
+            return {
+                "applied": False,
+                "reason": "monthly5_rr_wait_quality_block",
+                "final": final,
+                "monthly5_rr": round(monthly5_rr, 4),
+                "min_monthly5_rr": round(min_monthly5_rr, 4),
+                "net_edge_rate_est": round(net_edge, 6),
+                "min_net_edge_rate_est": round(min_net_edge, 6),
+                "breakout_quality_score": round(breakout_quality, 4),
+                "min_breakout_quality": round(min_breakout_quality, 4),
+                "breakout_confirmed": breakout_confirmed,
+                "selected_plan": selected_plan,
+            }
 
     exposure_cap = max(0.0, min(1.0, _safe_float(selection.get("exposure_cap"), 0.0)))
     max_size = max(
