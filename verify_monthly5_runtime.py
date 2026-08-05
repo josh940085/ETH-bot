@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import monthly5_shadow
+import monthly5_research_selector
 from verify_monthly5_candidate import _failures as candidate_failures
 
 
@@ -269,6 +270,42 @@ def _verify_promotion_gate(position: dict) -> list[str]:
     return failures
 
 
+def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
+    failures: list[str] = []
+    probe = monthly5_research_selector.build_research_selector_probe()
+    evidence = spec.get("backtest_evidence") if isinstance(spec.get("backtest_evidence"), dict) else {}
+    _require(bool(probe.get("artifact_available")), failures, "monthly5 research selector artifact missing")
+    _require(
+        probe.get("selected_candidate") == evidence.get("candidate_name"),
+        failures,
+        "monthly5 research selector candidate mismatch",
+    )
+    _require(
+        probe.get("selector_source") == monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+        failures,
+        "monthly5 research selector source mismatch",
+    )
+    _require(
+        0 < _safe_float(probe.get("max_leverage")) <= 5.0,
+        failures,
+        "monthly5 research selector leverage missing or exceeds 5x",
+    )
+    _require(
+        str(probe.get("primary_direction") or "") in {"long", "long_or_short"},
+        failures,
+        "monthly5 research selector direction is not actionable",
+    )
+    panel_probe = position.get("monthly5_research_selector")
+    panel_probe = panel_probe if isinstance(panel_probe, dict) else {}
+    if panel_probe:
+        _require(
+            panel_probe.get("top_pick") == probe.get("top_pick"),
+            failures,
+            "position monthly5_research_selector top_pick mismatch",
+        )
+    return failures
+
+
 def _taipei_ts(value: str) -> float:
     return datetime.fromisoformat(value).replace(tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
 
@@ -469,6 +506,7 @@ def main() -> int:
     failures.extend(_verify_shadow_state("position", _shadow_from_position(position), spec, args.max_age_sec))
     failures.extend(_verify_shadow_state("shadow_file", shadow, spec, args.max_age_sec))
     failures.extend(_verify_promotion_gate(position))
+    failures.extend(_verify_research_selector_artifact(position, spec))
     history_path = Path(args.history)
     if history_path.exists():
         failures.extend(_verify_shadow_history("history_file", _load_jsonl(history_path), shadow, spec, args.max_age_sec))
@@ -484,6 +522,7 @@ def main() -> int:
 
     position_shadow = _shadow_from_position(position)
     selection = position_shadow.get("market_selection") if isinstance(position_shadow.get("market_selection"), dict) else {}
+    research_probe = monthly5_research_selector.build_research_selector_probe()
     history_status = "history=ok" if Path(args.history).exists() else "history=missing"
     print(
         "PASS monthly5_runtime "
@@ -491,6 +530,9 @@ def main() -> int:
         f"mode={position_shadow.get('mode')} "
         f"selected_plan={selection.get('selected_plan')} "
         f"exposure_cap={selection.get('exposure_cap')} "
+        f"research_top_pick={research_probe.get('top_pick')} "
+        f"research_direction={research_probe.get('primary_direction')} "
+        f"research_leverage={research_probe.get('max_leverage')} "
         f"{history_status} "
         "e2e=ok"
     )

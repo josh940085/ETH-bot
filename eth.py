@@ -47,6 +47,7 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from local_chat import extract_chat_text as _extract_chat_text
 import monthly5_shadow
+import monthly5_research_selector
 from n8n_client import post_n8n_notification
 from runtime_config import (
     env_float as _safe_float_env,
@@ -6816,6 +6817,7 @@ def sync_position_panel(current_price=None):
         _safe_float(payload.get("binance_mark_price"), last_price)
     )
     monthly5_readiness_state = _build_monthly5_readiness_panel_state()
+    monthly5_research_selector_state = monthly5_research_selector.build_research_selector_probe()
     monthly5_position_guard_state = dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {})
     if not active_trade.get("open"):
         monthly5_position_guard_state = monthly5_shadow.build_position_guard(
@@ -6867,6 +6869,7 @@ def sync_position_panel(current_price=None):
             "monthly5_position_guard": dict(monthly5_position_guard_state or {}),
             "monthly5_signal_override": dict(POSITION_PANEL_STATE.get("monthly5_signal_override") or {}),
             "monthly5_readiness": dict(monthly5_readiness_state or {}),
+            "monthly5_research_selector": dict(monthly5_research_selector_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
