@@ -701,6 +701,7 @@ def build_readiness_report(
             | probe_failed_keys
         )
         - recovering_keys
+        - probe_success_keys
     )
     flat_cap = None if max_flat_time_pct is None else max(0.0, min(100.0, _safe_float(max_flat_time_pct, 100.0)))
     if len(valid_rows) < min_records:
@@ -1121,9 +1122,11 @@ def build_market_selection(
     suppressed_exposure_cap = 0.0
     recovery_probe = False
     recovery_probe_key = ""
+    probe_success = False
     if shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in probe_success_keys:
         reason_codes.append("underperforming_probe_success")
         rationale = "低曝險探測表現轉正，恢復正常月報酬5%策略評估"
+        probe_success = True
     elif shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in recovering_keys:
         exposure_cap = round(min(exposure_cap, RECOVERY_PROBE_EXPOSURE_CAP), 4)
         reason_codes.append("underperforming_recovery_probe")
@@ -1131,7 +1134,8 @@ def build_market_selection(
         recovery_probe_key = selection_key
         rationale = "近期假想恢復表現轉正，使用低曝險探測是否可恢復月報酬5%策略"
     if (
-        shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"}
+        not probe_success
+        and shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"}
         and selection_key in underperforming_keys
         and selection_key in probe_candidate_keys
     ):
@@ -1140,7 +1144,11 @@ def build_market_selection(
         recovery_probe = True
         recovery_probe_key = selection_key
         rationale = "同類市場仍偏弱但低曝險探測半程轉正，僅允許5%倉位驗證以降低空倉"
-    elif shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in underperforming_keys:
+    elif (
+        not probe_success
+        and shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"}
+        and selection_key in underperforming_keys
+    ):
         suppressed_plan = selected_plan
         suppressed_action = shadow_action
         suppressed_key = selection_key

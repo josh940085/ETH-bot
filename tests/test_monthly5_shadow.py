@@ -257,6 +257,12 @@ class Monthly5ShadowTests(unittest.TestCase):
             recovering_plan_keys=[
                 "normal_long_selector|evaluate_long|bullish|chop",
             ],
+            underperforming_plan_keys=[
+                "normal_long_selector|evaluate_long|bullish|chop",
+            ],
+            probe_candidate_plan_keys=[
+                "normal_long_selector|evaluate_long|bullish|chop",
+            ],
             probe_success_plan_keys=[
                 "normal_long_selector|evaluate_long|bullish|chop",
             ],
@@ -267,6 +273,8 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["exposure_cap"], 0.35)
         self.assertFalse(selection["recovery_probe"])
         self.assertIn("underperforming_probe_success", selection["reason_codes"])
+        self.assertNotIn("underperforming_micro_probe", selection["reason_codes"])
+        self.assertNotIn("underperforming_plan_wait", selection["reason_codes"])
 
     def test_market_selection_allows_micro_probe_for_positive_half_probe_candidate(self):
         selection = monthly5_shadow.build_market_selection(

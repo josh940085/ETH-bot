@@ -457,6 +457,54 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             failure["shadow_active_underperforming_plan_keys"],
         )
 
+    def test_probe_success_removes_matching_active_underperforming_key(self):
+        rows = []
+        for idx in range(13):
+            rows.append(
+                self._row(
+                    1000 + idx * 60,
+                    action="evaluate_long",
+                    plan="normal_long_selector",
+                    mark_price=100.0 - idx,
+                    exposure_cap=0.5,
+                    max_leverage=1,
+                )
+            )
+        base_ts = 1000 + 20 * 60
+        for idx in range(monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS + 1):
+            row = self._row(
+                base_ts + idx * 60,
+                action="evaluate_long",
+                plan="normal_long_selector",
+                mark_price=88.0 + idx,
+                exposure_cap=monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP,
+                max_leverage=1,
+            )
+            row["recovery_probe"] = True
+            row["recovery_probe_key"] = "normal_long_selector|evaluate_long|bullish|chop"
+            rows.append(row)
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=len(rows),
+            min_span_hours=0.01,
+            max_age_sec=None,
+            now_ts=base_ts + monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS * 60,
+        )
+
+        self.assertIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            report["shadow_recovery_probe_success_keys"],
+        )
+        self.assertEqual(report["shadow_recovery_probe_state"], "probe_success")
+        self.assertNotIn(
+            "normal_long_selector|evaluate_long|bullish|chop",
+            report["shadow_active_underperforming_plan_keys"],
+        )
+        self.assertNotIn("active_underperforming_plan", report["promotion_blockers"])
+
     def test_recovery_probe_reports_remaining_intervals_before_outcome(self):
         rows = []
         for idx in range(4):
