@@ -82,6 +82,8 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["status"], "ready")
         self.assertTrue(report["ready"])
         self.assertEqual(report["evaluate_rows"], 5)
+        self.assertEqual(report["risk_rows"], 0)
+        self.assertFalse(any("risk-mode" in item for item in report["warnings"]))
 
     def test_collecting_when_weighted_shadow_flat_time_exceeds_backtest_cap(self):
         rows = [

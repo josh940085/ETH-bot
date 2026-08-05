@@ -710,8 +710,6 @@ def build_readiness_report(
         warnings.append(f"sample span collecting: hours={span_hours:.2f} < {min_span_hours:.2f}")
     if not evaluate_rows:
         warnings.append("no evaluate_long/evaluate_short/reduced_exposure samples yet")
-    if not risk_rows:
-        warnings.append("no live risk-mode samples yet")
     if flat_cap is not None and shadow_flat_time_pct > flat_cap:
         warnings.append(f"shadow flat time pct high: {shadow_flat_time_pct:.2f}% > {flat_cap:.2f}%")
     if span_hours >= min_span_hours and shadow_paper["shadow_paper_intervals"] > 0 and shadow_paper["shadow_paper_return_pct"] < 0:
