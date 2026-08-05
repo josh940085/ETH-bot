@@ -62,6 +62,8 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["status"], "collecting")
         self.assertFalse(report["ready"])
         self.assertEqual(report["failures"], [])
+        self.assertIn("sample_count", report["promotion_blockers"])
+        self.assertIn("sample_span", report["promotion_blockers"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))
 
     def test_ready_when_history_has_enough_span_and_evaluation_samples(self):
@@ -216,6 +218,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertTrue(report["shadow_rolling_monthly_projection_valid"])
         self.assertTrue(report["shadow_rolling_monthly_target_met"])
         self.assertTrue(report["promotion_ready"])
+        self.assertEqual(report["promotion_blockers"], [])
 
     def test_promotion_ready_requires_rolling_24h_target(self):
         rows = [
@@ -239,6 +242,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertTrue(report["shadow_rolling_monthly_projection_valid"])
         self.assertFalse(report["shadow_rolling_monthly_target_met"])
         self.assertFalse(report["promotion_ready"])
+        self.assertIn("shadow_rolling_monthly_target", report["promotion_blockers"])
         self.assertTrue(any("shadow rolling 24h projection below target" in item for item in report["warnings"]))
 
     def test_grouped_paper_return_flags_underperforming_plan(self):
@@ -258,6 +262,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         )
 
         self.assertGreaterEqual(report["shadow_underperforming_plan_count"], 1)
+        self.assertIn("active_underperforming_plan", report["promotion_blockers"])
         self.assertIn(
             "normal_long_selector|evaluate_long|bullish|chop",
             report["shadow_underperforming_plan_keys"],

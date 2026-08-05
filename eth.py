@@ -6162,6 +6162,8 @@ def _build_monthly5_readiness_panel_state():
             "status": str(report.get("status") or "invalid"),
             "ready": bool(report.get("ready", False)),
             "promotion_ready": bool(report.get("promotion_ready", False)),
+            "promotion_blockers": list(report.get("promotion_blockers") or [])[:8],
+            "promotion_blocker_count": _safe_int(report.get("promotion_blocker_count"), 0),
             "rows": _safe_int(report.get("rows"), 0),
             "span_hours": round(_safe_float(report.get("span_hours"), 0.0), 4),
             "latest_age_sec": round(_safe_float(report.get("latest_age_sec"), 0.0), 1),

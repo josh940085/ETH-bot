@@ -96,6 +96,8 @@ def main() -> int:
             f"shadow_recovery_probe_failed_count={report.get('shadow_recovery_probe_failed_count', 0)} "
             f"shadow_recovery_probe_observed_intervals={report.get('shadow_recovery_probe_observed_intervals', 0)} "
             f"shadow_recovery_probe_remaining_intervals={report.get('shadow_recovery_probe_remaining_intervals', 0)} "
+            f"promotion_blocker_count={report.get('promotion_blocker_count', 0)} "
+            f"promotion_blockers={','.join(str(item) for item in (report.get('promotion_blockers') or []))} "
             f"promotion_ready={str(bool(report.get('promotion_ready'))).lower()}"
         )
         for item in report.get("failures") or []:

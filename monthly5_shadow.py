@@ -699,10 +699,34 @@ def build_readiness_report(
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
+    promotion_blockers = []
+    if failures:
+        promotion_blockers.append("invalid_history")
+    if len(valid_rows) < min_records:
+        promotion_blockers.append("sample_count")
+    if span_hours < min_span_hours:
+        promotion_blockers.append("sample_span")
+    if not evaluate_rows:
+        promotion_blockers.append("no_evaluate_samples")
+    if not flat_ok:
+        promotion_blockers.append("shadow_flat_time_high")
+    if not shadow_projection["shadow_monthly_projection_valid"]:
+        promotion_blockers.append("shadow_projection_not_valid")
+    elif not shadow_projection["shadow_monthly_target_met"]:
+        promotion_blockers.append("shadow_monthly_target")
+    if not rolling_projection["shadow_monthly_projection_valid"]:
+        promotion_blockers.append("shadow_rolling_projection_not_valid")
+    elif not rolling_projection["shadow_monthly_target_met"]:
+        promotion_blockers.append("shadow_rolling_monthly_target")
+    if active_underperforming_keys:
+        promotion_blockers.append("active_underperforming_plan")
+    if recovery_probe_state in {"collecting", "probe_ready", "probing", "probe_failed"}:
+        promotion_blockers.append(f"recovery_probe_{recovery_probe_state}")
     promotion_ready = (
         ready
         and shadow_projection["shadow_monthly_target_met"]
         and rolling_projection["shadow_monthly_target_met"]
+        and not promotion_blockers
     )
     status = "ready" if ready else "collecting"
     if failures:
@@ -712,6 +736,8 @@ def build_readiness_report(
         "status": status,
         "ready": ready,
         "promotion_ready": promotion_ready,
+        "promotion_blockers": promotion_blockers,
+        "promotion_blocker_count": len(promotion_blockers),
         "failures": failures,
         "warnings": warnings,
         "rows": len(valid_rows),

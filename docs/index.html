@@ -2911,6 +2911,9 @@
     const probeFailedCount = Number.isFinite(Number(state.shadow_recovery_probe_failed_count)) ? Number(state.shadow_recovery_probe_failed_count) : 0;
     const probeRemainingIntervals = Number.isFinite(Number(state.shadow_recovery_probe_remaining_intervals)) ? Number(state.shadow_recovery_probe_remaining_intervals) : 0;
     const probeState = String(state.shadow_recovery_probe_state || "idle");
+    const promotionBlockers = Array.isArray(state.promotion_blockers) ? state.promotion_blockers.slice(0, 3).map((item) => String(item)) : [];
+    const promotionBlockerCount = Number.isFinite(Number(state.promotion_blocker_count)) ? Number(state.promotion_blocker_count) : promotionBlockers.length;
+    const promotionBlockerLabel = promotionBlockers.length ? `${promotionBlockers.join(", ")}${promotionBlockerCount > promotionBlockers.length ? ` +${promotionBlockerCount - promotionBlockers.length}` : ""}` : "none";
     const weakestGroupLabel = weakestGroup
       ? `${String(weakestGroup.selected_plan || "-").replace(/^normal_/, "")} ${Number(weakestGroup.return_pct || 0).toFixed(2)}% (${Number(weakestGroup.intervals || 0)}) active:${activeWeakCount} probe:${recoveringCount} wait:${suppressedRemainingIntervals} ${probeState} pwait:${probeRemainingIntervals} ok:${probeSuccessCount} fail:${probeFailedCount}`
       : "-";
@@ -2932,6 +2935,7 @@
         <div class="service-row"><span>月化投影</span><strong>${projectedMonthlyPct.toFixed(2)}% / ${monthlyTargetPct.toFixed(1)}% ${monthlyTargetLabel}</strong></div>
         <div class="service-row"><span>近24h</span><strong>${rollingPaperReturnPct.toFixed(2)}% / ${rollingProjectedMonthlyPct.toFixed(2)}% ${rollingTargetLabel}</strong></div>
         <div class="service-row"><span>實單段</span><strong>${activationSpanHours.toFixed(2)}h ${activationPaperReturnPct.toFixed(2)}% / ${activationProjectedMonthlyPct.toFixed(2)}% ${activationTargetLabel}</strong></div>
+        <div class="service-row"><span>升級阻擋</span><strong>${escapeHtml(promotionBlockerLabel)}</strong></div>
         <div class="service-row"><span>弱勢組</span><strong>${escapeHtml(weakestGroupLabel)}</strong></div>
         <div class="service-row"><span>評估 / 風控</span><strong>${evaluateRows} / ${riskRows}</strong></div>
       </div>
