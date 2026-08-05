@@ -5239,6 +5239,31 @@ def _review_stop_loss_event(direction, entry, tp, sl, close_price, candle_high, 
     return review
 
 
+def _refresh_recent_sl_opposite_review_from_panel():
+    if str(POSITION_PANEL_STATE.get("last_close_reason") or "").upper() != "SL":
+        return False
+    review = POSITION_PANEL_STATE.get("last_sl_review")
+    if not isinstance(review, dict) or not review.get("direction"):
+        return False
+    max_age_sec = max(300.0, _safe_float(os.getenv("TRADE_POST_SL_REVIEW_REFRESH_SEC", 21600), 21600))
+    last_close_ts = _safe_float(POSITION_PANEL_STATE.get("last_close_ts"), 0.0)
+    if last_close_ts > 0 and time.time() - last_close_ts > max_age_sec:
+        return False
+
+    refreshed = _build_post_sl_opposite_review(
+        str(review.get("direction") or "long"),
+        _build_sl_review_context_from_panel(),
+    )
+    previous = review.get("opposite_direction_review")
+    if previous == refreshed:
+        return False
+    updated = dict(review)
+    updated["opposite_direction_review"] = refreshed
+    updated["opposite_review_refreshed_ts"] = int(time.time())
+    POSITION_PANEL_STATE["last_sl_review"] = updated
+    return True
+
+
 def _recent_sl_review_guard_reason(final):
     if not _is_truthy(os.getenv("TRADE_SL_REVIEW_GUARD_ENABLED", "1")) or final.startswith("觀望"):
         return ""
@@ -10056,6 +10081,7 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
             "monthly5_signal_override": dict(decision.get("monthly5_signal_override") or {}),
         }
     )
+    _refresh_recent_sl_opposite_review_from_panel()
 
 # =============================
 # Indicators

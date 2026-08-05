@@ -1076,6 +1076,56 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(eth.active_trade["monthly5_position_guard_ts"], 0.0)
         sync_panel.assert_called_once_with(64100.0)
 
+    def test_strategy_snapshot_refreshes_recent_sl_opposite_review(self):
+        eth.POSITION_PANEL_STATE.update(
+            {
+                "last_close_reason": "SL",
+                "last_close_ts": 1900,
+                "last_sl_review": {
+                    "direction": "long",
+                    "opposite_direction_review": {
+                        "opposite_direction": "short",
+                        "ready_for_fresh_evaluation": False,
+                        "summary": "stale",
+                    },
+                },
+            }
+        )
+        decision = {
+            "final": "觀望（RR不足）",
+            "score": 0.55,
+            "ai_prob": 0.55,
+            "ai_long_prob": 0.35,
+            "ai_short_prob": 0.72,
+            "htf": -1,
+            "mid_trend": -1,
+            "macro_bias": -0.6,
+            "derivatives_pressure": 0.0,
+            "event_risk": 0,
+            "breakout_attempt": -1,
+            "host_opening_logic": {
+                "direction": "short",
+                "mode": "post_sl_reversal_probe",
+                "confidence": 0.72,
+            },
+        }
+
+        with patch.object(eth.time, "time", return_value=2000.0):
+            eth._update_panel_execution_snapshot(
+                decision,
+                64100.0,
+                "waiting",
+                "觀望（RR不足）",
+                actual_open=False,
+            )
+
+        review = eth.POSITION_PANEL_STATE["last_sl_review"]
+        opposite = review["opposite_direction_review"]
+        self.assertEqual(opposite["opposite_direction"], "short")
+        self.assertTrue(opposite["ready_for_fresh_evaluation"])
+        self.assertTrue(opposite["requires_normal_entry_validation"])
+        self.assertEqual(review["opposite_review_refreshed_ts"], 2000)
+
     def test_monthly5_signal_override_promotes_plain_wait_to_small_long(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
         decision = {
