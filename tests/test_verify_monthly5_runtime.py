@@ -95,6 +95,8 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             "recovery_exposure_scale": monthly5_shadow.RECOVERY_EXPOSURE_SCALE,
             "mode": "normal",
             "updated_ts": 1000,
+            "promotion_ready": False,
+            "promotion_blockers": ["sample_span"],
             "market_selection": {
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
@@ -129,6 +131,7 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures.extend(verify_monthly5_runtime._verify_shadow_state("shadow", shadow, spec, None))
             failures.extend(verify_monthly5_runtime._verify_shadow_history("history", [self._history_row(shadow)], shadow, spec, None))
             failures.extend(verify_monthly5_runtime._verify_guard_scenarios())
+            failures.extend(verify_monthly5_runtime._verify_promotion_gate({"monthly5_shadow": shadow}))
             failures.extend(verify_monthly5_runtime._verify_end_to_end_scenarios())
 
         self.assertEqual(failures, [])
@@ -194,6 +197,30 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures = verify_monthly5_runtime._verify_shadow_state("shadow", shadow, spec, None)
 
         self.assertIn("shadow missing market_selection", failures)
+
+    def test_runtime_verifier_rejects_disabled_promotion_gate(self):
+        position = {"monthly5_shadow": self._shadow()}
+
+        with unittest.mock.patch.dict(
+            verify_monthly5_runtime.os.environ,
+            {"MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY": "0"},
+        ):
+            failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 signal override promotion gate disabled", failures)
+
+    def test_runtime_verifier_rejects_override_applied_before_promotion_ready(self):
+        position = {
+            "monthly5_shadow": self._shadow(),
+            "monthly5_signal_override": {
+                "applied": True,
+                "reason": "monthly5_market_selection",
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 signal override applied before promotion_ready", failures)
 
 
 if __name__ == "__main__":

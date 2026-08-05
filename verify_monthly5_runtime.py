@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import time
 from datetime import datetime
 from pathlib import Path
@@ -216,6 +217,36 @@ def _verify_guard_scenarios() -> list[str]:
     return failures
 
 
+def _verify_promotion_gate(position: dict) -> list[str]:
+    failures: list[str] = []
+    gate_enabled = str(
+        os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1") or "1"
+    ).strip().lower() not in {"0", "false", "no", "off"}
+    _require(gate_enabled, failures, "monthly5 signal override promotion gate disabled")
+
+    shadow = _shadow_from_position(position)
+    if shadow:
+        _require(
+            isinstance(shadow.get("promotion_ready"), bool),
+            failures,
+            "position monthly5_shadow missing promotion_ready boolean",
+        )
+        _require(
+            isinstance(shadow.get("promotion_blockers"), list),
+            failures,
+            "position monthly5_shadow missing promotion_blockers list",
+        )
+    override = position.get("monthly5_signal_override")
+    override = override if isinstance(override, dict) else {}
+    if override.get("applied") is True:
+        _require(
+            bool(shadow.get("promotion_ready", False)),
+            failures,
+            "monthly5 signal override applied before promotion_ready",
+        )
+    return failures
+
+
 def _taipei_ts(value: str) -> float:
     return datetime.fromisoformat(value).replace(tzinfo=ZoneInfo("Asia/Taipei")).timestamp()
 
@@ -386,6 +417,7 @@ def main() -> int:
     failures.extend(_verify_spec_and_summary(spec))
     failures.extend(_verify_shadow_state("position", _shadow_from_position(position), spec, args.max_age_sec))
     failures.extend(_verify_shadow_state("shadow_file", shadow, spec, args.max_age_sec))
+    failures.extend(_verify_promotion_gate(position))
     history_path = Path(args.history)
     if history_path.exists():
         failures.extend(_verify_shadow_history("history_file", _load_jsonl(history_path), shadow, spec, args.max_age_sec))
