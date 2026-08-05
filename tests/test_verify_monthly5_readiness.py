@@ -303,7 +303,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             )
             rows.append(row)
         base_ts = 1000 + 3600
-        for idx in range(7):
+        for idx in range(monthly5_shadow.SUPPRESSED_RECOVERY_MIN_INTERVALS + 1):
             row = self._row(
                 base_ts + idx * 60,
                 action="wait",
@@ -325,7 +325,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             min_records=20,
             min_span_hours=0.1,
             max_age_sec=None,
-            now_ts=base_ts + 6 * 60,
+            now_ts=base_ts + monthly5_shadow.SUPPRESSED_RECOVERY_MIN_INTERVALS * 60,
         )
 
         self.assertIn(
@@ -333,7 +333,10 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             report["shadow_suppressed_recovering_plan_keys"],
         )
         self.assertEqual(report["shadow_active_underperforming_plan_count"], 0)
-        self.assertGreaterEqual(report["shadow_suppressed_observed_intervals"], 6)
+        self.assertGreaterEqual(
+            report["shadow_suppressed_observed_intervals"],
+            monthly5_shadow.SUPPRESSED_RECOVERY_MIN_INTERVALS,
+        )
         self.assertEqual(report["shadow_suppressed_recovery_remaining_intervals"], 0)
 
     def test_suppressed_recovery_reports_remaining_intervals_before_probe(self):
@@ -373,7 +376,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
 
     def test_recovery_probe_success_and_failure_keys(self):
         success_rows = []
-        for idx in range(7):
+        for idx in range(monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS + 1):
             row = self._row(
                 1000 + idx * 60,
                 action="evaluate_long",
@@ -390,10 +393,10 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             success_rows,
             strategy_id=monthly5_shadow.STRATEGY_ID,
             selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
-            min_records=7,
+            min_records=monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS + 1,
             min_span_hours=0.01,
             max_age_sec=None,
-            now_ts=1000 + 6 * 60,
+            now_ts=1000 + monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS * 60,
         )
 
         self.assertIn(
@@ -401,12 +404,15 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             success["shadow_recovery_probe_success_keys"],
         )
         self.assertEqual(success["shadow_recovery_probe_state"], "probe_success")
-        self.assertGreaterEqual(success["shadow_recovery_probe_observed_intervals"], 6)
+        self.assertGreaterEqual(
+            success["shadow_recovery_probe_observed_intervals"],
+            monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS,
+        )
         self.assertEqual(success["shadow_recovery_probe_remaining_intervals"], 0)
         self.assertEqual(success["shadow_recovery_probe_failed_count"], 0)
 
         failure_rows = []
-        for idx in range(7):
+        for idx in range(monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS + 1):
             row = self._row(
                 2000 + idx * 60,
                 action="evaluate_long",
@@ -423,10 +429,10 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             failure_rows,
             strategy_id=monthly5_shadow.STRATEGY_ID,
             selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
-            min_records=7,
+            min_records=monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS + 1,
             min_span_hours=0.01,
             max_age_sec=None,
-            now_ts=2000 + 6 * 60,
+            now_ts=2000 + monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS * 60,
         )
 
         self.assertIn(
@@ -434,7 +440,10 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             failure["shadow_recovery_probe_failed_keys"],
         )
         self.assertEqual(failure["shadow_recovery_probe_state"], "probe_failed")
-        self.assertGreaterEqual(failure["shadow_recovery_probe_observed_intervals"], 6)
+        self.assertGreaterEqual(
+            failure["shadow_recovery_probe_observed_intervals"],
+            monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS,
+        )
         self.assertEqual(failure["shadow_recovery_probe_remaining_intervals"], 0)
         self.assertIn(
             "normal_long_selector|evaluate_long|bullish|chop",
