@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
-SELECTOR_POLICY_VERSION = 5
+SELECTOR_POLICY_VERSION = 6
 MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
@@ -1628,7 +1628,14 @@ def build_market_selection(
                 and bull_score <= PROFILE_QUALITY_PROBE_MAX_OPPOSING_SCORE
             )
         )
-        if profile_suppressed_key in recovering_keys or profile_suppressed_key in probe_candidate_keys:
+        if profile_suppressed_key in underperforming_keys:
+            reason_codes.append("underperforming_plan_wait")
+            reason_codes.append("profile_quality_wait")
+            selected_plan = "underperforming_wait"
+            shadow_action = "wait"
+            exposure_cap = 0.0
+            rationale = "profile 品質不佳且同類市場選擇已累積負報酬，暫停評估以保護月報酬5%目標"
+        elif profile_suppressed_key in recovering_keys or profile_suppressed_key in probe_candidate_keys:
             selected_plan = "profile_quality_recovery_probe"
             exposure_cap = round(min(exposure_cap, RECOVERY_PROBE_EXPOSURE_CAP), 4)
             reason_codes.append("profile_quality_recovery_probe")

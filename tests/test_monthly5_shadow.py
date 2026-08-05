@@ -530,6 +530,27 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["suppressed_key"], "normal_long_selector|evaluate_long|bullish|chop")
         self.assertIn("profile_quality_recovery_probe", selection["reason_codes"])
 
+    def test_profile_quality_wait_respects_underperforming_suppressed_key(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_execution_reason="觀望（MLX回測輪廓不佳）",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "chop", "action": "reduce"},
+            underperforming_plan_keys=[
+                "normal_long_selector|evaluate_long|bullish|chop",
+            ],
+        )
+
+        self.assertEqual(selection["selected_plan"], "underperforming_wait")
+        self.assertEqual(selection["shadow_action"], "wait")
+        self.assertEqual(selection["exposure_cap"], 0.0)
+        self.assertEqual(selection["suppressed_key"], "normal_long_selector|evaluate_long|bullish|chop")
+        self.assertIn("underperforming_plan_wait", selection["reason_codes"])
+        self.assertIn("profile_quality_wait", selection["reason_codes"])
+
     def test_market_selection_restores_full_cap_after_probe_success(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
