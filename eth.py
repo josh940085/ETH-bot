@@ -8487,6 +8487,12 @@ def _entry_confirmation_requires_pullback(direction, decision):
     """Require a retest for breakout/reclaim entries, not every signal."""
     payload = decision if isinstance(decision, dict) else {}
     final = str(payload.get("final") or "")
+    host_logic = payload.get("host_opening_logic") if isinstance(payload.get("host_opening_logic"), dict) else {}
+    if (
+        str(host_logic.get("mode") or "") == "monthly5_market_selection"
+        and _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_SKIP_RETEST", "1"))
+    ):
+        return False
     reclaim = (
         payload.get("multitimeframe_bull_reclaim")
         if isinstance(payload.get("multitimeframe_bull_reclaim"), dict)

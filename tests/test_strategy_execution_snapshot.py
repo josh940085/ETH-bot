@@ -982,6 +982,19 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(override["applied"])
         self.assertEqual(override["reason"], "monthly5_not_entry")
 
+    def test_monthly5_market_selection_confirmation_skips_breakout_retest(self):
+        decision = {
+            "final": "📈 月報酬5%策略做多",
+            "breakout": 1,
+            "breakout_confirmed": True,
+            "breakout_quality_score": 4.8,
+            "breakout_quality_required": 3.5,
+            "regime": "bull_trend",
+            "host_opening_logic": {"mode": "monthly5_market_selection"},
+        }
+
+        self.assertFalse(eth._entry_confirmation_requires_pullback("long", decision))
+
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"
