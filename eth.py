@@ -6029,6 +6029,32 @@ def _apply_monthly5_execution_guard(decision, direction, requested_size, mark_pr
         direction=direction,
         requested_size=requested_size,
     )
+    selection = shadow_state.get("market_selection") if isinstance(shadow_state.get("market_selection"), dict) else {}
+    reason_codes = {str(code) for code in selection.get("reason_codes") or [] if code}
+    last_close_reason = str(POSITION_PANEL_STATE.get("last_close_reason") or "").upper()
+    last_close_ts = _safe_float(POSITION_PANEL_STATE.get("last_close_ts"), 0.0)
+    cooldown_sec = max(
+        60.0,
+        _safe_float(os.getenv("MONTHLY5_MICRO_PROBE_SL_COOLDOWN_SEC", 900), 900),
+    )
+    if (
+        guard.get("allowed", True)
+        and "underperforming_micro_probe" in reason_codes
+        and last_close_reason == "SL"
+        and time.time() - last_close_ts <= cooldown_sec
+    ):
+        guard = dict(guard)
+        guard.update(
+            {
+                "allowed": False,
+                "reason_code": "monthly5_micro_probe_sl_cooldown",
+                "reason": "月報酬5% micro-probe 剛停損，等待重新確認",
+                "adjusted_size": 0.0,
+                "capped": True,
+                "last_close_reason": last_close_reason,
+                "cooldown_remaining_sec": round(max(0.0, cooldown_sec - (time.time() - last_close_ts)), 1),
+            }
+        )
     POSITION_PANEL_STATE["monthly5_execution_guard"] = guard
     return guard
 

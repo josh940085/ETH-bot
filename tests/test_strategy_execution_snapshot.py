@@ -1041,6 +1041,34 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(override["applied"])
         self.assertEqual(override["reason"], "micro_probe_requires_host_signal")
 
+    def test_monthly5_micro_probe_blocks_reentry_after_recent_sl(self):
+        shadow_state = {
+            "mode": "normal",
+            "max_leverage": 5,
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.05,
+                "reason_codes": ["underperforming_micro_probe"],
+            },
+        }
+
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "SL", "last_close_ts": 1900}, clear=False),
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            guard = eth._apply_monthly5_execution_guard(
+                {"final": "📈 做多"},
+                "long",
+                0.05,
+                mark_price=64000.0,
+            )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["adjusted_size"], 0.0)
+        self.assertEqual(guard["reason_code"], "monthly5_micro_probe_sl_cooldown")
+
     def test_monthly5_market_selection_confirmation_skips_breakout_retest(self):
         decision = {
             "final": "📈 月報酬5%策略做多",
