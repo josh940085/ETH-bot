@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
-SELECTOR_POLICY_VERSION = 2
+SELECTOR_POLICY_VERSION = 3
 MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
