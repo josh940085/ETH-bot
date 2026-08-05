@@ -123,6 +123,8 @@ def main() -> int:
             ]
             if "remaining_hours" in item:
                 parts.append(f"remaining_hours={item.get('remaining_hours')}")
+            if "ready_ts" in item:
+                parts.append(f"ready_ts={item.get('ready_ts')}")
             if "remaining" in item:
                 parts.append(f"remaining={item.get('remaining')}")
             if "remaining_intervals" in item:

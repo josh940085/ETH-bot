@@ -69,6 +69,8 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["failures"], [])
         self.assertEqual(report["sample_count_remaining"], 4)
         self.assertAlmostEqual(report["sample_span_remaining_hours"], 1.0, places=4)
+        self.assertEqual(report["sample_span_ready_ts"], 4600)
+        self.assertEqual(report["promotion_earliest_review_ts"], 4600)
         self.assertIn("sample_count", report["promotion_blockers"])
         self.assertIn("sample_span", report["promotion_blockers"])
         details = {
@@ -77,6 +79,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         }
         self.assertEqual(details["sample_count"]["remaining"], 4)
         self.assertAlmostEqual(details["sample_span"]["remaining_hours"], 1.0, places=4)
+        self.assertEqual(details["sample_span"]["ready_ts"], 4600)
         self.assertIn("shadow_projection_not_valid", details)
         self.assertIn("observed_target_gap_pct", details["shadow_projection_not_valid"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))

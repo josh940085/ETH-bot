@@ -6452,6 +6452,8 @@ def _build_monthly5_readiness_panel_state():
             "sample_count_progress_pct": round(_safe_float(report.get("sample_count_progress_pct"), 0.0), 4),
             "sample_span_remaining_hours": round(_safe_float(report.get("sample_span_remaining_hours"), 0.0), 4),
             "sample_span_progress_pct": round(_safe_float(report.get("sample_span_progress_pct"), 0.0), 4),
+            "sample_span_ready_ts": _safe_int(report.get("sample_span_ready_ts"), 0),
+            "promotion_earliest_review_ts": _safe_int(report.get("promotion_earliest_review_ts"), 0),
             "latest_age_sec": round(_safe_float(report.get("latest_age_sec"), 0.0), 1),
             "evaluate_rows": _safe_int(report.get("evaluate_rows"), 0),
             "risk_rows": _safe_int(report.get("risk_rows"), 0),

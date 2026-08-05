@@ -848,6 +848,12 @@ def build_readiness_report(
     sample_count_progress_pct = min(100.0, (len(valid_rows) / min_records) * 100.0) if min_records > 0 else 100.0
     sample_span_remaining_hours = max(0.0, min_span_hours - span_hours)
     sample_span_progress_pct = min(100.0, (span_hours / min_span_hours) * 100.0) if min_span_hours > 0 else 100.0
+    sample_span_ready_ts = (
+        latest_ts + int(round(sample_span_remaining_hours * 3600.0))
+        if latest_ts > 0 and sample_span_remaining_hours > 0
+        else 0
+    )
+    promotion_earliest_review_ts = sample_span_ready_ts if sample_span_ready_ts > 0 else 0
     promotion_blockers = []
     if failures:
         promotion_blockers.append("invalid_history")
@@ -898,6 +904,7 @@ def build_readiness_report(
                 "current": round(max(0.0, span_hours), 4),
                 "target": round(max(0.0, min_span_hours), 4),
                 "remaining_hours": round(max(0.0, sample_span_remaining_hours), 4),
+                "ready_ts": sample_span_ready_ts,
                 "detail": "至少滿 24 小時才允許月化投影作為上線證據",
             }
         if code == "no_evaluate_samples":
@@ -1003,6 +1010,8 @@ def build_readiness_report(
         "sample_count_progress_pct": round(max(0.0, sample_count_progress_pct), 4),
         "sample_span_remaining_hours": round(max(0.0, sample_span_remaining_hours), 4),
         "sample_span_progress_pct": round(max(0.0, sample_span_progress_pct), 4),
+        "sample_span_ready_ts": sample_span_ready_ts,
+        "promotion_earliest_review_ts": promotion_earliest_review_ts,
         "latest_age_sec": round(max(0.0, age_sec), 1),
         "selected_plan_counts": dict(sorted(selected_plan_counts.items())),
         "shadow_action_counts": dict(sorted(action_counts.items())),
