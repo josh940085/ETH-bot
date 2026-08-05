@@ -34,6 +34,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
     ):
         return {
             "schema_version": 1,
+            "selector_policy_version": monthly5_shadow.SELECTOR_POLICY_VERSION,
             "strategy_id": monthly5_shadow.STRATEGY_ID,
             "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
             "shadow_only": True,
@@ -52,6 +53,28 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             "position_notional": 100.0 if position_open else 0.0,
             "mark_price": mark_price,
         }
+
+    def test_readiness_ignores_legacy_selector_policy_rows(self):
+        legacy = self._row(1000, mark_price=100.0)
+        legacy.pop("selector_policy_version")
+        current = self._row(1900, action="wait", plan="profile_quality_wait", mark_price=101.0, exposure_cap=0.0)
+
+        report = monthly5_shadow.build_readiness_report(
+            [legacy, current],
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=2,
+            min_span_hours=1.0,
+            max_age_sec=None,
+            now_ts=1900,
+        )
+
+        self.assertEqual(report["rows"], 1)
+        self.assertEqual(report["ignored_legacy_selector_policy_rows"], 1)
+        self.assertEqual(report["min_selector_policy_version"], monthly5_shadow.SELECTOR_POLICY_VERSION)
+        self.assertEqual(report["evaluate_rows"], 0)
+        self.assertIn("sample_count", report["promotion_blockers"])
+        self.assertIn("no_evaluate_samples", report["promotion_blockers"])
 
     def test_collecting_when_history_is_valid_but_small(self):
         rows = [self._row(1000, action="wait", plan="normal_wait")]

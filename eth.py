@@ -6447,6 +6447,8 @@ def _build_monthly5_readiness_panel_state():
             "promotion_blocker_details": list(report.get("promotion_blocker_details") or [])[:8],
             "promotion_blocker_count": _safe_int(report.get("promotion_blocker_count"), 0),
             "rows": _safe_int(report.get("rows"), 0),
+            "min_selector_policy_version": _safe_int(report.get("min_selector_policy_version"), 0),
+            "ignored_legacy_selector_policy_rows": _safe_int(report.get("ignored_legacy_selector_policy_rows"), 0),
             "span_hours": round(_safe_float(report.get("span_hours"), 0.0), 4),
             "sample_count_remaining": _safe_int(report.get("sample_count_remaining"), 0),
             "sample_count_progress_pct": round(_safe_float(report.get("sample_count_progress_pct"), 0.0), 4),

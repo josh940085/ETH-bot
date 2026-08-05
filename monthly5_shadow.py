@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
+SELECTOR_POLICY_VERSION = 2
 MONTHLY_LOCK_PCT = 5.0
 MONTHLY_TARGET_PCT = 5.0
 MONTHLY_PROJECTION_HOURS = 24.0 * 30.0
@@ -153,6 +154,10 @@ def build_history_record(snapshot, guard=None):
         "mark_price": round(_safe_float(snapshot.get("mark_price"), 0.0), 4),
         "market_bias": str(selection.get("market_bias") or ""),
         "market_state": str(selection.get("market_state") or ""),
+        "selector_policy_version": _safe_int(
+            selection.get("selector_policy_version"),
+            _safe_int(snapshot.get("selector_policy_version"), 0),
+        ),
         "selected_plan": str(selection.get("selected_plan") or ""),
         "shadow_action": str(selection.get("shadow_action") or ""),
         "exposure_cap": round(_safe_float(selection.get("exposure_cap"), 0.0), 4),
@@ -196,6 +201,7 @@ def _selection_from_active_row(row):
     return {
         "market_bias": str(row.get("market_bias") or ""),
         "market_state": str(row.get("market_state") or ""),
+        "selector_policy_version": _safe_int(row.get("selector_policy_version"), 0),
         "selected_plan": str(row.get("selected_plan") or ""),
         "shadow_action": str(row.get("shadow_action") or ""),
         "exposure_cap": round(_safe_float(row.get("exposure_cap"), 0.0), 4),
@@ -207,7 +213,7 @@ def _apply_active_selection(row, selection):
     if not isinstance(row, dict) or not isinstance(selection, dict) or not selection:
         return row
     patched = dict(row)
-    for key in ("market_bias", "market_state", "selected_plan", "shadow_action", "exposure_cap"):
+    for key in ("market_bias", "market_state", "selector_policy_version", "selected_plan", "shadow_action", "exposure_cap"):
         patched[key] = selection.get(key, patched.get(key))
     side = str(patched.get("position_side") or "").lower()
     selection_signal = str(selection.get("strategy_signal") or "").lower()
@@ -275,6 +281,7 @@ def append_history(path, snapshot, guard=None, *, min_interval_sec=300):
             record.get(key) == last.get(key)
             for key in (
                 "mode",
+                "selector_policy_version",
                 "selected_plan",
                 "shadow_action",
                 "exposure_cap",
@@ -564,6 +571,7 @@ def build_readiness_report(
     min_span_hours=24.0,
     max_age_sec=900.0,
     max_flat_time_pct=None,
+    min_selector_policy_version=SELECTOR_POLICY_VERSION,
     now_ts=None,
 ):
     failures = []
@@ -583,17 +591,87 @@ def build_readiness_report(
     if equity_shock_rows:
         valid_rows = [row for row in valid_rows if row not in equity_shock_rows]
         warnings.append(f"ignored invalid legacy equity shock rows={len(equity_shock_rows)}")
+    min_selector_policy_version = max(0, _safe_int(min_selector_policy_version, SELECTOR_POLICY_VERSION))
+    legacy_selector_rows = [
+        row
+        for row in valid_rows
+        if _safe_int(row.get("selector_policy_version"), 0) < min_selector_policy_version
+    ]
+    if legacy_selector_rows:
+        valid_rows = [row for row in valid_rows if row not in legacy_selector_rows]
+        warnings.append(
+            "ignored legacy selector policy rows="
+            f"{len(legacy_selector_rows)} < v{min_selector_policy_version}"
+        )
     valid_rows = _carry_forward_active_position_rows(valid_rows)
     if not valid_rows:
-        failures.append("history has no rows")
         return {
-            "status": "invalid",
+            "status": "collecting",
             "ready": False,
+            "promotion_ready": False,
+            "promotion_blockers": [
+                "sample_count",
+                "sample_span",
+                "no_evaluate_samples",
+                "shadow_projection_not_valid",
+                "shadow_rolling_projection_not_valid",
+            ],
+            "promotion_blocker_details": [
+                {
+                    "code": "sample_count",
+                    "label": "樣本數",
+                    "current": "0",
+                    "target": str(max(1, _safe_int(min_records, 48))),
+                    "remaining": max(1, _safe_int(min_records, 48)),
+                    "detail": "等待目前 selector policy 的 shadow history rows",
+                },
+                {
+                    "code": "sample_span",
+                    "label": "樣本時間",
+                    "current": 0.0,
+                    "target": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+                    "remaining_hours": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+                    "ready_ts": 0,
+                    "detail": "至少滿 24 小時才允許月化投影作為上線證據",
+                },
+                {
+                    "code": "no_evaluate_samples",
+                    "label": "評估樣本",
+                    "current": 0,
+                    "target": "evaluate_long/evaluate_short/reduced_exposure",
+                    "detail": "沒有實際策略評估樣本時不可 promotion",
+                },
+                {
+                    "code": "shadow_projection_not_valid",
+                    "label": "月化投影有效性",
+                    "current": 0.0,
+                    "target": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+                    "observed_target_gap_pct": 0.0,
+                    "detail": "樣本時間不足時，shadow projected monthly return 只作參考不作 promotion 證據",
+                },
+                {
+                    "code": "shadow_rolling_projection_not_valid",
+                    "label": "滾動投影有效性",
+                    "current": 0.0,
+                    "target": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+                    "observed_target_gap_pct": 0.0,
+                    "detail": "滾動 24 小時樣本不足時不可 promotion",
+                },
+            ],
+            "promotion_blocker_count": 5,
             "failures": failures,
             "warnings": warnings,
             "rows": 0,
             "span_hours": 0.0,
+            "sample_count_remaining": max(1, _safe_int(min_records, 48)),
+            "sample_count_progress_pct": 0.0,
+            "sample_span_remaining_hours": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+            "sample_span_progress_pct": 0.0,
+            "sample_span_ready_ts": 0,
+            "promotion_earliest_review_ts": 0,
             "latest_age_sec": 0.0,
+            "ignored_legacy_selector_policy_rows": len(legacy_selector_rows),
+            "min_selector_policy_version": min_selector_policy_version,
         }
 
     strategy_drift = [
@@ -1005,6 +1083,8 @@ def build_readiness_report(
         "failures": failures,
         "warnings": warnings,
         "rows": len(valid_rows),
+        "ignored_legacy_selector_policy_rows": len(legacy_selector_rows),
+        "min_selector_policy_version": min_selector_policy_version,
         "span_hours": round(max(0.0, span_hours), 4),
         "sample_count_remaining": sample_count_remaining,
         "sample_count_progress_pct": round(max(0.0, sample_count_progress_pct), 4),
@@ -1391,6 +1471,7 @@ def build_market_selection(
 
     return {
         "schema_version": 1,
+        "selector_policy_version": SELECTOR_POLICY_VERSION,
         "market_bias": market_bias,
         "bull_score": bull_score,
         "bear_score": bear_score,

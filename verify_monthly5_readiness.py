@@ -69,6 +69,8 @@ def main() -> int:
             f"status={report.get('status')} "
             f"ready={str(bool(report.get('ready'))).lower()} "
             f"rows={report.get('rows', 0)} "
+            f"min_selector_policy_version={report.get('min_selector_policy_version', 0)} "
+            f"ignored_legacy_selector_policy_rows={report.get('ignored_legacy_selector_policy_rows', 0)} "
             f"span_hours={report.get('span_hours', 0.0)} "
             f"sample_count_remaining={report.get('sample_count_remaining', 0)} "
             f"sample_span_remaining_hours={report.get('sample_span_remaining_hours', 0.0)} "

@@ -141,6 +141,11 @@ def _verify_shadow_state(name: str, shadow: dict, spec: dict, max_age_sec: float
     selection = shadow.get("market_selection") if isinstance(shadow.get("market_selection"), dict) else {}
     _require(bool(selection), failures, f"{name} missing market_selection")
     if selection:
+        _require(
+            int(selection.get("selector_policy_version", 0)) >= monthly5_shadow.SELECTOR_POLICY_VERSION,
+            failures,
+            f"{name} selector policy version stale",
+        )
         _require(_safe_float(selection.get("max_leverage")) <= 5.0, failures, f"{name} selection leverage exceeds 5x")
         _require(0.0 <= _safe_float(selection.get("exposure_cap"), -1.0) <= 1.0, failures, f"{name} exposure cap out of range")
         _require(str(selection.get("selected_plan") or ""), failures, f"{name} selected_plan missing")
@@ -163,6 +168,11 @@ def _verify_shadow_history(name: str, rows: list[dict], latest_shadow: dict, spe
     _require(latest.get("selected_candidate") == evidence.get("candidate_name"), failures, f"{name} history candidate mismatch")
     _require(latest.get("shadow_only") is True, failures, f"{name} history must remain shadow_only")
     _require(_safe_float(latest.get("max_leverage")) <= 5.0, failures, f"{name} history leverage exceeds 5x")
+    _require(
+        int(latest.get("selector_policy_version", 0)) >= monthly5_shadow.SELECTOR_POLICY_VERSION,
+        failures,
+        f"{name} history selector policy version stale",
+    )
     _require(0.0 <= _safe_float(latest.get("exposure_cap"), -1.0) <= 1.0, failures, f"{name} history exposure cap out of range")
     _require(str(latest.get("selected_plan") or ""), failures, f"{name} history selected_plan missing")
     _require(str(latest.get("shadow_action") or ""), failures, f"{name} history shadow_action missing")
