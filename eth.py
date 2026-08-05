@@ -6106,6 +6106,24 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     if bool(macro_alignment.get("hard_block", False)):
         return {"applied": False, "reason": "macro_hard_block"}
 
+    last_close_reason = str(POSITION_PANEL_STATE.get("last_close_reason") or "").upper()
+    last_close_ts = _safe_float(POSITION_PANEL_STATE.get("last_close_ts"), 0.0)
+    sl_override_cooldown_sec = max(
+        60.0,
+        _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_SL_COOLDOWN_SEC", 900), 900),
+    )
+    if (
+        last_close_reason == "SL"
+        and last_close_ts > 0
+        and time.time() - last_close_ts <= sl_override_cooldown_sec
+    ):
+        return {
+            "applied": False,
+            "reason": "monthly5_wait_override_sl_cooldown",
+            "selected_plan": selected_plan,
+            "cooldown_remaining_sec": round(max(0.0, sl_override_cooldown_sec - (time.time() - last_close_ts)), 1),
+        }
+
     max_event_risk = max(0, _safe_int(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_EVENT_RISK", 1), 1))
     event_risk = _safe_int(decision.get("event_risk"), 0)
     if event_risk > max_event_risk:

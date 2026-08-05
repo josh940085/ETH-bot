@@ -967,7 +967,10 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             }
         }
 
-        with patch.object(eth.time, "time", return_value=2000.0):
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "", "last_close_ts": 0}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
             override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
 
         self.assertTrue(override["applied"])
@@ -992,11 +995,41 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             }
         }
 
-        with patch.object(eth.time, "time", return_value=2000.0):
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "", "last_close_ts": 0}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
             override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
 
         self.assertFalse(override["applied"])
         self.assertEqual(override["reason"], "macro_hard_block")
+
+    def test_monthly5_signal_override_waits_after_recent_sl(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（等支撐跌破或承接確認）",
+            "score": 0.51,
+            "atr": 120.0,
+            "event_risk": 0,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.35,
+                "reason_codes": ["underperforming_probe_success"],
+            }
+        }
+
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "SL", "last_close_ts": 1900}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertFalse(override["applied"])
+        self.assertEqual(override["reason"], "monthly5_wait_override_sl_cooldown")
 
     def test_monthly5_signal_override_respects_underperforming_wait(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
@@ -1013,7 +1046,10 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             }
         }
 
-        with patch.object(eth.time, "time", return_value=2000.0):
+        with (
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "", "last_close_ts": 0}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
             override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
 
         self.assertFalse(override["applied"])
