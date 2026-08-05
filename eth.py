@@ -6944,6 +6944,24 @@ def manage_monthly5_position_guard(current_price, decision=None):
     if not _is_truthy(os.getenv("MONTHLY5_POSITION_GUARD_ENABLED", "1")):
         return False
     if not active_trade.get("open"):
+        shadow_state = (
+            POSITION_PANEL_STATE.get("monthly5_shadow")
+            if isinstance(POSITION_PANEL_STATE.get("monthly5_shadow"), dict)
+            else {}
+        )
+        flat_guard = monthly5_shadow.build_position_guard(
+            shadow_state,
+            current_size=0.0,
+        )
+        existing_guard = (
+            POSITION_PANEL_STATE.get("monthly5_position_guard")
+            if isinstance(POSITION_PANEL_STATE.get("monthly5_position_guard"), dict)
+            else {}
+        )
+        if existing_guard != flat_guard:
+            POSITION_PANEL_STATE["monthly5_position_guard"] = flat_guard
+            active_trade["monthly5_position_guard_ts"] = 0.0
+            sync_position_panel(current_price)
         return False
 
     now_ts = time.time()

@@ -996,6 +996,48 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(eth.active_trade["open"])
         self.assertEqual(eth.active_trade["size"], 0.0)
 
+    def test_monthly5_position_guard_clears_stale_hold_when_flat(self):
+        eth.active_trade.update(
+            {
+                "open": False,
+                "size": 0.0,
+                "monthly5_position_guard_ts": 2000.0,
+            }
+        )
+        eth.POSITION_PANEL_STATE["monthly5_shadow"] = {
+            "mode": "normal",
+            "market_selection": {
+                "selected_plan": "normal_wait",
+                "shadow_action": "wait",
+                "exposure_cap": 1.0,
+            },
+        }
+        eth.POSITION_PANEL_STATE["monthly5_position_guard"] = {
+            "schema_version": 1,
+            "enabled": True,
+            "action": "hold",
+            "reason_code": "within_cap",
+            "reason": "月報酬5%持倉風控未要求調整",
+            "current_size": 0.1367,
+            "target_size": 0.1367,
+            "reduce_delta": 0.0,
+            "exposure_cap": 0.35,
+            "selected_plan": "normal_long_selector",
+            "shadow_action": "evaluate_long",
+            "mode": "normal",
+        }
+
+        with patch.object(eth, "sync_position_panel") as sync_panel:
+            adjusted = eth.manage_monthly5_position_guard(64100.0)
+
+        self.assertFalse(adjusted)
+        guard = eth.POSITION_PANEL_STATE["monthly5_position_guard"]
+        self.assertEqual(guard["reason_code"], "flat")
+        self.assertEqual(guard["current_size"], 0.0)
+        self.assertEqual(guard["target_size"], 0.0)
+        self.assertEqual(eth.active_trade["monthly5_position_guard_ts"], 0.0)
+        sync_panel.assert_called_once_with(64100.0)
+
     def test_monthly5_signal_override_promotes_plain_wait_to_small_long(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
         decision = {
