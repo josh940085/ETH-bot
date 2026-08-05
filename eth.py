@@ -6669,6 +6669,11 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
         qty = min(qty, abs(position_amt))
 
     qty = math.floor(max(0.0, qty) * 1000.0) / 1000.0
+    if reduce and qty >= abs(position_amt) - 1e-9:
+        return False, (
+            f"減倉量 {qty:.3f} BTC 會全平目前 {abs(position_amt):.3f} BTC，"
+            "保留持倉等待可部分減倉"
+        )
     if qty < COPY_TRADE_MIN_QTY:
         if not reduce:
             active_trade["scale_add_paused"] = True

@@ -907,6 +907,57 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(eth.active_trade["size"], 0.15)
         self.assertEqual(eth.POSITION_PANEL_STATE["monthly5_position_guard"]["action"], "reduce_to_cap")
 
+    def test_monthly5_position_guard_does_not_full_close_min_real_position_on_reduce(self):
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "long",
+                "entry": 64153.2,
+                "avg_entry": 64153.2,
+                "tp": 64349.62,
+                "sl": 64028.84,
+                "size": 0.13,
+                "position_qty": 0.001,
+                "monthly5_position_guard_ts": 0.0,
+            }
+        )
+        shadow_state = {
+            "mode": "normal",
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.05,
+            },
+        }
+        positions = [
+            {
+                "symbol": eth.COPY_TRADE_SYMBOL,
+                "positionSide": "LONG",
+                "positionAmt": "0.001",
+                "leverage": "5",
+                "markPrice": "64140.0",
+            }
+        ]
+
+        with (
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "_is_real_copy_enabled", return_value=True),
+            patch.object(eth, "_binance_futures_signed_get", return_value=positions),
+            patch.object(eth, "_calc_copy_trade_qty", return_value=0.001),
+            patch.object(eth, "_binance_futures_signed_request") as signed_request,
+            patch.object(eth, "sync_position_panel"),
+            patch.object(eth, "_notify_scale_skip") as notify_skip,
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            adjusted = eth.manage_monthly5_position_guard(64140.0)
+
+        self.assertFalse(adjusted)
+        self.assertTrue(eth.active_trade["open"])
+        signed_request.assert_not_called()
+        notify_skip.assert_called_once()
+        self.assertEqual(eth.POSITION_PANEL_STATE["monthly5_position_guard"]["action"], "reduce_to_cap")
+
     def test_monthly5_position_guard_closes_local_position_on_risk_off(self):
         eth.active_trade.update(
             {
