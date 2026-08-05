@@ -107,6 +107,29 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertIn("observed_target_gap_pct", details["shadow_projection_not_valid"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))
 
+    def test_readiness_estimates_sample_count_ready_ts_from_median_interval(self):
+        rows = [
+            self._row(1000, action="evaluate_long", plan="normal_long_selector"),
+            self._row(1300, action="evaluate_long", plan="normal_long_selector"),
+            self._row(1600, action="evaluate_long", plan="normal_long_selector"),
+        ]
+
+        report = verify_monthly5_readiness._history_readiness(
+            rows,
+            self._spec(),
+            min_records=5,
+            min_span_hours=0.0,
+            max_age_sec=None,
+        )
+
+        self.assertEqual(report["sample_unique_timestamps"], 3)
+        self.assertEqual(report["sample_median_interval_sec"], 300.0)
+        self.assertEqual(report["sample_rows_per_hour_est"], 12.0)
+        self.assertEqual(report["sample_count_ready_ts"], 2200)
+        self.assertEqual(report["promotion_earliest_review_ts"], 2200)
+        details = {item["code"]: item for item in report["promotion_blocker_details"]}
+        self.assertEqual(details["sample_count"]["ready_ts"], 2200)
+
     def test_ready_when_history_has_enough_span_and_evaluation_samples(self):
         rows = [self._row(1000 + idx * 900) for idx in range(5)]
 

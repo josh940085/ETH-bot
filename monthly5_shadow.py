@@ -622,6 +622,39 @@ def _rolling_window_rows(rows, *, latest_ts, window_hours=ROLLING_WINDOW_HOURS):
     ]
 
 
+def _sample_interval_stats(rows):
+    timestamps = sorted(
+        {
+            _safe_int(row.get("updated_ts"), 0)
+            for row in rows or []
+            if isinstance(row, dict) and _safe_int(row.get("updated_ts"), 0) > 0
+        }
+    )
+    intervals = [
+        timestamps[idx] - timestamps[idx - 1]
+        for idx in range(1, len(timestamps))
+        if timestamps[idx] > timestamps[idx - 1]
+    ]
+    if not intervals:
+        return {
+            "sample_unique_timestamps": len(timestamps),
+            "sample_median_interval_sec": 0.0,
+            "sample_rows_per_hour_est": 0.0,
+        }
+    ordered = sorted(intervals)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        median = float(ordered[mid])
+    else:
+        median = (ordered[mid - 1] + ordered[mid]) / 2.0
+    rows_per_hour = 3600.0 / median if median > 0 else 0.0
+    return {
+        "sample_unique_timestamps": len(timestamps),
+        "sample_median_interval_sec": round(median, 4),
+        "sample_rows_per_hour_est": round(rows_per_hour, 4),
+    }
+
+
 def _activation_rows(rows):
     timed_rows = sorted(
         (row for row in rows if isinstance(row, dict) and _safe_int(row.get("updated_ts"), 0) > 0),
@@ -1017,7 +1050,14 @@ def build_readiness_report(
         if latest_ts > 0 and sample_span_remaining_hours > 0
         else 0
     )
-    promotion_earliest_review_ts = sample_span_ready_ts if sample_span_ready_ts > 0 else 0
+    sample_interval_stats = _sample_interval_stats(valid_rows)
+    sample_median_interval_sec = _safe_float(sample_interval_stats.get("sample_median_interval_sec"), 0.0)
+    sample_count_ready_ts = (
+        latest_ts + int(round(sample_count_remaining * sample_median_interval_sec))
+        if latest_ts > 0 and sample_count_remaining > 0 and sample_median_interval_sec > 0
+        else 0
+    )
+    promotion_earliest_review_ts = max(sample_span_ready_ts, sample_count_ready_ts)
     promotion_blockers = []
     if failures:
         promotion_blockers.append("invalid_history")
@@ -1059,6 +1099,7 @@ def build_readiness_report(
                 "current": str(len(valid_rows)),
                 "target": str(min_records),
                 "remaining": sample_count_remaining,
+                "ready_ts": sample_count_ready_ts,
                 "detail": "等待更多 shadow history rows",
             }
         if code == "sample_span":
@@ -1175,6 +1216,8 @@ def build_readiness_report(
         "span_hours": round(max(0.0, span_hours), 4),
         "sample_count_remaining": sample_count_remaining,
         "sample_count_progress_pct": round(max(0.0, sample_count_progress_pct), 4),
+        "sample_count_ready_ts": sample_count_ready_ts,
+        **sample_interval_stats,
         "sample_span_remaining_hours": round(max(0.0, sample_span_remaining_hours), 4),
         "sample_span_progress_pct": round(max(0.0, sample_span_progress_pct), 4),
         "sample_span_ready_ts": sample_span_ready_ts,
