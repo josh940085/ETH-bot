@@ -907,6 +907,51 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["monthly5_position_guard"]["reason_code"], "flat")
         self.assertEqual(payload["monthly5_position_guard"]["current_size"], 0.0)
 
+    def test_monthly5_readiness_panel_preserves_timing_and_legacy_probe_fields(self):
+        report = {
+            "status": "collecting",
+            "ready": False,
+            "promotion_ready": False,
+            "rows": 8,
+            "sample_count_ready_ts": 1785927463,
+            "sample_unique_timestamps": 8,
+            "sample_median_interval_sec": 30.0,
+            "sample_rows_per_hour_est": 120.0,
+            "shadow_flat_time_gap_pct": 0.0,
+            "shadow_legacy_recovery_probe_failed_keys": [
+                "normal_long_selector|evaluate_long|bullish|chop",
+            ],
+            "shadow_legacy_recovery_probe_failed_count": 1,
+            "shadow_legacy_recovery_probe_grouped_paper_returns": [
+                {
+                    "key": "normal_long_selector|evaluate_long|bullish|chop",
+                    "return_pct": -0.5,
+                    "intervals": 12,
+                },
+            ],
+        }
+
+        with (
+            patch.object(eth.monthly5_shadow, "load_history", return_value=[]),
+            patch.object(eth.monthly5_shadow, "build_readiness_report", return_value=report),
+        ):
+            panel = eth._build_monthly5_readiness_panel_state()
+
+        self.assertEqual(panel["sample_count_ready_ts"], 1785927463)
+        self.assertEqual(panel["sample_unique_timestamps"], 8)
+        self.assertEqual(panel["sample_median_interval_sec"], 30.0)
+        self.assertEqual(panel["sample_rows_per_hour_est"], 120.0)
+        self.assertEqual(panel["shadow_flat_time_gap_pct"], 0.0)
+        self.assertEqual(
+            panel["shadow_legacy_recovery_probe_failed_keys"],
+            ["normal_long_selector|evaluate_long|bullish|chop"],
+        )
+        self.assertEqual(panel["shadow_legacy_recovery_probe_failed_count"], 1)
+        self.assertEqual(
+            panel["shadow_legacy_recovery_probe_grouped_paper_returns"][0]["return_pct"],
+            -0.5,
+        )
+
     def test_monthly5_position_guard_reduces_local_position_to_cap(self):
         eth.active_trade.update(
             {
