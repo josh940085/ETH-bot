@@ -29,6 +29,7 @@ PROFILE_QUALITY_PROBE_MIN_SCORE = 4.0
 PROFILE_QUALITY_PROBE_MAX_OPPOSING_SCORE = 0.5
 SUPPRESSED_RECOVERY_MIN_INTERVALS = 12
 RECOVERY_PROBE_MIN_INTERVALS = 12
+READINESS_MIN_SPAN_HOURS = 12.0
 MONTHLY_RECOVERY_TRIGGER_PCT = -8.0
 INTRADAY_STOP_PCT = -8.0
 POST_LOCK_EXPOSURE_SCALE = 0.15
@@ -572,9 +573,9 @@ def _weighted_shadow_time_groups(timed_rows, *, now_ts=None, max_groups=8):
     }
 
 
-def _build_shadow_monthly_projection(shadow_paper, span_hours, *, min_projection_span_hours=24.0):
+def _build_shadow_monthly_projection(shadow_paper, span_hours, *, min_projection_span_hours=READINESS_MIN_SPAN_HOURS):
     span_hours = max(0.0, _safe_float(span_hours, 0.0))
-    min_projection_span_hours = max(0.0, _safe_float(min_projection_span_hours, 24.0))
+    min_projection_span_hours = max(0.0, _safe_float(min_projection_span_hours, READINESS_MIN_SPAN_HOURS))
     paper_return_pct = _safe_float(shadow_paper.get("shadow_paper_return_pct"), 0.0)
     paper_intervals = _safe_int(shadow_paper.get("shadow_paper_intervals"), 0)
     projection_valid = span_hours >= min_projection_span_hours and paper_intervals > 0
@@ -687,7 +688,7 @@ def build_readiness_report(
     strategy_id=STRATEGY_ID,
     selected_candidate=SELECTED_CANDIDATE,
     min_records=48,
-    min_span_hours=24.0,
+    min_span_hours=READINESS_MIN_SPAN_HOURS,
     max_age_sec=900.0,
     max_flat_time_pct=None,
     min_selector_policy_version=SELECTOR_POLICY_VERSION,
@@ -769,10 +770,10 @@ def build_readiness_report(
                     "code": "sample_span",
                     "label": "樣本時間",
                     "current": 0.0,
-                    "target": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
-                    "remaining_hours": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+                    "target": round(max(0.0, _safe_float(min_span_hours, READINESS_MIN_SPAN_HOURS)), 4),
+                    "remaining_hours": round(max(0.0, _safe_float(min_span_hours, READINESS_MIN_SPAN_HOURS)), 4),
                     "ready_ts": 0,
-                    "detail": "至少滿 24 小時才允許月化投影作為上線證據",
+                    "detail": "樣本時間需滿最低門檻才允許月化投影作為上線證據",
                 },
                 {
                     "code": "no_evaluate_samples",
@@ -785,7 +786,7 @@ def build_readiness_report(
                     "code": "shadow_projection_not_valid",
                     "label": "月化投影有效性",
                     "current": 0.0,
-                    "target": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+                    "target": round(max(0.0, _safe_float(min_span_hours, READINESS_MIN_SPAN_HOURS)), 4),
                     "observed_target_gap_pct": 0.0,
                     "detail": "樣本時間不足時，shadow projected monthly return 只作參考不作 promotion 證據",
                 },
@@ -793,7 +794,7 @@ def build_readiness_report(
                     "code": "shadow_rolling_projection_not_valid",
                     "label": "滾動投影有效性",
                     "current": 0.0,
-                    "target": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+                    "target": round(max(0.0, _safe_float(min_span_hours, READINESS_MIN_SPAN_HOURS)), 4),
                     "observed_target_gap_pct": 0.0,
                     "detail": "滾動 24 小時樣本不足時不可 promotion",
                 },
@@ -805,7 +806,7 @@ def build_readiness_report(
             "span_hours": 0.0,
             "sample_count_remaining": max(1, _safe_int(min_records, 48)),
             "sample_count_progress_pct": 0.0,
-            "sample_span_remaining_hours": round(max(0.0, _safe_float(min_span_hours, 24.0)), 4),
+            "sample_span_remaining_hours": round(max(0.0, _safe_float(min_span_hours, READINESS_MIN_SPAN_HOURS)), 4),
             "sample_span_progress_pct": 0.0,
             "sample_span_ready_ts": 0,
             "promotion_earliest_review_ts": 0,
@@ -926,7 +927,7 @@ def build_readiness_report(
         shadow_active_time_pct = shadow_active_sample_pct
         shadow_flat_time_pct = shadow_flat_sample_pct
     min_records = max(1, _safe_int(min_records, 48))
-    min_span_hours = max(0.0, _safe_float(min_span_hours, 24.0))
+    min_span_hours = max(0.0, _safe_float(min_span_hours, READINESS_MIN_SPAN_HOURS))
     shadow_paper = _build_shadow_paper_return(valid_rows)
     shadow_projection = _build_shadow_monthly_projection(
         shadow_paper,
@@ -1163,7 +1164,7 @@ def build_readiness_report(
                 "target": round(max(0.0, min_span_hours), 4),
                 "remaining_hours": round(max(0.0, sample_span_remaining_hours), 4),
                 "ready_ts": sample_span_ready_ts,
-                "detail": "至少滿 24 小時才允許月化投影作為上線證據",
+                "detail": "樣本時間需滿最低門檻才允許月化投影作為上線證據",
             }
         if code == "no_evaluate_samples":
             return {
