@@ -4418,6 +4418,7 @@ def sync_active_trade_from_binance(send_notice=False):
                 active_trade.get("sl"),
             )
             record_position_close(close_reason, close_price, close_price, close_price)
+            sl_review = None
             if close_reason in {"TP", "SL"}:
                 _finalize_pending_training_sample(
                     _load_pending_training_sample_state(),
@@ -4426,6 +4427,19 @@ def sync_active_trade_from_binance(send_notice=False):
                     close_price=close_price,
                     atr=0.0,
                 )
+            if close_reason == "SL":
+                sl_review = _review_stop_loss_event(
+                    local_direction,
+                    active_trade.get("avg_entry", active_trade.get("entry")),
+                    active_trade.get("tp"),
+                    active_trade.get("sl"),
+                    close_price,
+                    close_price,
+                    close_price,
+                    0.0,
+                    _build_sl_review_context_from_panel(),
+                )
+                record_sl_review(sl_review)
 
         _reset_active_trade_state()
         sync_position_panel(close_price)
@@ -4438,6 +4452,16 @@ def sync_active_trade_from_binance(send_notice=False):
                 close_price,
                 source="Binance 同步",
             )
+            if close_reason == "SL" and isinstance(sl_review, dict):
+                msg += (
+                    f"\n\n🔎 SL檢討：{sl_review['verdict']}\n"
+                    f"風險 {sl_review['stop_atr']:.2f} ATR｜"
+                    f"RR {sl_review['planned_rr']:.2f}｜"
+                    f"技術分數 {sl_review['alignment_score']:+d}\n"
+                    + "；".join(sl_review["issues"] or sl_review["indicators"])
+                    + "\n反向檢查: "
+                    + str((sl_review.get("opposite_direction_review") or {}).get("summary") or "等待下一輪重新評估")
+                )
             _send_trade_notification(msg, priority=True)
         else:
             msg = f"✅ 已同步 Binance：目前 {COPY_TRADE_SYMBOL} 無持倉"
@@ -5302,6 +5326,67 @@ def _build_sl_review_context_from_live(
         "host_opening_logic": decision.get("host_opening_logic"),
         "learned_entry_logic": decision.get("learned_entry_logic"),
         "primary_indicator": decision.get("primary_indicator"),
+    }
+
+
+def _build_sl_review_context_from_panel():
+    """Build a best-effort SL review context when Binance confirms the close."""
+    strategy_context = (
+        POSITION_PANEL_STATE.get("strategy_context")
+        if isinstance(POSITION_PANEL_STATE.get("strategy_context"), dict)
+        else {}
+    )
+    host_logic = (
+        POSITION_PANEL_STATE.get("strategy_host_logic")
+        if isinstance(POSITION_PANEL_STATE.get("strategy_host_logic"), dict)
+        else {}
+    )
+    macro_alignment = (
+        POSITION_PANEL_STATE.get("strategy_macro_alignment")
+        if isinstance(POSITION_PANEL_STATE.get("strategy_macro_alignment"), dict)
+        else {}
+    )
+    breakout_state = (
+        POSITION_PANEL_STATE.get("strategy_breakout")
+        if isinstance(POSITION_PANEL_STATE.get("strategy_breakout"), dict)
+        else {}
+    )
+    reclaim_gate = (
+        POSITION_PANEL_STATE.get("strategy_reclaim_gate")
+        if isinstance(POSITION_PANEL_STATE.get("strategy_reclaim_gate"), dict)
+        else {}
+    )
+    reclaim_diagnostics = (
+        reclaim_gate.get("diagnostics")
+        if isinstance(reclaim_gate.get("diagnostics"), dict)
+        else {}
+    )
+
+    return {
+        "strategy_version": STRATEGY_VERSION,
+        "htf": strategy_context.get("htf"),
+        "mid_trend": strategy_context.get("mid_trend"),
+        "sr_bias": strategy_context.get("sr_bias"),
+        "support_hits": strategy_context.get("support_hits"),
+        "resistance_hits": strategy_context.get("resistance_hits"),
+        "macro_bias": strategy_context.get("macro_bias"),
+        "derivatives_pressure": strategy_context.get("derivatives_pressure"),
+        "taker_buy_ratio": strategy_context.get("taker_buy_ratio"),
+        "score": POSITION_PANEL_STATE.get("strategy_score"),
+        "ai_prob": POSITION_PANEL_STATE.get("strategy_ai_prob"),
+        "ai_long_prob": POSITION_PANEL_STATE.get("strategy_ai_long_prob"),
+        "ai_short_prob": POSITION_PANEL_STATE.get("strategy_ai_short_prob"),
+        "net_edge_rate_est": strategy_context.get("net_edge_rate_est"),
+        "risk_rate": strategy_context.get("risk_rate"),
+        "rsi_15m": reclaim_diagnostics.get("rsi_15m"),
+        "ema50_deviation_15m": reclaim_diagnostics.get("ema50_deviation_15m"),
+        "breakout": breakout_state.get("attempt"),
+        "repeated_support_tests": strategy_context.get("repeated_support_tests"),
+        "repeated_resistance_tests": strategy_context.get("repeated_resistance_tests"),
+        "event_risk": strategy_context.get("event_risk"),
+        "host_opening_logic": host_logic,
+        "macro_alignment": macro_alignment,
+        "primary_indicator": POSITION_PANEL_STATE.get("strategy_regime"),
     }
 
 

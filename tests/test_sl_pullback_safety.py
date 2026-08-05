@@ -10,10 +10,13 @@ import eth
 class StopLossAndPullbackSafetyTests(unittest.TestCase):
     def setUp(self):
         self.panel_state = dict(eth.POSITION_PANEL_STATE)
+        self.active_trade_state = dict(eth.active_trade)
 
     def tearDown(self):
         eth.POSITION_PANEL_STATE.clear()
         eth.POSITION_PANEL_STATE.update(self.panel_state)
+        eth.active_trade.clear()
+        eth.active_trade.update(self.active_trade_state)
 
     @patch("eth.time.time", side_effect=[1000.0, 1040.0])
     def test_partial_stop_fills_are_one_loss(self, _time):
@@ -117,6 +120,63 @@ class StopLossAndPullbackSafetyTests(unittest.TestCase):
 
         self.assertEqual(review["opposite_direction_review"]["opposite_direction"], "long")
         self.assertTrue(review["opposite_direction_review"]["ready_for_fresh_evaluation"])
+
+    def test_binance_confirmed_stop_loss_records_review(self):
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "long",
+                "entry": 100.0,
+                "avg_entry": 100.0,
+                "tp": 103.0,
+                "sl": 99.0,
+                "size": 0.2,
+                "open_time": 1000.0,
+            }
+        )
+        eth.POSITION_PANEL_STATE.update(
+            {
+                "binance_mark_price": 99.0,
+                "strategy_score": 0.55,
+                "strategy_ai_prob": 0.55,
+                "strategy_ai_long_prob": 0.52,
+                "strategy_ai_short_prob": 0.68,
+                "strategy_context": {
+                    "htf": -1,
+                    "mid_trend": -1,
+                    "macro_bias": -0.5,
+                    "derivatives_pressure": 0.0,
+                    "event_risk": 0,
+                    "support_hits": 0,
+                    "resistance_hits": 1,
+                    "net_edge_rate_est": 0.0,
+                    "risk_rate": 0.01,
+                },
+                "strategy_host_logic": {
+                    "direction": "short",
+                    "confidence": 0.72,
+                },
+            }
+        )
+
+        with (
+            patch.object(eth, "_binance_futures_signed_get", return_value=[]),
+            patch.object(eth, "_binance_futures_open_algo_orders", return_value=[]),
+            patch.object(eth, "_load_pending_training_sample_state", return_value=None),
+            patch.object(eth, "record_sl_review") as record_review,
+            patch.object(eth, "sync_position_panel"),
+            patch.object(eth, "_send_trade_notification"),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            ok, _msg = eth.sync_active_trade_from_binance(send_notice=False)
+
+        self.assertTrue(ok)
+        self.assertFalse(eth.active_trade["open"])
+        review = eth.POSITION_PANEL_STATE["last_sl_review"]
+        self.assertEqual(review["direction"], "long")
+        self.assertEqual(review["opposite_direction_review"]["opposite_direction"], "short")
+        self.assertTrue(review["opposite_direction_review"]["requires_normal_entry_validation"])
+        record_review.assert_called_once()
 
     def test_reclaim_signal_requires_pullback(self):
         self.assertTrue(
