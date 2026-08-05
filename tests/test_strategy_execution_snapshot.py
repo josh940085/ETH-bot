@@ -908,6 +908,80 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(eth.active_trade["open"])
         self.assertEqual(eth.active_trade["size"], 0.0)
 
+    def test_monthly5_signal_override_promotes_plain_wait_to_small_long(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（等支撐跌破或承接確認）",
+            "score": 0.51,
+            "atr": 120.0,
+            "event_risk": 0,
+            "ai_prob": 0.52,
+            "ai_long_prob": 0.53,
+            "ai_short_prob": 0.47,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.15,
+                "recovery_probe": True,
+                "reason_codes": ["underperforming_recovery_probe"],
+            }
+        }
+
+        with patch.object(eth.time, "time", return_value=2000.0):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertTrue(override["applied"])
+        self.assertEqual(override["direction"], "long")
+        self.assertIn("做多", override["final"])
+        self.assertLess(override["sl"], 64000.0)
+        self.assertGreater(override["tp"], 64000.0)
+        self.assertEqual(override["position_size"], 0.15)
+
+    def test_monthly5_signal_override_respects_macro_hard_block(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（等支撐跌破或承接確認）",
+            "event_risk": 0,
+            "macro_indicator_alignment": {"hard_block": True},
+        }
+        monthly5_state = {
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.15,
+            }
+        }
+
+        with patch.object(eth.time, "time", return_value=2000.0):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertFalse(override["applied"])
+        self.assertEqual(override["reason"], "macro_hard_block")
+
+    def test_monthly5_signal_override_respects_underperforming_wait(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（等支撐跌破或承接確認）",
+            "event_risk": 0,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "market_selection": {
+                "selected_plan": "underperforming_wait",
+                "shadow_action": "wait",
+                "exposure_cap": 0.0,
+            }
+        }
+
+        with patch.object(eth.time, "time", return_value=2000.0):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertFalse(override["applied"])
+        self.assertEqual(override["reason"], "monthly5_not_entry")
+
     @patch("eth.time.time", return_value=2000.0)
     def test_only_actual_open_sets_long_or_short_signal(self, _time):
         eth.active_trade["direction"] = "long"

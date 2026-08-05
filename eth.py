@@ -5987,6 +5987,119 @@ def _apply_monthly5_execution_guard(decision, direction, requested_size, mark_pr
     return guard
 
 
+def _build_monthly5_signal_override(decision, monthly5_state, current_price):
+    if not _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_ENABLED", "1")):
+        return {"applied": False, "reason": "disabled"}
+
+    decision = decision if isinstance(decision, dict) else {}
+    final = str(decision.get("final") or "")
+    if not final.startswith("觀望"):
+        return {"applied": False, "reason": "host_signal_active"}
+
+    allowed_wait_reasons = (
+        "觀望",
+        "觀望（等支撐跌破或承接確認）",
+        "觀望（等壓力突破或反彈失敗）",
+        "觀望（支撐連測未跌破）",
+        "觀望（壓力連測未突破）",
+    )
+    if final not in allowed_wait_reasons:
+        return {"applied": False, "reason": "protected_wait_reason", "final": final}
+
+    selection = {}
+    if isinstance(monthly5_state, dict) and isinstance(monthly5_state.get("market_selection"), dict):
+        selection = monthly5_state.get("market_selection") or {}
+    shadow_action = str(selection.get("shadow_action") or "")
+    if shadow_action == "evaluate_long":
+        direction = "long"
+        final_text = "📈 月報酬5%策略做多"
+    elif shadow_action == "evaluate_short":
+        direction = "short"
+        final_text = "📉 月報酬5%策略做空"
+    else:
+        return {"applied": False, "reason": "monthly5_not_entry", "shadow_action": shadow_action}
+
+    selected_plan = str(selection.get("selected_plan") or "")
+    if selected_plan in {"underperforming_wait", "macro_block_wait", "risk_off"}:
+        return {"applied": False, "reason": "monthly5_plan_blocked", "selected_plan": selected_plan}
+
+    macro_alignment = decision.get("macro_indicator_alignment") if isinstance(decision.get("macro_indicator_alignment"), dict) else {}
+    if bool(macro_alignment.get("hard_block", False)):
+        return {"applied": False, "reason": "macro_hard_block"}
+
+    max_event_risk = max(0, _safe_int(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_EVENT_RISK", 1), 1))
+    event_risk = _safe_int(decision.get("event_risk"), 0)
+    if event_risk > max_event_risk:
+        return {"applied": False, "reason": "event_risk", "event_risk": event_risk}
+
+    price_age = max(
+        0.0,
+        time.time() - _safe_float(POSITION_PANEL_STATE.get("binance_mark_price_ts"), 0.0),
+    )
+    max_price_age = max(3.0, _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_PRICE_AGE_SEC", 10.0), 10.0))
+    if price_age > max_price_age:
+        return {"applied": False, "reason": "mark_price_stale", "price_age": round(price_age, 4)}
+
+    entry = _safe_float(current_price, 0.0)
+    atr = max(0.0, _safe_float(decision.get("atr"), 0.0))
+    if entry <= 0:
+        return {"applied": False, "reason": "invalid_price"}
+
+    min_risk_rate = max(
+        0.0015,
+        _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MIN_RISK_RATE", 0.002), 0.002),
+    )
+    stop_atr = max(
+        0.35,
+        _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_STOP_ATR", 0.7), 0.7),
+    )
+    risk = max(entry * min_risk_rate, atr * stop_atr, 0.3)
+    rr = max(1.2, _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR", 1.5), 1.5))
+    if direction == "long":
+        sl = entry - risk
+        tp = entry + risk * rr
+        score = max(_safe_float(decision.get("score"), 0.5), 0.62)
+        ai_long_prob = max(_safe_float(decision.get("ai_long_prob"), 0.5), 0.62)
+        ai_short_prob = _safe_float(decision.get("ai_short_prob"), 0.5)
+        ai_prob = max(_safe_float(decision.get("ai_prob"), 0.5), ai_long_prob)
+    else:
+        sl = entry + risk
+        tp = entry - risk * rr
+        score = min(_safe_float(decision.get("score"), 0.5), 0.38)
+        ai_short_prob = max(_safe_float(decision.get("ai_short_prob"), 0.5), 0.62)
+        ai_long_prob = _safe_float(decision.get("ai_long_prob"), 0.5)
+        ai_prob = max(_safe_float(decision.get("ai_prob"), 0.5), ai_short_prob)
+    final_text, sl, tp = auto_fix_trade_plan(final_text, entry, sl, tp, atr)
+
+    exposure_cap = max(0.0, min(1.0, _safe_float(selection.get("exposure_cap"), 0.0)))
+    max_size = max(
+        0.01,
+        min(0.15, _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_SIZE", 0.15), 0.15)),
+    )
+    position_size = min(max_size, exposure_cap)
+    if position_size <= 0:
+        return {"applied": False, "reason": "zero_exposure_cap", "exposure_cap": exposure_cap}
+
+    return {
+        "applied": True,
+        "reason": "monthly5_market_selection",
+        "direction": direction,
+        "final": final_text,
+        "sl": float(sl),
+        "tp": float(tp),
+        "position_size": round(position_size, 4),
+        "score": round(score, 4),
+        "ai_prob": round(ai_prob, 4),
+        "ai_long_prob": round(ai_long_prob, 4),
+        "ai_short_prob": round(ai_short_prob, 4),
+        "selected_plan": selected_plan,
+        "shadow_action": shadow_action,
+        "exposure_cap": round(exposure_cap, 4),
+        "recovery_probe": bool(selection.get("recovery_probe", False)),
+        "reason_codes": list(selection.get("reason_codes") or []),
+    }
+
+
 def _build_monthly5_readiness_panel_state():
     try:
         rows = monthly5_shadow.load_history(MONTHLY5_SHADOW_HISTORY_PATH)
@@ -17636,6 +17749,95 @@ def run_bot():
                 sl_review_guard_reason = _recent_sl_review_guard_reason(final)
                 if sl_review_guard_reason:
                     final = sl_review_guard_reason
+
+            monthly5_signal_override = {}
+            if final.startswith("觀望"):
+                monthly5_shadow_state = _update_monthly5_shadow_panel_state(
+                    price,
+                    decision=decision,
+                    strategy_signal="wait",
+                    strategy_execution_reason=final,
+                )
+                monthly5_signal_override = _build_monthly5_signal_override(
+                    decision,
+                    monthly5_shadow_state,
+                    price,
+                )
+                decision["monthly5_signal_override"] = dict(monthly5_signal_override)
+                if monthly5_signal_override.get("applied"):
+                    final = str(monthly5_signal_override.get("final") or final)
+                    sl = _safe_float(monthly5_signal_override.get("sl"), sl)
+                    tp = _safe_float(monthly5_signal_override.get("tp"), tp)
+                    position_size = _safe_float(
+                        monthly5_signal_override.get("position_size"),
+                        position_size,
+                    )
+                    score = _safe_float(monthly5_signal_override.get("score"), score)
+                    ai_prob = _safe_float(monthly5_signal_override.get("ai_prob"), ai_prob)
+                    ai_long_prob = _safe_float(monthly5_signal_override.get("ai_long_prob"), ai_long_prob)
+                    ai_short_prob = _safe_float(monthly5_signal_override.get("ai_short_prob"), ai_short_prob)
+                    decision.update(
+                        {
+                            "final": final,
+                            "sl": sl,
+                            "tp": tp,
+                            "position_size": position_size,
+                            "max_position_size": min(
+                                position_size,
+                                _safe_float(decision.get("max_position_size"), position_size)
+                                if _safe_float(decision.get("max_position_size"), 0.0) > 0
+                                else position_size,
+                            ),
+                            "score": score,
+                            "ai_prob": ai_prob,
+                            "ai_long_prob": ai_long_prob,
+                            "ai_short_prob": ai_short_prob,
+                            "primary_indicator": "monthly5_market_selection",
+                            "host_logic_applied": True,
+                            "host_opening_logic": {
+                                "direction": str(monthly5_signal_override.get("direction") or "neutral"),
+                                "mode": "monthly5_market_selection",
+                                "confidence": max(0.0, min(1.0, abs(score - 0.5) * 2.0)),
+                                "edge": round(_safe_float(net_edge_rate_est, 0.0), 6),
+                                "range_pos": _safe_float(
+                                    (host_opening_logic or {}).get("range_pos"),
+                                    0.5,
+                                ),
+                                "reasons": [
+                                    "月報酬5%市場選擇接管普通觀望",
+                                    f"plan={monthly5_signal_override.get('selected_plan')}",
+                                    f"cap={_safe_float(monthly5_signal_override.get('exposure_cap'), 0.0):.2f}",
+                                ],
+                            },
+                        }
+                    )
+                    host_opening_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
+                    host_logic_applied = True
+                    if not daily_min_trade:
+                        override_risk_rate = (
+                            abs(_safe_float(price, 0.0) - _safe_float(sl, price))
+                            / max(_safe_float(price, 0.0), 1e-9)
+                        )
+                        sl_guard_reason = _recent_sl_guard_reason(
+                            final,
+                            score,
+                            net_edge_rate_est,
+                            override_risk_rate,
+                            macro_bias,
+                            mid_trend,
+                            _safe_float(sr_analysis.get("bias"), 0.0),
+                        )
+                        if sl_guard_reason:
+                            final = sl_guard_reason
+                            position_size = 0.0
+                            decision["final"] = final
+                            decision["position_size"] = 0.0
+                        sl_review_guard_reason = _recent_sl_review_guard_reason(final)
+                        if sl_review_guard_reason:
+                            final = sl_review_guard_reason
+                            position_size = 0.0
+                            decision["final"] = final
+                            decision["position_size"] = 0.0
 
             # ===== 中文時事解讀 =====
             macro_text = "中性"
