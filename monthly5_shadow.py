@@ -1001,7 +1001,12 @@ def build_readiness_report(
             + ", ".join(active_underperforming_keys[:2])
         )
 
-    flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
+    shadow_flat_time_gap_pct = (
+        max(0.0, shadow_flat_time_pct - flat_cap)
+        if flat_cap is not None
+        else 0.0
+    )
+    flat_ok = flat_cap is None or shadow_flat_time_gap_pct <= 0.0
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
     sample_count_remaining = max(0, min_records - len(valid_rows))
     sample_count_progress_pct = min(100.0, (len(valid_rows) / min_records) * 100.0) if min_records > 0 else 100.0
@@ -1080,6 +1085,7 @@ def build_readiness_report(
                 "label": "shadow 空倉時間",
                 "current": round(max(0.0, shadow_flat_time_pct), 4),
                 "target": round(flat_cap, 4) if flat_cap is not None else None,
+                "over_target_pct": round(max(0.0, shadow_flat_time_gap_pct), 4),
                 "detail": "空倉時間需低於候選策略歷史平均空倉上限",
             }
         if code == "shadow_projection_not_valid":
@@ -1194,6 +1200,7 @@ def build_readiness_report(
         "actual_flat_time_pct": round(max(0.0, flat_time_pct), 4),
         "shadow_active_time_pct": round(max(0.0, shadow_active_time_pct), 4),
         "shadow_flat_time_pct": round(max(0.0, shadow_flat_time_pct), 4),
+        "shadow_flat_time_gap_pct": round(max(0.0, shadow_flat_time_gap_pct), 4),
         "weighted_total_sec": round(max(0.0, weighted_total_sec), 4),
         "weighted_open_sec": round(max(0.0, weighted_open_sec), 4),
         "weighted_flat_sec": round(max(0.0, weighted_flat_sec), 4),

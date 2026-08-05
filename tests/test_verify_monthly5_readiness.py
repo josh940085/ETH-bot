@@ -152,6 +152,9 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertFalse(report["ready"])
         self.assertEqual(report["flat_sample_pct"], 80.0)
         self.assertEqual(report["shadow_flat_time_pct"], 25.0)
+        self.assertEqual(report["shadow_flat_time_gap_pct"], 5.0)
+        details = {item["code"]: item for item in report["promotion_blocker_details"]}
+        self.assertEqual(details["shadow_flat_time_high"]["over_target_pct"], 5.0)
         self.assertTrue(any("shadow flat time pct high" in item for item in report["warnings"]))
 
     def test_flat_time_is_weighted_by_timestamp_span(self):

@@ -78,6 +78,7 @@ def main() -> int:
             f"evaluate_rows={report.get('evaluate_rows', 0)} "
             f"risk_rows={report.get('risk_rows', 0)} "
             f"shadow_flat_time_pct={report.get('shadow_flat_time_pct', 0.0)} "
+            f"shadow_flat_time_gap_pct={report.get('shadow_flat_time_gap_pct', 0.0)} "
             f"actual_flat_time_pct={report.get('actual_flat_time_pct', 0.0)} "
             f"shadow_paper_return_pct={report.get('shadow_paper_return_pct', 0.0)} "
             f"shadow_observed_target_gap_pct={report.get('shadow_observed_target_gap_pct', 0.0)} "
@@ -133,6 +134,8 @@ def main() -> int:
                 parts.append(f"remaining_intervals={item.get('remaining_intervals')}")
             if "observed_target_gap_pct" in item:
                 parts.append(f"observed_target_gap_pct={item.get('observed_target_gap_pct')}")
+            if "over_target_pct" in item:
+                parts.append(f"over_target_pct={item.get('over_target_pct')}")
             print("BLOCKER " + " ".join(str(part) for part in parts))
     if (
         report.get("failures")
