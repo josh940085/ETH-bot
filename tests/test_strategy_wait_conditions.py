@@ -101,6 +101,51 @@ class StrategyWaitConditionsTests(unittest.TestCase):
         self.assertIn("4H未轉空", result[2]["current"])
         self.assertIn("不自動反手", result[2]["detail"])
 
+    def test_monthly5_profile_quality_block_explains_missing_override_gates(self):
+        decision = {
+            "final": "觀望（MLX回測輪廓不佳）",
+            "breakout_attempt": 1,
+            "breakout_quality_score": 2.8,
+            "breakout_quality_required": 3.5,
+            "resistance_break_level": 64147.2,
+            "monthly5_signal_override": {
+                "reason": "monthly5_profile_wait_quality_block",
+                "direction": "long",
+                "market_bias": "bullish",
+                "bull_score": 2.8,
+                "bear_score": 1.0,
+                "min_score_gap": 2.0,
+                "net_edge_rate_est": 0.0001,
+                "min_net_edge_rate_est": 0.003,
+                "breakout_quality_score": 2.8,
+                "breakout_quality_required": 3.5,
+                "breakout_confirmed": False,
+                "direction_prob": 0.7338,
+                "min_direction_prob": 0.65,
+            },
+        }
+
+        with patch.dict(
+            eth.POSITION_PANEL_STATE,
+            {"last_close_reason": "", "last_sl_review": {}},
+            clear=False,
+        ):
+            result = eth._build_strategy_wait_conditions(
+                decision,
+                64154.2,
+                "waiting",
+                "觀望（MLX回測輪廓不佳）",
+            )
+
+        self.assertEqual([item["key"] for item in result], [
+            "resistance_breakout",
+            "monthly5_profile_quality",
+        ])
+        self.assertEqual(result[1]["label"], "月報酬5%接管品質")
+        self.assertIn("bias差 1.8<2.0", result[1]["current"])
+        self.assertIn("期望值 +0.010%<+0.300%", result[1]["current"])
+        self.assertIn("突破 2.8/3.5", result[1]["current"])
+
 
 if __name__ == "__main__":
     unittest.main()

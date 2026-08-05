@@ -9956,6 +9956,55 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
         current_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
         min_edge = max(0.0005, _safe_float(os.getenv("TRADE_MIN_EXPECTED_EDGE_RATE", 0.0012), 0.0012))
         add_condition("expected_edge", "扣除成本後期望值", f"{current_edge * 100:+.3f}%", f"至少 +{min_edge * 100:.3f}%", "等待預期報酬足以覆蓋手續費、滑價與資金費")
+    elif "MLX回測輪廓不佳" in reason_text:
+        override = (
+            decision.get("monthly5_signal_override")
+            if isinstance(decision.get("monthly5_signal_override"), dict)
+            else {}
+        )
+        if override.get("reason") == "monthly5_profile_wait_quality_block":
+            missing = []
+            direction = str(override.get("direction") or "")
+            market_bias = str(override.get("market_bias") or "")
+            bull_score = _safe_float(override.get("bull_score"), 0.0)
+            bear_score = _safe_float(override.get("bear_score"), 0.0)
+            score_gap = abs(bull_score - bear_score)
+            min_score_gap = _safe_float(override.get("min_score_gap"), 0.0)
+            bias_matches = (
+                (direction == "long" and market_bias == "bullish" and bull_score > bear_score)
+                or (direction == "short" and market_bias == "bearish" and bear_score > bull_score)
+            )
+            if not bias_matches:
+                missing.append(f"bias={market_bias or 'none'}")
+            if score_gap < min_score_gap:
+                missing.append(f"bias差 {score_gap:.1f}<{min_score_gap:.1f}")
+            net_edge = _safe_float(override.get("net_edge_rate_est"), 0.0)
+            min_edge = _safe_float(override.get("min_net_edge_rate_est"), 0.0)
+            if net_edge < min_edge:
+                missing.append(f"期望值 {net_edge * 100:+.3f}%<{min_edge * 100:+.3f}%")
+            breakout_quality = _safe_float(override.get("breakout_quality_score"), 0.0)
+            breakout_required = _safe_float(override.get("breakout_quality_required"), 0.0)
+            if not bool(override.get("breakout_confirmed", False)) and breakout_quality < breakout_required:
+                missing.append(f"突破 {breakout_quality:.1f}/{breakout_required:.1f}")
+            direction_prob = _safe_float(override.get("direction_prob"), 0.0)
+            min_direction_prob = _safe_float(override.get("min_direction_prob"), 0.0)
+            if direction_prob < min_direction_prob:
+                missing.append(f"方向機率 {direction_prob:.2f}<{min_direction_prob:.2f}")
+            add_condition(
+                "monthly5_profile_quality",
+                "月報酬5%接管品質",
+                "、".join(missing[:3]) if missing else "等待品質重算",
+                "bias、期望值、突破品質與方向機率達標",
+                "月報酬5%策略只能接管普通觀望；MLX輪廓不佳時仍需額外品質確認",
+            )
+        else:
+            add_condition(
+                "strategy_gate",
+                "策略條件",
+                reason_text.replace("觀望（", "").rstrip("）"),
+                "下一輪策略評估通過",
+                "等待新的已驗證行情快照",
+            )
     elif "等待共振" in reason_text or "等支撐" in reason_text or "等壓力" in reason_text:
         add_condition("signal_confluence", "方向共振", reason_text.replace("觀望（", "").rstrip("）"), "趨勢、動能與結構同向", "條件形成後才會建立待確認訊號")
     elif "每日單錨定" in reason_text:
