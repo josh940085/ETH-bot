@@ -1360,6 +1360,26 @@ def build_market_selection(
         signal == "wait"
         and "MLX回測輪廓不佳" in str(strategy_execution_reason or "")
     )
+    underperforming_keys = {
+        str(key)
+        for key in (underperforming_plan_keys or [])
+        if str(key)
+    }
+    recovering_keys = {
+        str(key)
+        for key in (recovering_plan_keys or [])
+        if str(key)
+    }
+    probe_success_keys = {
+        str(key)
+        for key in (probe_success_plan_keys or [])
+        if str(key)
+    }
+    probe_candidate_keys = {
+        str(key)
+        for key in (probe_candidate_plan_keys or [])
+        if str(key)
+    }
 
     selected_plan = "normal_wait"
     shadow_action = "wait"
@@ -1395,44 +1415,40 @@ def build_market_selection(
         shadow_action = "wait"
         rationale = "宏觀或事件風險硬阻擋，等待解除"
 
-    if profile_quality_wait and shadow_action in {"evaluate_long", "evaluate_short"}:
-        selected_plan = "profile_quality_wait"
-        shadow_action = "wait"
-        exposure_cap = 0.0
-        reason_codes.append("profile_quality_wait")
-        rationale = "主策略 MLX 回測輪廓不佳，月報酬5% shadow 等待更高品質接管條件"
-
     if market_state == "chop" and shadow_action in {"evaluate_long", "evaluate_short"}:
         exposure_cap = round(min(exposure_cap, 0.35), 4)
         reason_codes.append("chop_market_reduce")
+    profile_suppressed_plan = ""
+    profile_suppressed_action = ""
+    profile_suppressed_key = ""
+    profile_suppressed_exposure_cap = 0.0
+    if profile_quality_wait and shadow_action in {"evaluate_long", "evaluate_short"}:
+        profile_suppressed_plan = selected_plan
+        profile_suppressed_action = shadow_action
+        profile_suppressed_key = "|".join((selected_plan, shadow_action, market_bias, market_state))
+        profile_suppressed_exposure_cap = exposure_cap
+        if profile_suppressed_key in recovering_keys or profile_suppressed_key in probe_candidate_keys:
+            selected_plan = "profile_quality_recovery_probe"
+            exposure_cap = round(min(exposure_cap, RECOVERY_PROBE_EXPOSURE_CAP), 4)
+            reason_codes.append("profile_quality_recovery_probe")
+            rationale = "profile 品質擋單候選近期 counterfactual 轉正，僅做 shadow 低曝險恢復探測"
+        else:
+            selected_plan = "profile_quality_wait"
+            shadow_action = "wait"
+            exposure_cap = 0.0
+            reason_codes.append("profile_quality_wait")
+            rationale = "主策略 MLX 回測輪廓不佳，月報酬5% shadow 等待更高品質接管條件"
     selection_key = "|".join((selected_plan, shadow_action, market_bias, market_state))
-    underperforming_keys = {
-        str(key)
-        for key in (underperforming_plan_keys or [])
-        if str(key)
-    }
-    recovering_keys = {
-        str(key)
-        for key in (recovering_plan_keys or [])
-        if str(key)
-    }
-    probe_success_keys = {
-        str(key)
-        for key in (probe_success_plan_keys or [])
-        if str(key)
-    }
-    probe_candidate_keys = {
-        str(key)
-        for key in (probe_candidate_plan_keys or [])
-        if str(key)
-    }
-    suppressed_plan = ""
-    suppressed_action = ""
-    suppressed_key = ""
-    suppressed_exposure_cap = 0.0
+    suppressed_plan = profile_suppressed_plan
+    suppressed_action = profile_suppressed_action
+    suppressed_key = profile_suppressed_key
+    suppressed_exposure_cap = profile_suppressed_exposure_cap
     recovery_probe = False
     recovery_probe_key = ""
     probe_success = False
+    if selected_plan == "profile_quality_recovery_probe":
+        recovery_probe = True
+        recovery_probe_key = profile_suppressed_key
     if shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"} and selection_key in probe_success_keys:
         reason_codes.append("underperforming_probe_success")
         rationale = "低曝險探測表現轉正，恢復正常月報酬5%策略評估"
