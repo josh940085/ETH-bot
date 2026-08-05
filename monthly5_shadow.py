@@ -630,6 +630,11 @@ def build_readiness_report(
         0,
         SUPPRESSED_RECOVERY_MIN_INTERVALS - suppressed_observed_intervals,
     )
+    suppressed_recovery_progress_pct = (
+        min(100.0, (suppressed_observed_intervals / SUPPRESSED_RECOVERY_MIN_INTERVALS) * 100.0)
+        if SUPPRESSED_RECOVERY_MIN_INTERVALS > 0
+        else 100.0
+    )
     recovery_probe_observed_intervals = sum(
         _safe_int(item.get("intervals"), 0)
         for item in rolling_probe_grouped_paper["shadow_grouped_paper_returns"]
@@ -637,6 +642,11 @@ def build_readiness_report(
     recovery_probe_remaining_intervals = max(
         0,
         RECOVERY_PROBE_MIN_INTERVALS - recovery_probe_observed_intervals,
+    )
+    recovery_probe_progress_pct = (
+        min(100.0, (recovery_probe_observed_intervals / RECOVERY_PROBE_MIN_INTERVALS) * 100.0)
+        if RECOVERY_PROBE_MIN_INTERVALS > 0
+        else 100.0
     )
     recovering_keys = set(rolling_suppressed_grouped_paper["shadow_recovering_plan_keys"])
     probe_failed_keys = set(rolling_probe_grouped_paper["shadow_underperforming_plan_keys"])
@@ -699,6 +709,10 @@ def build_readiness_report(
 
     flat_ok = flat_cap is None or shadow_flat_time_pct <= flat_cap
     ready = not failures and len(valid_rows) >= min_records and span_hours >= min_span_hours and bool(evaluate_rows) and flat_ok
+    sample_count_remaining = max(0, min_records - len(valid_rows))
+    sample_count_progress_pct = min(100.0, (len(valid_rows) / min_records) * 100.0) if min_records > 0 else 100.0
+    sample_span_remaining_hours = max(0.0, min_span_hours - span_hours)
+    sample_span_progress_pct = min(100.0, (span_hours / min_span_hours) * 100.0) if min_span_hours > 0 else 100.0
     promotion_blockers = []
     if failures:
         promotion_blockers.append("invalid_history")
@@ -742,6 +756,10 @@ def build_readiness_report(
         "warnings": warnings,
         "rows": len(valid_rows),
         "span_hours": round(max(0.0, span_hours), 4),
+        "sample_count_remaining": sample_count_remaining,
+        "sample_count_progress_pct": round(max(0.0, sample_count_progress_pct), 4),
+        "sample_span_remaining_hours": round(max(0.0, sample_span_remaining_hours), 4),
+        "sample_span_progress_pct": round(max(0.0, sample_span_progress_pct), 4),
         "latest_age_sec": round(max(0.0, age_sec), 1),
         "selected_plan_counts": dict(sorted(selected_plan_counts.items())),
         "shadow_action_counts": dict(sorted(action_counts.items())),
@@ -789,6 +807,7 @@ def build_readiness_report(
         "shadow_suppressed_recovery_min_intervals": SUPPRESSED_RECOVERY_MIN_INTERVALS,
         "shadow_suppressed_observed_intervals": suppressed_observed_intervals,
         "shadow_suppressed_recovery_remaining_intervals": suppressed_recovery_remaining_intervals,
+        "shadow_suppressed_recovery_progress_pct": round(max(0.0, suppressed_recovery_progress_pct), 4),
         "shadow_recovery_probe_success_keys": list(probe_success_keys),
         "shadow_recovery_probe_success_count": len(probe_success_keys),
         "shadow_recovery_probe_failed_keys": list(probe_failed_keys),
@@ -797,6 +816,7 @@ def build_readiness_report(
         "shadow_recovery_probe_min_intervals": RECOVERY_PROBE_MIN_INTERVALS,
         "shadow_recovery_probe_observed_intervals": recovery_probe_observed_intervals,
         "shadow_recovery_probe_remaining_intervals": recovery_probe_remaining_intervals,
+        "shadow_recovery_probe_progress_pct": round(max(0.0, recovery_probe_progress_pct), 4),
         "shadow_recovery_probe_state": recovery_probe_state,
         "min_records": min_records,
         "min_span_hours": min_span_hours,

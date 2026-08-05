@@ -62,6 +62,8 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertEqual(report["status"], "collecting")
         self.assertFalse(report["ready"])
         self.assertEqual(report["failures"], [])
+        self.assertEqual(report["sample_count_remaining"], 4)
+        self.assertAlmostEqual(report["sample_span_remaining_hours"], 1.0, places=4)
         self.assertIn("sample_count", report["promotion_blockers"])
         self.assertIn("sample_span", report["promotion_blockers"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))
@@ -486,6 +488,7 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             report["shadow_recovery_probe_remaining_intervals"],
             monthly5_shadow.RECOVERY_PROBE_MIN_INTERVALS - 3,
         )
+        self.assertAlmostEqual(report["shadow_recovery_probe_progress_pct"], 25.0, places=4)
 
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [

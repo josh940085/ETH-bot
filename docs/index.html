@@ -2876,6 +2876,8 @@
     const minRecords = Number.isFinite(Number(state.min_records)) ? Number(state.min_records) : 48;
     const spanHours = Number.isFinite(Number(state.span_hours)) ? Number(state.span_hours) : 0;
     const minSpanHours = Number.isFinite(Number(state.min_span_hours)) ? Number(state.min_span_hours) : 24;
+    const spanRemainingHours = Number.isFinite(Number(state.sample_span_remaining_hours)) ? Number(state.sample_span_remaining_hours) : Math.max(0, minSpanHours - spanHours);
+    const countRemaining = Number.isFinite(Number(state.sample_count_remaining)) ? Number(state.sample_count_remaining) : Math.max(0, minRecords - rows);
     const evaluateRows = Number.isFinite(Number(state.evaluate_rows)) ? Number(state.evaluate_rows) : 0;
     const riskRows = Number.isFinite(Number(state.risk_rows)) ? Number(state.risk_rows) : 0;
     const flatPct = Number.isFinite(Number(state.shadow_flat_time_pct))
@@ -2910,6 +2912,7 @@
     const probeSuccessCount = Number.isFinite(Number(state.shadow_recovery_probe_success_count)) ? Number(state.shadow_recovery_probe_success_count) : 0;
     const probeFailedCount = Number.isFinite(Number(state.shadow_recovery_probe_failed_count)) ? Number(state.shadow_recovery_probe_failed_count) : 0;
     const probeRemainingIntervals = Number.isFinite(Number(state.shadow_recovery_probe_remaining_intervals)) ? Number(state.shadow_recovery_probe_remaining_intervals) : 0;
+    const probeProgressPct = Number.isFinite(Number(state.shadow_recovery_probe_progress_pct)) ? Number(state.shadow_recovery_probe_progress_pct) : 0;
     const probeState = String(state.shadow_recovery_probe_state || "idle");
     const promotionBlockers = Array.isArray(state.promotion_blockers) ? state.promotion_blockers.slice(0, 3).map((item) => String(item)) : [];
     const promotionBlockerCount = Number.isFinite(Number(state.promotion_blocker_count)) ? Number(state.promotion_blocker_count) : promotionBlockers.length;
@@ -2929,6 +2932,7 @@
         <div class="service-row"><span>升級狀態</span><span class="service-state ${tone}"><i class="service-dot"></i>${label}</span></div>
         <div class="service-row"><span>樣本</span><strong>${rows}/${minRecords} (${rowProgress.toFixed(0)}%)</strong></div>
         <div class="service-row"><span>跨度</span><strong>${spanHours.toFixed(2)}/${minSpanHours.toFixed(0)}h (${spanProgress.toFixed(0)}%)</strong></div>
+        <div class="service-row"><span>解除進度</span><strong>span-${spanRemainingHours.toFixed(2)}h count-${countRemaining} probe ${probeProgressPct.toFixed(0)}%/${probeRemainingIntervals}</strong></div>
         <div class="service-row"><span>Shadow 空倉</span><strong>${flatPct.toFixed(1)}% / ${maxFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>實單空倉</span><strong>${actualFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>紙上報酬</span><strong>${paperReturnPct.toFixed(2)}% / ${paperWinRatePct.toFixed(0)}% (${paperIntervals})</strong></div>
