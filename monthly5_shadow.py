@@ -562,6 +562,14 @@ def build_readiness_report(
         min_intervals=SUPPRESSED_RECOVERY_MIN_INTERVALS,
         suppressed=True,
     )
+    suppressed_observed_intervals = sum(
+        _safe_int(item.get("intervals"), 0)
+        for item in rolling_suppressed_grouped_paper["shadow_grouped_paper_returns"]
+    )
+    suppressed_recovery_remaining_intervals = max(
+        0,
+        SUPPRESSED_RECOVERY_MIN_INTERVALS - suppressed_observed_intervals,
+    )
     recovering_keys = set(rolling_suppressed_grouped_paper["shadow_recovering_plan_keys"])
     active_underperforming_keys = [
         key
@@ -665,6 +673,8 @@ def build_readiness_report(
         "shadow_suppressed_recovering_plan_count": rolling_suppressed_grouped_paper["shadow_recovering_plan_count"],
         "shadow_suppressed_grouped_paper_returns": list(rolling_suppressed_grouped_paper["shadow_grouped_paper_returns"]),
         "shadow_suppressed_recovery_min_intervals": SUPPRESSED_RECOVERY_MIN_INTERVALS,
+        "shadow_suppressed_observed_intervals": suppressed_observed_intervals,
+        "shadow_suppressed_recovery_remaining_intervals": suppressed_recovery_remaining_intervals,
         "min_records": min_records,
         "min_span_hours": min_span_hours,
         "max_flat_time_pct": flat_cap,

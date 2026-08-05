@@ -333,6 +333,42 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
             report["shadow_suppressed_recovering_plan_keys"],
         )
         self.assertEqual(report["shadow_active_underperforming_plan_count"], 0)
+        self.assertGreaterEqual(report["shadow_suppressed_observed_intervals"], 6)
+        self.assertEqual(report["shadow_suppressed_recovery_remaining_intervals"], 0)
+
+    def test_suppressed_recovery_reports_remaining_intervals_before_probe(self):
+        rows = []
+        base_ts = 1000
+        for idx in range(4):
+            row = self._row(
+                base_ts + idx * 60,
+                action="wait",
+                plan="underperforming_wait",
+                mark_price=90.0 + idx,
+                exposure_cap=0.0,
+                max_leverage=1,
+            )
+            row["suppressed_plan"] = "normal_long_selector"
+            row["suppressed_action"] = "evaluate_long"
+            row["suppressed_key"] = "normal_long_selector|evaluate_long|bullish|chop"
+            row["suppressed_exposure_cap"] = 0.5
+            rows.append(row)
+
+        report = monthly5_shadow.build_readiness_report(
+            rows,
+            strategy_id=monthly5_shadow.STRATEGY_ID,
+            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
+            min_records=4,
+            min_span_hours=0.01,
+            max_age_sec=None,
+            now_ts=base_ts + 3 * 60,
+        )
+
+        self.assertEqual(report["shadow_suppressed_observed_intervals"], 3)
+        self.assertEqual(
+            report["shadow_suppressed_recovery_remaining_intervals"],
+            monthly5_shadow.SUPPRESSED_RECOVERY_MIN_INTERVALS - 3,
+        )
 
     def test_shadow_monthly_projection_warns_after_enough_span_when_below_target(self):
         rows = [
