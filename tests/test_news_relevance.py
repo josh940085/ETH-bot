@@ -153,6 +153,50 @@ class NewsRelevanceTests(unittest.TestCase):
                 self.assertTrue(analysis["correction_applied"])
                 self.assertEqual(analysis["correction_reason"], expected_reason)
 
+    def test_broad_market_direction_overrides_oil_price_move(self):
+        cases = [
+            (
+                "Oil prices rise but US stock futures fall as inflation fears hit markets",
+                1,
+                -1,
+                "global_equity_market_bearish",
+                1,
+            ),
+            (
+                "油價上漲但美股期貨下跌 通膨疑慮衝擊大盤",
+                1,
+                -1,
+                "global_equity_market_bearish",
+                1,
+            ),
+            (
+                "Stocks Fall as US-Iran Worries Spur Rally in Oil: Markets Wrap",
+                1,
+                -1,
+                "global_equity_market_bearish",
+                1,
+            ),
+            (
+                "Oil slips while S&P 500 futures rise ahead of the open",
+                -1,
+                1,
+                "global_equity_market_bullish",
+                0,
+            ),
+        ]
+        for headline, model_bias, expected_bias, expected_reason, expected_event_risk in cases:
+            with self.subTest(headline=headline):
+                with mock.patch.object(
+                    news,
+                    "predict_news_sentiment_with_confidence",
+                    return_value=(model_bias, 0.91),
+                ):
+                    analysis = news.analyze_news_text(headline, log_result=False)
+                self.assertEqual(analysis["bias"], expected_bias)
+                self.assertEqual(analysis["event_risk"], expected_event_risk)
+                self.assertTrue(analysis["correction_applied"])
+                self.assertEqual(analysis["correction_reason"], expected_reason)
+
     def test_auto_corrects_non_directional_headlines_to_neutral(self):
         headlines = [
             "Here's what happened in crypto today",

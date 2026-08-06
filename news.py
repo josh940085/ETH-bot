@@ -545,11 +545,71 @@ def _major_equity_market_move_override(text: str):
         "大漲", "暴漲", "勁揚", "漲逾", "surge", "surges", "soar", "soars",
         "jump", "jumps", "rally", "rallies",
     ])
+    equity_direction_bias = _equity_market_direction_override(low)[0]
+    if equity_direction_bias < 0 and strong_bull:
+        return 0, 0.0
+    if equity_direction_bias > 0 and strong_bear:
+        return 0, 0.0
     if strong_bear or (large_magnitude and _news_has_any(low, ["跌", "挫", "摜", "drop", "fall", "lower"])):
         return -2, 0.82
     if strong_bull or (large_magnitude and _news_has_any(low, ["漲", "升", "rise", "gain", "higher"])):
         return 2, 0.82
     return 0, 0.0
+
+
+def _equity_market_direction_override(text: str):
+    """Use broad equity-market direction before commodity-only implications."""
+    low = normalize_news_text(text).lower()
+    equity_terms = [
+        "stock futures", "equity futures", "index futures", "market futures",
+        "stock market", "stocks", "shares", "equities",
+        "risk assets", "risk asset", "大盤", "美股期貨", "股指期貨", "風險資產",
+        "股市", "股指", "權值股",
+        *GLOBAL_EQUITY_INDEX_TERMS,
+    ]
+    equity_scope = _is_global_equity_market_scope(low) or _news_has_any(low, equity_terms)
+    if not equity_scope:
+        return 0, 0.0, "", 0
+
+    bearish_terms = [
+        "fall", "falls", "fell", "drop", "drops", "dropped", "lower", "slide", "slides",
+        "slid", "retreat", "retreats", "selloff", "sell-off", "risk-off", "risk off",
+        "weigh", "weighs", "hit", "hits", "pressure", "pressures",
+        "下跌", "走跌", "大跌", "重挫", "暴跌", "回落", "承壓", "賣壓", "摜破",
+    ]
+    bullish_terms = [
+        "rise", "rises", "rose", "gain", "gains", "higher", "climb", "climbs", "rally",
+        "rallies", "rebound", "rebounds", "recover", "recovers",
+        "上漲", "走高", "大漲", "勁揚", "反彈", "回升", "收復",
+    ]
+
+    def nearest_equity_direction():
+        nearest = None
+        for equity_term in equity_terms:
+            term = str(equity_term or "").strip()
+            if not term or not _news_has_term(low, term):
+                continue
+            term_pattern = re.escape(term).replace(r"\ ", r"\s+")
+            for term_match in re.finditer(term_pattern, low):
+                window = low[term_match.end(): term_match.end() + 48]
+                for direction, direction_terms in (("bearish", bearish_terms), ("bullish", bullish_terms)):
+                    for direction_term in direction_terms:
+                        direction_pattern = re.escape(direction_term).replace(r"\ ", r"\s+")
+                        direction_match = re.search(direction_pattern, window)
+                        if not direction_match:
+                            continue
+                        distance = direction_match.start()
+                        if nearest is None or distance < nearest[0]:
+                            nearest = (distance, direction)
+        return nearest[1] if nearest else ""
+
+    equity_direction = nearest_equity_direction()
+
+    if equity_direction == "bearish":
+        return -1, 0.80, "global_equity_market_bearish", 1
+    if equity_direction == "bullish":
+        return 1, 0.80, "global_equity_market_bullish", 0
+    return 0, 0.0, "", 0
 
 
 def _news_dedupe_key(text: str) -> str:
@@ -1354,7 +1414,18 @@ def analyze_news_text(raw_text, log_result=True):
         event_risk = max(event_risk, semantic_event_risk)
         tags.extend(["auto_corrected", correction_reason])
         fusion_note = f"auto_correction:{correction_reason}"
-    elif final_bias != 0 and _news_low_accuracy_safe_mode():
+
+    equity_direction_bias, equity_direction_confidence, equity_direction_reason, equity_event_risk = (
+        _equity_market_direction_override(raw_text)
+    )
+    if equity_direction_bias and not correction_reason:
+        final_bias = equity_direction_bias
+        ai_confidence = max(ai_confidence, equity_direction_confidence)
+        event_risk = max(event_risk, equity_event_risk)
+        correction_reason = equity_direction_reason
+        tags.extend(["auto_corrected", correction_reason])
+        fusion_note = f"auto_correction:{correction_reason}"
+    elif not correction_reason and final_bias != 0 and _news_low_accuracy_safe_mode():
         final_bias = 0
         ai_confidence = min(ai_confidence, 0.54)
         correction_reason = "low_accuracy_neutral_fallback"
