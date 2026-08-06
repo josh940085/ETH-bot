@@ -6956,8 +6956,9 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
     qty = math.floor(max(0.0, qty) * 1000.0) / 1000.0
     if reduce and qty >= abs(position_amt) - 1e-9:
         return False, (
+            "MIN_POSITION_NO_REDUCE: "
             f"減倉量 {qty:.3f} BTC 會全平目前 {abs(position_amt):.3f} BTC，"
-            "保留持倉等待可部分減倉"
+            "目前已是最小實單倉位，保留持倉不減倉"
         )
     if qty < COPY_TRADE_MIN_QTY:
         if not reduce:
@@ -7027,6 +7028,11 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
         return False, f"{('減倉' if reduce else '補倉')}實單失敗: {e}"
 
 
+def _is_min_position_no_reduce_message(message):
+    text = str(message or "")
+    return "MIN_POSITION_NO_REDUCE" in text or "會全平目前" in text
+
+
 def _enforce_daily_min_trade_size(planned_size, current_price):
     if not (_get_follow_mode_enabled() and _is_real_copy_enabled()):
         return ""
@@ -7069,6 +7075,11 @@ def _enforce_daily_min_trade_size(planned_size, current_price):
         mark_price=current_price,
     )
     if not ok:
+        if _is_min_position_no_reduce_message(msg):
+            active_trade["daily_min_size_enforce_ts"] = now_ts
+            sync_position_panel(current_price)
+            print(f"🔕 每日最低單最小倉位不減倉: {msg}")
+            return ""
         warning = (
             f"⚠️ 每日最低單倉位校正失敗\n"
             f"計畫: {target_size*100:.1f}% | 實際: {actual_size*100:.1f}%\n"
@@ -7223,6 +7234,10 @@ def manage_monthly5_position_guard(current_price, decision=None):
         if _get_follow_mode_enabled() and _is_real_copy_enabled():
             ok, msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
             if not ok:
+                if _is_min_position_no_reduce_message(msg):
+                    sync_position_panel(current_price)
+                    print(f"🔕 月報酬5%持倉風控最小倉位不減倉: {msg}")
+                    return False
                 _notify_scale_skip(
                     f"⚠️ 月報酬5%持倉風控降倉失敗：{msg}",
                     private=True,
@@ -7866,7 +7881,7 @@ def maybe_take_quick_profit_reduce(current_price, atr=None, now_ts=None):
     if real_copy_enabled:
         ok, scale_msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
         if not ok:
-            if "下單量低於最小值" in str(scale_msg):
+            if "下單量低於最小值" in str(scale_msg) or _is_min_position_no_reduce_message(scale_msg):
                 active_trade["quick_reduce_count"] = max_count
                 active_trade["quick_reduce_ts"] = now_ts
                 active_trade["last_adjust_ts"] = now_ts
@@ -8370,7 +8385,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
             if real_copy_enabled:
                 ok, scale_msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
                 if not ok:
-                    if "下單量低於最小值" in str(scale_msg):
+                    if "下單量低於最小值" in str(scale_msg) or _is_min_position_no_reduce_message(scale_msg):
                         active_trade["reduce_count"] = max_reduce_count
                         active_trade["last_adjust_ts"] = now_ts
                         sync_position_panel(current_price)

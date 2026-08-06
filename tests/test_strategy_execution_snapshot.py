@@ -1038,8 +1038,45 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertFalse(adjusted)
         self.assertTrue(eth.active_trade["open"])
         signed_request.assert_not_called()
-        notify_skip.assert_called_once()
+        notify_skip.assert_not_called()
         self.assertEqual(eth.POSITION_PANEL_STATE["monthly5_position_guard"]["action"], "reduce_to_cap")
+
+    def test_daily_min_size_enforcement_skips_min_real_position_without_warning(self):
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "short",
+                "entry": 64371.6,
+                "avg_entry": 64371.6,
+                "tp": 63857.55,
+                "sl": 64724.88,
+                "size": 0.1374,
+                "daily_min_size_enforce_ts": 0.0,
+            }
+        )
+
+        with (
+            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "_is_real_copy_enabled", return_value=True),
+            patch.object(
+                eth,
+                "_execute_copy_trade_scale",
+                return_value=(
+                    False,
+                    "MIN_POSITION_NO_REDUCE: 減倉量 0.001 BTC 會全平目前 0.001 BTC，"
+                    "目前已是最小實單倉位，保留持倉不減倉",
+                ),
+            ) as execute_scale,
+            patch.object(eth, "sync_position_panel") as sync_panel,
+            patch.object(eth, "send_private_telegram") as send_private,
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            result = eth._enforce_daily_min_trade_size(0.05, 64560.5)
+
+        self.assertEqual(result, "")
+        execute_scale.assert_called_once()
+        sync_panel.assert_called_once_with(64560.5)
+        send_private.assert_not_called()
 
     def test_monthly5_position_guard_closes_local_position_on_risk_off(self):
         eth.active_trade.update(
