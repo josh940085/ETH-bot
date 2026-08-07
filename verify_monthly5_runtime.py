@@ -366,7 +366,7 @@ def _verify_guard_scenarios() -> list[str]:
     return failures
 
 
-def _verify_promotion_gate(position: dict) -> list[str]:
+def _verify_promotion_gate(position: dict, max_age_sec: float | None = None) -> list[str]:
     failures: list[str] = []
     gate_enabled = str(
         os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1") or "1"
@@ -387,6 +387,12 @@ def _verify_promotion_gate(position: dict) -> list[str]:
     )
     readiness = position.get("monthly5_readiness") if isinstance(position.get("monthly5_readiness"), dict) else {}
     if readiness:
+        if max_age_sec is not None:
+            _require(
+                _safe_float(readiness.get("latest_age_sec"), max_age_sec + 1.0) <= max_age_sec,
+                failures,
+                "monthly5 readiness state stale",
+            )
         _require(
             bool(shadow.get("promotion_ready", False)) == bool(readiness.get("promotion_ready", False)),
             failures,
@@ -1014,7 +1020,7 @@ def main() -> int:
     failures.extend(_verify_spec_and_summary(spec))
     failures.extend(_verify_shadow_state("position", _shadow_from_position(position), spec, args.max_age_sec))
     failures.extend(_verify_shadow_state("shadow_file", shadow, spec, args.max_age_sec))
-    failures.extend(_verify_promotion_gate(position))
+    failures.extend(_verify_promotion_gate(position, args.max_age_sec))
     failures.extend(_verify_monthly5_price_state(position, args.max_age_sec))
     failures.extend(_verify_monthly5_real_execution_state(position))
     failures.extend(_verify_monthly5_guard_alignment(position))

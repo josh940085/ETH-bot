@@ -527,6 +527,30 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 readiness missing earliest promotion review ts", failures)
 
+    def test_runtime_verifier_rejects_stale_readiness_state(self):
+        shadow = self._shadow()
+        readiness = {
+            "promotion_ready": shadow["promotion_ready"],
+            "promotion_blockers": list(shadow["promotion_blockers"]),
+            "promotion_blocker_details": [
+                {
+                    "code": "sample_span",
+                    "ready_ts": 4600,
+                },
+            ],
+            "sample_span_ready_ts": 4600,
+            "promotion_earliest_review_ts": 4600,
+            "latest_age_sec": 901.0,
+        }
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": readiness,
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position, max_age_sec=900.0)
+
+        self.assertIn("monthly5 readiness state stale", failures)
+
     def test_runtime_verifier_rejects_readiness_blocker_eta_mismatch(self):
         shadow = self._shadow()
         readiness = {
