@@ -4121,7 +4121,7 @@ def update_copy_trade_tp_sl(tp=None, sl=None):
     return True, "✅ Binance TP/SL 已同步更新並確認"
 
 
-def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
+def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None, leverage=None):
     if direction not in {"long", "short"}:
         return False, "⚠️ 跟單失敗：方向無效"
 
@@ -4151,7 +4151,15 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None):
     global _LEVERAGE_CAP
     desired_leverage = max(
         1,
-        min(COPY_TRADE_MAX_LEVERAGE, _safe_int(os.getenv("COPY_TRADE_LEVERAGE", DEFAULT_LEV), DEFAULT_LEV)),
+        min(
+            COPY_TRADE_MAX_LEVERAGE,
+            _safe_int(
+                leverage
+                if leverage is not None
+                else os.getenv("COPY_TRADE_LEVERAGE", DEFAULT_LEV),
+                DEFAULT_LEV,
+            ),
+        ),
     )
     leverage_set_error = None
     leverage = desired_leverage
@@ -6448,6 +6456,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
             }
 
     exposure_cap = max(0.0, min(1.0, _safe_float(selection.get("exposure_cap"), 0.0)))
+    max_leverage = min(5, max(1, _safe_int(selection.get("max_leverage"), 5)))
     max_size = max(
         0.01,
         min(0.15, _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_SIZE", 0.15), 0.15)),
@@ -6471,6 +6480,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         "selected_plan": selected_plan,
         "shadow_action": shadow_action,
         "exposure_cap": round(exposure_cap, 4),
+        "max_leverage": max_leverage,
         "recovery_probe": bool(selection.get("recovery_probe", False)),
         "reason_codes": list(selection.get("reason_codes") or []),
     }
@@ -18511,6 +18521,16 @@ def run_bot():
                             "ai_prob": ai_prob,
                             "ai_long_prob": ai_long_prob,
                             "ai_short_prob": ai_short_prob,
+                            "max_leverage": min(
+                                5,
+                                max(
+                                    1,
+                                    _safe_int(
+                                        monthly5_signal_override.get("max_leverage"),
+                                        _safe_int(decision.get("max_leverage"), 5),
+                                    ),
+                                ),
+                            ),
                             "primary_indicator": "monthly5_market_selection",
                             "host_logic_applied": True,
                             "host_opening_logic": {
@@ -19095,6 +19115,11 @@ def run_bot():
                         size_ratio=active_trade.get("size", 0.0),
                         tp=active_trade.get("tp"),
                         sl=active_trade.get("sl"),
+                        leverage=(
+                            _safe_int(decision.get("max_leverage"), 0)
+                            if str(decision.get("primary_indicator") or "") == "monthly5_market_selection"
+                            else None
+                        ),
                     )
                     if copy_ok:
                         # Commit dedupe/cooldown state only after Binance has

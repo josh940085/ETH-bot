@@ -1292,6 +1292,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
                 "exposure_cap": 0.15,
+                "max_leverage": 4,
                 "recovery_probe": True,
                 "reason_codes": ["underperforming_recovery_probe"],
             }
@@ -1309,6 +1310,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertLess(override["sl"], 64000.0)
         self.assertGreater(override["tp"], 64000.0)
         self.assertEqual(override["position_size"], 0.15)
+        self.assertEqual(override["max_leverage"], 4)
 
     def test_monthly5_signal_override_respects_macro_hard_block(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0

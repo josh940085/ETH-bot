@@ -91,6 +91,40 @@ class BinanceProtectionOrderTests(unittest.TestCase):
         self.assertIn("缺少有效 TP/SL", message)
         request.assert_not_called()
 
+    def test_open_uses_explicit_monthly5_leverage_cap(self):
+        with (
+            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "_is_real_copy_enabled", return_value=True),
+            patch.object(eth, "_has_valid_tp_sl", return_value=True),
+            patch.object(eth, "_is_binance_dual_side_mode", return_value=False),
+            patch.object(eth, "_get_binance_symbol_leverage", return_value=3),
+            patch.object(eth, "_calc_copy_trade_qty", return_value=0.001),
+            patch.object(
+                eth,
+                "_execute_binance_market_order_with_retry",
+                return_value=({"orderId": 42, "executedQty": "0.001", "avgPrice": "64000"}, 0.001, ""),
+            ),
+            patch.object(eth, "_install_and_verify_binance_protection", return_value=(True, "ok")),
+            patch.object(eth, "_binance_futures_signed_request", return_value={"leverage": 3}) as request,
+            patch.object(eth, "WS_PRICE", 64000.0),
+        ):
+            eth.active_trade["open"] = False
+            ok, message = eth.execute_copy_trade_open(
+                "long",
+                0.05,
+                tp=65000.0,
+                sl=63500.0,
+                leverage=3,
+            )
+
+        self.assertTrue(ok)
+        self.assertIn("槓桿: 3x", message)
+        request.assert_any_call(
+            "POST",
+            "/fapi/v1/leverage",
+            {"symbol": eth.COPY_TRADE_SYMBOL, "leverage": 3},
+        )
+
     def test_emergency_close_uses_reduce_only_market_order(self):
         with (
             patch.object(eth, "_binance_futures_signed_request", return_value={"orderId": 7}) as request,
