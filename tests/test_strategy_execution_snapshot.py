@@ -1078,6 +1078,72 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         sync_panel.assert_called_once_with(64560.5)
         send_private.assert_not_called()
 
+    def test_monthly5_guard_blocks_daily_min_short_when_research_selector_is_long_flat(self):
+        shadow_state = {
+            "promotion_ready": False,
+            "market_selection": {
+                "selected_plan": "normal_wait",
+                "shadow_action": "wait",
+                "exposure_cap": 1.0,
+            },
+        }
+        research_probe = {
+            "artifact_available": True,
+            "stale": False,
+            "primary_direction": "long",
+            "direction_label": "long_flat",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with (
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth.monthly5_research_selector, "build_research_selector_probe", return_value=research_probe),
+        ):
+            guard = eth._apply_monthly5_execution_guard(
+                {"final": "🚀 做空", "daily_min_trade": True},
+                "short",
+                0.05,
+                mark_price=64300.0,
+            )
+
+        self.assertFalse(guard["allowed"])
+        self.assertEqual(guard["reason_code"], "monthly5_daily_min_research_direction_mismatch")
+        self.assertEqual(guard["adjusted_size"], 0.0)
+
+    def test_monthly5_guard_does_not_block_regular_short_with_long_flat_research_selector(self):
+        shadow_state = {
+            "promotion_ready": False,
+            "market_selection": {
+                "selected_plan": "normal_wait",
+                "shadow_action": "wait",
+                "exposure_cap": 1.0,
+            },
+        }
+        research_probe = {
+            "artifact_available": True,
+            "stale": False,
+            "primary_direction": "long",
+            "direction_label": "long_flat",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with (
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth.monthly5_research_selector, "build_research_selector_probe", return_value=research_probe),
+        ):
+            guard = eth._apply_monthly5_execution_guard(
+                {"final": "🚀 做空", "daily_min_trade": False},
+                "short",
+                0.05,
+                mark_price=64300.0,
+            )
+
+        self.assertTrue(guard["allowed"])
+        self.assertNotEqual(
+            guard.get("reason_code"),
+            "monthly5_daily_min_research_direction_mismatch",
+        )
+
     def test_monthly5_position_guard_closes_local_position_on_risk_off(self):
         eth.active_trade.update(
             {

@@ -6158,6 +6158,30 @@ def _apply_monthly5_execution_guard(decision, direction, requested_size, mark_pr
         direction=direction,
         requested_size=requested_size,
     )
+    daily_min_trade = bool((decision or {}).get("daily_min_trade", False))
+    if guard.get("allowed", True) and daily_min_trade and not bool(shadow_state.get("promotion_ready", False)):
+        research_probe = monthly5_research_selector.build_research_selector_probe()
+        primary_direction = str(research_probe.get("primary_direction") or "wait").lower()
+        direction_label = str(research_probe.get("direction_label") or "")
+        if (
+            research_probe.get("artifact_available")
+            and not research_probe.get("stale")
+            and primary_direction == "long"
+            and direction == "short"
+            and direction_label in {"long_flat", "long_only"}
+        ):
+            guard = dict(guard)
+            guard.update(
+                {
+                    "allowed": False,
+                    "reason_code": "monthly5_daily_min_research_direction_mismatch",
+                    "reason": "月報酬5% research selector 本月偏多/空倉，禁止每日最低空單",
+                    "adjusted_size": 0.0,
+                    "capped": True,
+                    "research_selector_top_pick": str(research_probe.get("top_pick") or ""),
+                    "research_selector_direction": primary_direction,
+                }
+            )
     selection = shadow_state.get("market_selection") if isinstance(shadow_state.get("market_selection"), dict) else {}
     reason_codes = {str(code) for code in selection.get("reason_codes") or [] if code}
     last_close_reason = str(POSITION_PANEL_STATE.get("last_close_reason") or "").upper()
@@ -18639,7 +18663,7 @@ def run_bot():
             if not final.startswith("觀望"):
                 monthly5_direction = "long" if "做多" in final else "short"
                 monthly5_guard = _apply_monthly5_execution_guard(
-                    decision,
+                    dict(decision, daily_min_trade=bool(daily_min_trade)),
                     monthly5_direction,
                     position_size,
                     mark_price=price,
