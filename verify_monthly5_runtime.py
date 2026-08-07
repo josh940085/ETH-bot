@@ -374,6 +374,39 @@ def _verify_promotion_gate(position: dict) -> list[str]:
             failures,
             "position monthly5_shadow promotion_blockers do not match readiness",
         )
+        blockers = [str(item) for item in readiness.get("promotion_blockers") or []]
+        details = {
+            str(item.get("code") or ""): item
+            for item in (readiness.get("promotion_blocker_details") or [])
+            if isinstance(item, dict)
+        }
+        if not bool(readiness.get("promotion_ready", False)):
+            _require(
+                _safe_float(readiness.get("promotion_earliest_review_ts"), 0.0) > 0.0,
+                failures,
+                "monthly5 readiness missing earliest promotion review ts",
+            )
+        if "sample_count" in blockers:
+            sample_count_ready_ts = _safe_float(readiness.get("sample_count_ready_ts"), 0.0)
+            _require(sample_count_ready_ts > 0.0, failures, "monthly5 readiness missing sample_count_ready_ts")
+            _require(
+                _safe_float(details.get("sample_count", {}).get("ready_ts"), 0.0) == sample_count_ready_ts,
+                failures,
+                "monthly5 readiness sample_count blocker ready_ts mismatch",
+            )
+        if "sample_span" in blockers:
+            sample_span_ready_ts = _safe_float(readiness.get("sample_span_ready_ts"), 0.0)
+            _require(sample_span_ready_ts > 0.0, failures, "monthly5 readiness missing sample_span_ready_ts")
+            _require(
+                _safe_float(details.get("sample_span", {}).get("ready_ts"), 0.0) == sample_span_ready_ts,
+                failures,
+                "monthly5 readiness sample_span blocker ready_ts mismatch",
+            )
+            _require(
+                _safe_float(readiness.get("promotion_earliest_review_ts"), 0.0) >= sample_span_ready_ts,
+                failures,
+                "monthly5 earliest promotion review before sample span ready",
+            )
     override = position.get("monthly5_signal_override")
     override = override if isinstance(override, dict) else {}
     if override.get("applied") is True:

@@ -457,6 +457,14 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         readiness = {
             "promotion_ready": shadow["promotion_ready"],
             "promotion_blockers": list(shadow["promotion_blockers"]),
+            "promotion_blocker_details": [
+                {
+                    "code": "sample_span",
+                    "ready_ts": 4600,
+                },
+            ],
+            "sample_span_ready_ts": 4600,
+            "promotion_earliest_review_ts": 4600,
         }
         position = {
             "monthly5_shadow": shadow,
@@ -481,6 +489,45 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         failures = verify_monthly5_runtime._verify_promotion_gate(position)
 
         self.assertIn("position monthly5_shadow promotion_ready does not match readiness", failures)
+
+    def test_runtime_verifier_rejects_missing_readiness_review_eta(self):
+        shadow = self._shadow()
+        readiness = {
+            "promotion_ready": shadow["promotion_ready"],
+            "promotion_blockers": list(shadow["promotion_blockers"]),
+            "promotion_blocker_details": [],
+        }
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": readiness,
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 readiness missing earliest promotion review ts", failures)
+
+    def test_runtime_verifier_rejects_readiness_blocker_eta_mismatch(self):
+        shadow = self._shadow()
+        readiness = {
+            "promotion_ready": shadow["promotion_ready"],
+            "promotion_blockers": list(shadow["promotion_blockers"]),
+            "promotion_blocker_details": [
+                {
+                    "code": "sample_span",
+                    "ready_ts": 4500,
+                },
+            ],
+            "sample_span_ready_ts": 4600,
+            "promotion_earliest_review_ts": 4600,
+        }
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": readiness,
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 readiness sample_span blocker ready_ts mismatch", failures)
 
     def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
         position = {
