@@ -452,6 +452,36 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 signal override applied before promotion_ready", failures)
 
+    def test_runtime_verifier_accepts_matching_readiness_promotion_gate_state(self):
+        shadow = self._shadow()
+        readiness = {
+            "promotion_ready": shadow["promotion_ready"],
+            "promotion_blockers": list(shadow["promotion_blockers"]),
+        }
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": readiness,
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_readiness_promotion_gate_state_mismatch(self):
+        shadow = self._shadow()
+        readiness = {
+            "promotion_ready": True,
+            "promotion_blockers": [],
+        }
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": readiness,
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("position monthly5_shadow promotion_ready does not match readiness", failures)
+
     def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
         position = {
             "open": True,

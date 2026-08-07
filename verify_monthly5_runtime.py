@@ -357,10 +357,22 @@ def _verify_promotion_gate(position: dict) -> list[str]:
             failures,
             "position monthly5_shadow missing promotion_ready boolean",
         )
+    _require(
+        isinstance(shadow.get("promotion_blockers"), list),
+        failures,
+        "position monthly5_shadow missing promotion_blockers list",
+    )
+    readiness = position.get("monthly5_readiness") if isinstance(position.get("monthly5_readiness"), dict) else {}
+    if readiness:
         _require(
-            isinstance(shadow.get("promotion_blockers"), list),
+            bool(shadow.get("promotion_ready", False)) == bool(readiness.get("promotion_ready", False)),
             failures,
-            "position monthly5_shadow missing promotion_blockers list",
+            "position monthly5_shadow promotion_ready does not match readiness",
+        )
+        _require(
+            list(shadow.get("promotion_blockers") or []) == list(readiness.get("promotion_blockers") or []),
+            failures,
+            "position monthly5_shadow promotion_blockers do not match readiness",
         )
     override = position.get("monthly5_signal_override")
     override = override if isinstance(override, dict) else {}
