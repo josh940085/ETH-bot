@@ -63,7 +63,7 @@ class StrategyStrictnessCheckTests(unittest.TestCase):
             return_value={
                 "covered": True,
                 "candidate_detail": "PASS monthly5_candidate",
-                "runtime_detail": "PASS monthly5_runtime",
+                "runtime_detail": "PASS monthly5_runtime promotion_ready=true",
             },
         ):
             result = self._run_check(
@@ -111,6 +111,27 @@ class StrategyStrictnessCheckTests(unittest.TestCase):
 
         self.assertFalse(cover["covered"])
         self.assertEqual(cover["reason"], "runtime_failed")
+
+    def test_monthly5_cover_requires_promotion_ready(self):
+        candidate_ok = subprocess.CompletedProcess(
+            args=["verify_monthly5_candidate.py"],
+            returncode=0,
+            stdout="PASS monthly5_candidate",
+        )
+        runtime_collecting = subprocess.CompletedProcess(
+            args=["verify_monthly5_runtime.py"],
+            returncode=0,
+            stdout=(
+                "PASS monthly5_runtime promotion_ready=false "
+                "promotion_blockers=sample_span,shadow_projection_not_valid"
+            ),
+        )
+        with patch.object(maintenance, "_run_command", side_effect=[candidate_ok, runtime_collecting]):
+            cover = maintenance._check_monthly5_strictness_cover()
+
+        self.assertFalse(cover["covered"])
+        self.assertEqual(cover["reason"], "promotion_not_ready")
+        self.assertIn("promotion_ready=false", cover["runtime_detail"])
 
     def test_flags_low_trade_day_coverage(self):
         with (

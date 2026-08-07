@@ -1544,6 +1544,13 @@ def _check_smoke_backtest(days, warmup_bars):
     }
 
 
+def _monthly5_runtime_output_promotion_ready(output):
+    for token in str(output or "").replace("\n", " ").split():
+        if token.startswith("promotion_ready="):
+            return token.split("=", 1)[1].strip().lower() == "true"
+    return False
+
+
 def _check_strategy_strictness():
     summary = _read_json(data_path("backtest_latest_summary.json")) or {}
     coverage = summary.get("trade_day_coverage") if isinstance(summary.get("trade_day_coverage"), dict) else {}
@@ -1651,10 +1658,18 @@ def _check_monthly5_strictness_cover():
             "candidate_detail": (candidate.stdout or "").strip(),
             "runtime_detail": (runtime.stdout or "").strip(),
         }
+    runtime_detail = (runtime.stdout or "").strip()
+    if not _monthly5_runtime_output_promotion_ready(runtime_detail):
+        return {
+            "covered": False,
+            "reason": "promotion_not_ready",
+            "candidate_detail": (candidate.stdout or "").strip(),
+            "runtime_detail": runtime_detail,
+        }
     return {
         "covered": True,
         "candidate_detail": (candidate.stdout or "").strip(),
-        "runtime_detail": (runtime.stdout or "").strip(),
+        "runtime_detail": runtime_detail,
     }
 
 
