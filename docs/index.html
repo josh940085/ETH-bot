@@ -2898,10 +2898,11 @@
     const override = MONTHLY5_SIGNAL_OVERRIDE && typeof MONTHLY5_SIGNAL_OVERRIDE === "object" ? MONTHLY5_SIGNAL_OVERRIDE : {};
     const status = String(state.status || "collecting");
     const ready = Boolean(state.ready);
+    const promotionReady = Boolean(state.promotion_ready);
     const rows = Number.isFinite(Number(state.rows)) ? Number(state.rows) : 0;
     const minRecords = Number.isFinite(Number(state.min_records)) ? Number(state.min_records) : 48;
     const spanHours = Number.isFinite(Number(state.span_hours)) ? Number(state.span_hours) : 0;
-    const minSpanHours = Number.isFinite(Number(state.min_span_hours)) ? Number(state.min_span_hours) : 24;
+    const minSpanHours = Number.isFinite(Number(state.min_span_hours)) ? Number(state.min_span_hours) : 8;
     const spanRemainingHours = Number.isFinite(Number(state.sample_span_remaining_hours)) ? Number(state.sample_span_remaining_hours) : Math.max(0, minSpanHours - spanHours);
     const countRemaining = Number.isFinite(Number(state.sample_count_remaining)) ? Number(state.sample_count_remaining) : Math.max(0, minRecords - rows);
     const evaluateRows = Number.isFinite(Number(state.evaluate_rows)) ? Number(state.evaluate_rows) : 0;
@@ -2959,8 +2960,8 @@
     const overrideLabel = overrideReason
       ? `${override.applied ? "applied" : overrideReason}${overrideFinal ? ` | ${overrideFinal}` : ""}`
       : "none";
-    const tone = status === "ready" || ready ? "good" : (status === "invalid" ? "bad" : "warn");
-    const label = status === "ready" || ready ? "可審核" : (status === "invalid" ? "異常" : "收集中");
+    const tone = promotionReady ? "good" : (status === "invalid" ? "bad" : "warn");
+    const label = promotionReady ? "可接管" : (status === "invalid" ? "異常" : (status === "ready" || ready ? "待升級" : "收集中"));
     const rowProgress = minRecords > 0 ? clamp((rows / minRecords) * 100, 0, 100) : 0;
     const spanProgress = minSpanHours > 0 ? clamp((spanHours / minSpanHours) * 100, 0, 100) : 0;
     const warningText = warnings.length ? warnings.map((item) => escapeHtml(String(item))).join(" ｜ ") : "樣本門檻正常";
