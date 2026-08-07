@@ -1534,6 +1534,47 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(override["reason"], "monthly5_promotion_not_ready")
         self.assertIn("sample_span", override["promotion_blockers"])
 
+    def test_monthly5_direct_takeover_bypasses_promotion_and_protected_wait_only(self):
+        eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
+        decision = {
+            "final": "觀望（多單缺少支撐承接或突破確認）",
+            "score": 0.51,
+            "atr": 80.0,
+            "event_risk": 0,
+            "ai_prob": 0.52,
+            "ai_long_prob": 0.53,
+            "ai_short_prob": 0.47,
+            "macro_indicator_alignment": {"hard_block": False},
+        }
+        monthly5_state = {
+            "promotion_ready": False,
+            "promotion_blockers": ["sample_span"],
+            "market_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.35,
+                "max_leverage": 5,
+                "reason_codes": ["chop_market_reduce"],
+            },
+        }
+
+        with (
+            patch.dict(
+                os.environ,
+                {"MONTHLY5_DIRECT_TAKEOVER": "1"},
+                clear=False,
+            ),
+            patch.dict(eth.POSITION_PANEL_STATE, {"last_close_reason": "", "last_close_ts": 0}, clear=False),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            override = eth._build_monthly5_signal_override(decision, monthly5_state, 64000.0)
+
+        self.assertTrue(override["applied"])
+        self.assertTrue(override["direct_takeover"])
+        self.assertEqual(override["direction"], "long")
+        self.assertEqual(override["max_leverage"], 5)
+        self.assertEqual(override["position_size"], 0.15)
+
     def test_monthly5_signal_override_reports_promotion_gate_before_protected_wait(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
         decision = {

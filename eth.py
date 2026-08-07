@@ -6236,6 +6236,7 @@ def _apply_monthly5_execution_guard(decision, direction, requested_size, mark_pr
 def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     if not _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_ENABLED", "1")):
         return {"applied": False, "reason": "disabled"}
+    direct_takeover = _is_truthy(os.getenv("MONTHLY5_DIRECT_TAKEOVER", "0"))
 
     decision = decision if isinstance(decision, dict) else {}
     final = str(decision.get("final") or "")
@@ -6271,6 +6272,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         return {"applied": False, "reason": "monthly5_plan_blocked", "selected_plan": selected_plan}
     if (
         _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1"))
+        and not direct_takeover
         and not bool(monthly5_state.get("promotion_ready", False))
     ):
         return {
@@ -6294,7 +6296,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
             "selected_plan": selected_plan,
         }
 
-    if protected_wait_reason:
+    if protected_wait_reason and not direct_takeover:
         return {"applied": False, "reason": "protected_wait_reason", "final": final}
 
     macro_alignment = decision.get("macro_indicator_alignment") if isinstance(decision.get("macro_indicator_alignment"), dict) else {}
@@ -6470,6 +6472,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     return {
         "applied": True,
         "reason": "monthly5_market_selection",
+        "direct_takeover": bool(direct_takeover),
         "direction": direction,
         "final": final_text,
         "sl": float(sl),
