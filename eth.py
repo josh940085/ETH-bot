@@ -11167,9 +11167,21 @@ def _score_host_opening_logic(
             add("long", min(0.75, repeated_support_tests * 0.16), "支撐連測未破，偏等承接")
             short_score -= 0.35
     if repeated_resistance_tests >= 2:
+        pressure_absorption_long = (
+            breakout != -1
+            and htf == 1
+            and mid_trend == 1
+            and buy_pressure
+            and volume_spike
+            and macro_bias >= 0.35
+            and repeated_test_pressure >= 0.35
+        )
         if breakout == 1 and not sweep_high:
             add("long", min(1.0, repeated_resistance_tests * 0.22), "壓力連測後放量突破")
             short_score -= 0.45
+        elif pressure_absorption_long:
+            add("long", min(0.85, repeated_resistance_tests * 0.12), "壓力連測陰漲吸籌，買壓量能同向")
+            short_score -= 0.30
         else:
             add("short", min(0.75, repeated_resistance_tests * 0.16), "壓力連測未破，偏等反彈失敗")
             long_score -= 0.35
@@ -11215,6 +11227,16 @@ def _score_host_opening_logic(
     if direction == "long":
         if repeated_resistance_tests >= 2 and breakout == 1:
             mode = "breakout_after_pressure_tests"
+        elif (
+            repeated_resistance_tests >= 2
+            and breakout != -1
+            and htf == 1
+            and mid_trend == 1
+            and buy_pressure
+            and volume_spike
+            and macro_bias >= 0.35
+        ):
+            mode = "pressure_absorption_long"
         elif pos <= 0.35 or support_hits > 0 or repeated_support_tests >= 2:
             mode = "support_reclaim"
         elif mid_score > 0.25 and low_score > 0.15:
@@ -15005,6 +15027,17 @@ def build_trade_signal_snapshot(
                 and direction_name == "long"
                 and regime in {"bull_trend", "bull_trend_strong"}
                 and htf == 1
+            ):
+                profile_ok = True
+            elif (
+                host_mode == "pressure_absorption_long"
+                and direction_name == "long"
+                and regime in {"bull_trend", "bull_trend_strong", "range"}
+                and htf == 1
+                and mid_trend == 1
+                and buy_pressure
+                and volume_spike
+                and macro_bias >= 0.35
             ):
                 profile_ok = True
             elif (
