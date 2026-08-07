@@ -103,7 +103,9 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
                 "selector_policy_version": monthly5_shadow.SELECTOR_POLICY_VERSION,
                 "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
                 "selector_policy_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
-                "selector_alignment": "research_selector",
+                "selector_alignment": "live_similar_day",
+                "selector_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                "selector_primary_direction": "long",
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
                 "exposure_cap": 0.35,
@@ -315,6 +317,61 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
 
         self.assertIn("monthly5 live selector decision not usable", failures)
+
+    def test_runtime_verifier_rejects_live_selector_key_mismatch(self):
+        spec = self._spec("summary.json", "monthly.json")
+        shadow = self._shadow()
+        shadow["market_selection"]["selector_key"] = "mom48_lf|lev5|stopNone|target0.05|redlev0.5"
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_live_selector_input": self._live_selector_input(),
+            "monthly5_live_selector_decision": self._live_selector_decision(),
+        }
+        probe = {
+            "artifact_available": True,
+            "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "max_leverage": 4,
+            "primary_direction": "long",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with unittest.mock.patch.object(
+            verify_monthly5_runtime.monthly5_research_selector,
+            "build_research_selector_probe",
+            return_value=probe,
+        ):
+            failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
+
+        self.assertIn("monthly5 market selection selector key mismatch", failures)
+
+    def test_runtime_verifier_rejects_short_action_against_long_flat_selector(self):
+        spec = self._spec("summary.json", "monthly.json")
+        shadow = self._shadow()
+        shadow["market_selection"]["selected_plan"] = "normal_short_selector"
+        shadow["market_selection"]["shadow_action"] = "evaluate_short"
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_live_selector_input": self._live_selector_input(),
+            "monthly5_live_selector_decision": self._live_selector_decision(),
+        }
+        probe = {
+            "artifact_available": True,
+            "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "max_leverage": 4,
+            "primary_direction": "long",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with unittest.mock.patch.object(
+            verify_monthly5_runtime.monthly5_research_selector,
+            "build_research_selector_probe",
+            return_value=probe,
+        ):
+            failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
+
+        self.assertIn("monthly5 market selection action not allowed by live selector direction", failures)
 
     def test_runtime_verifier_rejects_disabled_promotion_gate(self):
         position = {"monthly5_shadow": self._shadow()}

@@ -72,6 +72,18 @@ def _require(condition: bool, failures: list[str], message: str):
         failures.append(message)
 
 
+def _selector_allows_action(primary_direction: str, shadow_action: str) -> bool:
+    primary_direction = str(primary_direction or "").lower()
+    shadow_action = str(shadow_action or "").lower()
+    if shadow_action not in {"evaluate_long", "evaluate_short"}:
+        return True
+    if primary_direction == "long_or_short":
+        return True
+    if primary_direction == "long":
+        return shadow_action == "evaluate_long"
+    return False
+
+
 def _verify_spec_and_summary(spec: dict) -> list[str]:
     evidence = spec.get("backtest_evidence") if isinstance(spec.get("backtest_evidence"), dict) else {}
     summary_path = Path(str(evidence.get("source_summary") or ""))
@@ -343,6 +355,33 @@ def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
             failures,
             "monthly5 live selector decision direction unsupported",
         )
+        shadow = _shadow_from_position(position)
+        selection = shadow.get("market_selection") if isinstance(shadow.get("market_selection"), dict) else {}
+        if selection and selection.get("selector_source") == monthly5_shadow.RESEARCH_SELECTOR_SOURCE:
+            _require(
+                selection.get("selector_alignment") == "live_similar_day",
+                failures,
+                "monthly5 market selection not aligned to live similar-day selector",
+            )
+            _require(
+                str(selection.get("selector_key") or "") == str(live_decision.get("selected_key") or ""),
+                failures,
+                "monthly5 market selection selector key mismatch",
+            )
+            _require(
+                str(selection.get("selector_primary_direction") or "")
+                == str(live_decision.get("primary_direction") or ""),
+                failures,
+                "monthly5 market selection selector direction mismatch",
+            )
+            _require(
+                _selector_allows_action(
+                    str(live_decision.get("primary_direction") or ""),
+                    str(selection.get("shadow_action") or ""),
+                ),
+                failures,
+                "monthly5 market selection action not allowed by live selector direction",
+            )
     return failures
 
 
