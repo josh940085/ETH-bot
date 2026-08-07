@@ -152,6 +152,32 @@ class Monthly5MaintenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "remaining_hours=12.8"):
                 maintenance._check_monthly5_readiness()
 
+    def test_monthly5_activation_check_wraps_pending_promotion(self):
+        command_result = SimpleNamespace(
+            returncode=0,
+            stdout="PASS monthly5_activation status=pending_promotion\n",
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result) as run_command:
+            result = maintenance._check_monthly5_activation()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("pending_promotion", result["detail"])
+        self.assertIn("verify_monthly5_activation.py", run_command.call_args.args[0])
+
+    def test_monthly5_activation_check_raises_on_blocked_activation(self):
+        command_result = SimpleNamespace(
+            returncode=1,
+            stdout=(
+                "FAIL monthly5_activation status=blocked\n"
+                "BLOCKER selected_plan not actionable: mixed_bias_long_probe\n"
+            ),
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result):
+            with self.assertRaisesRegex(RuntimeError, "mixed_bias_long_probe"):
+                maintenance._check_monthly5_activation()
+
 
 if __name__ == "__main__":
     unittest.main()

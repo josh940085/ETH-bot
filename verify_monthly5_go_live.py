@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
                 "--require-promotion-ready",
             ],
         ),
+        ("activation", [sys.executable, "verify_monthly5_activation.py"]),
     ]
 
     failures = []

@@ -13,6 +13,7 @@ class VerifyMonthly5GoLiveTests(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="PASS runtime\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="PASS account open_count=0\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="PASS readiness promotion_ready=true\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS activation status=actionable\n", stderr=""),
         ]
 
         with (
@@ -37,6 +38,7 @@ class VerifyMonthly5GoLiveTests(unittest.TestCase):
                 ),
                 stderr="",
             ),
+            SimpleNamespace(returncode=0, stdout="PASS activation status=pending_promotion\n", stderr=""),
         ]
 
         with (
@@ -61,6 +63,7 @@ class VerifyMonthly5GoLiveTests(unittest.TestCase):
                 stderr="",
             ),
             SimpleNamespace(returncode=0, stdout="PASS readiness promotion_ready=true\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS activation status=actionable\n", stderr=""),
         ]
 
         with (
@@ -73,6 +76,33 @@ class VerifyMonthly5GoLiveTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("FAIL monthly5_go_live_step=account", output)
         self.assertIn("FAIL monthly5_go_live failed_steps=account", output)
+
+    def test_go_live_fails_when_activation_is_blocked_after_promotion(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="PASS candidate\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS runtime\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS account open_count=0\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS readiness promotion_ready=true\n", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout=(
+                    "FAIL monthly5_activation status=blocked\n"
+                    "BLOCKER selected_plan not actionable: mixed_bias_long_probe\n"
+                ),
+                stderr="",
+            ),
+        ]
+
+        with (
+            patch.object(verify_monthly5_go_live.subprocess, "run", side_effect=results),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            code = verify_monthly5_go_live.main([])
+
+        output = stdout.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL monthly5_go_live_step=activation", output)
+        self.assertIn("BLOCKER selected_plan not actionable", output)
 
 
 if __name__ == "__main__":

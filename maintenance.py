@@ -60,6 +60,7 @@ CHECK_NAME_ZH = {
     "monthly5_runtime": "月報酬5%策略一致性",
     "monthly5_account": "月報酬5%實倉安全",
     "monthly5_readiness": "月報酬5%實盤樣本準備度",
+    "monthly5_activation": "月報酬5%實單接管條件",
     "smoke_backtest": "策略快速回測",
 }
 STATUS_ZH = {
@@ -1074,6 +1075,21 @@ def _check_monthly5_readiness():
     }
 
 
+def _check_monthly5_activation():
+    result = _run_command(
+        [sys.executable, "verify_monthly5_activation.py"],
+        timeout=60,
+    )
+    output = (result.stdout or "").strip()
+    if result.returncode != 0:
+        raise RuntimeError(output or "monthly5 activation verifier failed")
+    detail = output.splitlines()[-1] if output else "monthly5 activation verifier passed"
+    return {
+        "status": "ok",
+        "detail": detail,
+    }
+
+
 def _check_conflict_markers():
     findings = []
     scan_paths = [REPO_DIR / name for name in TEXT_SCAN_FILES]
@@ -1884,6 +1900,7 @@ def main():
         ("monthly5_runtime", _check_monthly5_runtime),
         ("monthly5_account", _check_monthly5_account),
         ("monthly5_readiness", _check_monthly5_readiness),
+        ("monthly5_activation", _check_monthly5_activation),
         ("telegram_policy", _check_telegram_policy_and_repair),
         ("telegram_watch_risk", _check_telegram_watch_risk),
         ("model_health", _check_models_and_repair),
