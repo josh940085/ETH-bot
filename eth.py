@@ -18585,6 +18585,7 @@ def run_bot():
 
             monthly5_signal_override = {}
             if final.startswith("觀望"):
+                decision["final"] = final
                 monthly5_shadow_state = _update_monthly5_shadow_panel_state(
                     price,
                     decision=decision,
