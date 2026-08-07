@@ -279,6 +279,23 @@ def _verify_promotion_gate(position: dict) -> list[str]:
             failures,
             "monthly5 signal override applied before promotion_ready",
         )
+    monthly5_entry_selection = (
+        position.get("monthly5_entry_selection")
+        if isinstance(position.get("monthly5_entry_selection"), dict)
+        else {}
+    )
+    if bool(position.get("open", False)) and monthly5_entry_selection:
+        _require(
+            str(position.get("trade_source") or "") == "monthly5_market_selection",
+            failures,
+            "monthly5 open position trade_source mismatch",
+        )
+    if str(position.get("trade_source") or "") == "monthly5_market_selection":
+        _require(
+            bool(monthly5_entry_selection),
+            failures,
+            "monthly5 trade_source missing entry selection",
+        )
     return failures
 
 

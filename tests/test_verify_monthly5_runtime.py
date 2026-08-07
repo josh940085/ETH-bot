@@ -424,6 +424,32 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 signal override applied before promotion_ready", failures)
 
+    def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
+        position = {
+            "open": True,
+            "trade_source": "signal",
+            "monthly5_shadow": self._shadow(),
+            "monthly5_entry_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 open position trade_source mismatch", failures)
+
+    def test_runtime_verifier_rejects_monthly5_trade_source_without_entry_selection(self):
+        position = {
+            "open": True,
+            "trade_source": "monthly5_market_selection",
+            "monthly5_shadow": self._shadow(),
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 trade_source missing entry selection", failures)
+
 
 if __name__ == "__main__":
     unittest.main()
