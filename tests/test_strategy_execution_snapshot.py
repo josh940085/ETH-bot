@@ -922,6 +922,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             "sample_unique_timestamps": 8,
             "sample_median_interval_sec": 30.0,
             "sample_rows_per_hour_est": 120.0,
+            "promotion_earliest_review_ts": 1786115014,
             "shadow_flat_time_gap_pct": 0.0,
             "shadow_legacy_recovery_probe_failed_keys": [
                 "normal_long_selector|evaluate_long|bullish|chop",
@@ -939,6 +940,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         with (
             patch.object(eth.monthly5_shadow, "load_history", return_value=[]),
             patch.object(eth.monthly5_shadow, "build_readiness_report", return_value=report),
+            patch.object(eth.time, "time", return_value=1786090214),
         ):
             panel = eth._build_monthly5_readiness_panel_state()
 
@@ -946,6 +948,9 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(panel["sample_unique_timestamps"], 8)
         self.assertEqual(panel["sample_median_interval_sec"], 30.0)
         self.assertEqual(panel["sample_rows_per_hour_est"], 120.0)
+        self.assertEqual(panel["promotion_earliest_review_ts"], 1786115014)
+        self.assertEqual(panel["promotion_eta_local"], "2026-08-07T23:03:34+08:00")
+        self.assertEqual(panel["promotion_eta_remaining_hours"], 6.8889)
         self.assertEqual(panel["shadow_flat_time_gap_pct"], 0.0)
         self.assertEqual(
             panel["shadow_legacy_recovery_probe_failed_keys"],

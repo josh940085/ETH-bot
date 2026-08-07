@@ -6504,6 +6504,15 @@ def _build_monthly5_readiness_panel_state():
             max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
             required_selector_source=monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
         )
+        promotion_review_ts = _safe_int(report.get("promotion_earliest_review_ts"), 0)
+        promotion_eta_local = ""
+        promotion_eta_remaining_hours = 0.0
+        if promotion_review_ts > 0:
+            promotion_eta_local = datetime.datetime.fromtimestamp(
+                promotion_review_ts,
+                ZoneInfo("Asia/Taipei"),
+            ).isoformat(timespec="seconds")
+            promotion_eta_remaining_hours = max(0.0, (promotion_review_ts - time.time()) / 3600.0)
         return {
             "schema_version": 1,
             "status": str(report.get("status") or "invalid"),
@@ -6529,7 +6538,9 @@ def _build_monthly5_readiness_panel_state():
             "sample_span_remaining_hours": round(_safe_float(report.get("sample_span_remaining_hours"), 0.0), 4),
             "sample_span_progress_pct": round(_safe_float(report.get("sample_span_progress_pct"), 0.0), 4),
             "sample_span_ready_ts": _safe_int(report.get("sample_span_ready_ts"), 0),
-            "promotion_earliest_review_ts": _safe_int(report.get("promotion_earliest_review_ts"), 0),
+            "promotion_earliest_review_ts": promotion_review_ts,
+            "promotion_eta_local": promotion_eta_local,
+            "promotion_eta_remaining_hours": round(promotion_eta_remaining_hours, 4),
             "latest_age_sec": round(_safe_float(report.get("latest_age_sec"), 0.0), 1),
             "evaluate_rows": _safe_int(report.get("evaluate_rows"), 0),
             "risk_rows": _safe_int(report.get("risk_rows"), 0),
