@@ -643,6 +643,72 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 trade_source missing entry selection", failures)
 
+    def test_runtime_verifier_accepts_monthly5_open_position_safety(self):
+        position = {
+            "open": True,
+            "direction": "long",
+            "entry": 64000.0,
+            "tp": 65000.0,
+            "sl": 63500.0,
+            "binance_qty": 0.001,
+            "position_source": "binance",
+            "lev": 4,
+            "trade_source": "monthly5_market_selection",
+            "monthly5_entry_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "max_leverage": 4,
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_open_position_safety(position)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_monthly5_open_position_bad_long_protection(self):
+        position = {
+            "open": True,
+            "direction": "long",
+            "entry": 64000.0,
+            "tp": 63000.0,
+            "sl": 63500.0,
+            "binance_qty": 0.001,
+            "position_source": "binance",
+            "lev": 4,
+            "trade_source": "monthly5_market_selection",
+            "monthly5_entry_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "max_leverage": 4,
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_open_position_safety(position)
+
+        self.assertIn("monthly5 long TP must be above entry", failures)
+
+    def test_runtime_verifier_rejects_monthly5_open_position_leverage_above_selector_cap(self):
+        position = {
+            "open": True,
+            "direction": "long",
+            "entry": 64000.0,
+            "tp": 65000.0,
+            "sl": 63500.0,
+            "binance_qty": 0.001,
+            "position_source": "binance",
+            "lev": 5,
+            "trade_source": "monthly5_market_selection",
+            "monthly5_entry_selection": {
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "max_leverage": 4,
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_open_position_safety(position)
+
+        self.assertIn("monthly5 open position leverage exceeds selector cap", failures)
+
     def test_runtime_verifier_accepts_monthly5_actual_trade_metadata(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "learning.sqlite3"

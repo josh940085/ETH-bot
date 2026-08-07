@@ -500,6 +500,51 @@ def _verify_monthly5_price_state(position: dict, max_age_sec: float | None) -> l
     return failures
 
 
+def _verify_monthly5_open_position_safety(position: dict) -> list[str]:
+    failures: list[str] = []
+    monthly5_entry_selection = (
+        position.get("monthly5_entry_selection")
+        if isinstance(position.get("monthly5_entry_selection"), dict)
+        else {}
+    )
+    is_monthly5_position = (
+        bool(position.get("open", False))
+        and (
+            str(position.get("trade_source") or "") == "monthly5_market_selection"
+            or bool(monthly5_entry_selection)
+        )
+    )
+    if not is_monthly5_position:
+        return failures
+
+    direction = str(position.get("direction") or "").lower()
+    entry = _safe_float(position.get("entry"), 0.0)
+    tp = _safe_float(position.get("tp"), 0.0)
+    sl = _safe_float(position.get("sl"), 0.0)
+    binance_qty = _safe_float(position.get("binance_qty"), 0.0)
+    max_leverage = int(_safe_float(monthly5_entry_selection.get("max_leverage"), 5.0) or 5)
+    leverage = int(_safe_float(position.get("lev"), 0.0) or 0)
+
+    _require(direction in {"long", "short"}, failures, "monthly5 open position direction invalid")
+    _require(entry > 0.0, failures, "monthly5 open position missing entry")
+    _require(tp > 0.0, failures, "monthly5 open position missing TP")
+    _require(sl > 0.0, failures, "monthly5 open position missing SL")
+    _require(binance_qty > 0.0, failures, "monthly5 open position missing Binance quantity")
+    _require(
+        str(position.get("position_source") or "") == "binance",
+        failures,
+        "monthly5 open position source is not Binance",
+    )
+    _require(1 <= leverage <= max(1, min(5, max_leverage)), failures, "monthly5 open position leverage exceeds selector cap")
+    if direction == "long" and entry > 0.0 and tp > 0.0 and sl > 0.0:
+        _require(tp > entry, failures, "monthly5 long TP must be above entry")
+        _require(sl < entry, failures, "monthly5 long SL must be below entry")
+    if direction == "short" and entry > 0.0 and tp > 0.0 and sl > 0.0:
+        _require(tp < entry, failures, "monthly5 short TP must be below entry")
+        _require(sl > entry, failures, "monthly5 short SL must be above entry")
+    return failures
+
+
 def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
     failures: list[str] = []
     probe = monthly5_research_selector.build_research_selector_probe()
@@ -811,6 +856,7 @@ def main() -> int:
     failures.extend(_verify_shadow_state("shadow_file", shadow, spec, args.max_age_sec))
     failures.extend(_verify_promotion_gate(position))
     failures.extend(_verify_monthly5_price_state(position, args.max_age_sec))
+    failures.extend(_verify_monthly5_open_position_safety(position))
     failures.extend(_verify_research_selector_artifact(position, spec))
     history_path = Path(args.history)
     if history_path.exists():
