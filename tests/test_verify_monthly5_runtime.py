@@ -529,6 +529,40 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 readiness sample_span blocker ready_ts mismatch", failures)
 
+    def test_runtime_verifier_accepts_waiting_entry_blocked_by_promotion_gate(self):
+        shadow = self._shadow()
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "monthly5_shadow": shadow,
+            "monthly5_signal_override": {
+                "applied": False,
+                "reason": "monthly5_promotion_not_ready",
+                "promotion_blockers": list(shadow["promotion_blockers"]),
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_waiting_entry_with_stale_override_reason(self):
+        shadow = self._shadow()
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "monthly5_shadow": shadow,
+            "monthly5_signal_override": {
+                "applied": False,
+                "reason": "protected_wait_reason",
+                "promotion_blockers": list(shadow["promotion_blockers"]),
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 waiting entry override reason must be promotion_not_ready", failures)
+
     def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
         position = {
             "open": True,

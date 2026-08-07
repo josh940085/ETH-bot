@@ -409,6 +409,27 @@ def _verify_promotion_gate(position: dict) -> list[str]:
             )
     override = position.get("monthly5_signal_override")
     override = override if isinstance(override, dict) else {}
+    selection = shadow.get("market_selection") if isinstance(shadow.get("market_selection"), dict) else {}
+    shadow_action = str(selection.get("shadow_action") or "")
+    strategy_signal = str(position.get("strategy_signal") or "").lower()
+    strategy_status = str(position.get("strategy_execution_status") or "").lower()
+    if (
+        shadow
+        and shadow_action in {"evaluate_long", "evaluate_short"}
+        and not bool(shadow.get("promotion_ready", False))
+        and strategy_signal == "wait"
+        and strategy_status == "waiting"
+    ):
+        _require(
+            str(override.get("reason") or "") == "monthly5_promotion_not_ready",
+            failures,
+            "monthly5 waiting entry override reason must be promotion_not_ready",
+        )
+        _require(
+            list(override.get("promotion_blockers") or []) == list(shadow.get("promotion_blockers") or [])[:5],
+            failures,
+            "monthly5 waiting entry override blockers do not match readiness",
+        )
     if override.get("applied") is True:
         _require(
             bool(shadow.get("promotion_ready", False)),
