@@ -528,6 +528,76 @@ def _verify_monthly5_real_execution_state(position: dict) -> list[str]:
     return failures
 
 
+def _verify_monthly5_guard_alignment(position: dict) -> list[str]:
+    failures: list[str] = []
+    shadow = _shadow_from_position(position)
+    selection = shadow.get("market_selection") if isinstance(shadow.get("market_selection"), dict) else {}
+    if not selection:
+        return failures
+
+    execution_guard = (
+        position.get("monthly5_execution_guard")
+        if isinstance(position.get("monthly5_execution_guard"), dict)
+        else {}
+    )
+    position_guard = (
+        position.get("monthly5_position_guard")
+        if isinstance(position.get("monthly5_position_guard"), dict)
+        else {}
+    )
+    _require(bool(execution_guard), failures, "monthly5 execution guard missing")
+    if execution_guard:
+        _require(
+            str(execution_guard.get("selected_plan") or "") == str(selection.get("selected_plan") or ""),
+            failures,
+            "monthly5 execution guard selected_plan mismatch",
+        )
+        _require(
+            str(execution_guard.get("shadow_action") or "") == str(selection.get("shadow_action") or ""),
+            failures,
+            "monthly5 execution guard shadow_action mismatch",
+        )
+        _require(
+            abs(_safe_float(execution_guard.get("exposure_cap"), -1.0) - _safe_float(selection.get("exposure_cap"), -2.0))
+            <= 1e-9,
+            failures,
+            "monthly5 execution guard exposure_cap mismatch",
+        )
+        _require(
+            int(_safe_float(execution_guard.get("max_leverage"), 0.0))
+            == int(_safe_float(selection.get("max_leverage"), 0.0)),
+            failures,
+            "monthly5 execution guard max_leverage mismatch",
+        )
+        if str(selection.get("selected_plan") or "") == "risk_off":
+            _require(execution_guard.get("allowed") is False, failures, "monthly5 risk_off execution guard must block")
+            _require(_safe_float(execution_guard.get("adjusted_size"), 0.0) == 0.0, failures, "monthly5 risk_off size must be zero")
+        else:
+            _require(
+                0.0 <= _safe_float(execution_guard.get("adjusted_size"), 0.0) <= _safe_float(selection.get("exposure_cap"), 0.0),
+                failures,
+                "monthly5 execution guard adjusted size exceeds exposure cap",
+            )
+    if position_guard:
+        _require(
+            str(position_guard.get("selected_plan") or "") == str(selection.get("selected_plan") or ""),
+            failures,
+            "monthly5 position guard selected_plan mismatch",
+        )
+        _require(
+            str(position_guard.get("shadow_action") or "") == str(selection.get("shadow_action") or ""),
+            failures,
+            "monthly5 position guard shadow_action mismatch",
+        )
+        _require(
+            abs(_safe_float(position_guard.get("exposure_cap"), -1.0) - _safe_float(selection.get("exposure_cap"), -2.0))
+            <= 1e-9,
+            failures,
+            "monthly5 position guard exposure_cap mismatch",
+        )
+    return failures
+
+
 def _verify_monthly5_open_position_safety(position: dict) -> list[str]:
     failures: list[str] = []
     monthly5_entry_selection = (
@@ -885,6 +955,7 @@ def main() -> int:
     failures.extend(_verify_promotion_gate(position))
     failures.extend(_verify_monthly5_price_state(position, args.max_age_sec))
     failures.extend(_verify_monthly5_real_execution_state(position))
+    failures.extend(_verify_monthly5_guard_alignment(position))
     failures.extend(_verify_monthly5_open_position_safety(position))
     failures.extend(_verify_research_selector_artifact(position, spec))
     history_path = Path(args.history)

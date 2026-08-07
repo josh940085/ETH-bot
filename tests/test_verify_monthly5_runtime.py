@@ -653,6 +653,68 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 execution priority is not real_order", failures)
 
+    def test_runtime_verifier_accepts_monthly5_guard_alignment(self):
+        shadow = self._shadow()
+        selection = shadow["market_selection"]
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_execution_guard": {
+                "allowed": True,
+                "selected_plan": selection["selected_plan"],
+                "shadow_action": selection["shadow_action"],
+                "exposure_cap": selection["exposure_cap"],
+                "adjusted_size": 0.15,
+                "max_leverage": selection["max_leverage"],
+            },
+            "monthly5_position_guard": {
+                "selected_plan": selection["selected_plan"],
+                "shadow_action": selection["shadow_action"],
+                "exposure_cap": selection["exposure_cap"],
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_guard_alignment(position)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_monthly5_execution_guard_exposure_mismatch(self):
+        shadow = self._shadow()
+        selection = shadow["market_selection"]
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_execution_guard": {
+                "allowed": True,
+                "selected_plan": selection["selected_plan"],
+                "shadow_action": selection["shadow_action"],
+                "exposure_cap": 0.5,
+                "adjusted_size": 0.15,
+                "max_leverage": selection["max_leverage"],
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_guard_alignment(position)
+
+        self.assertIn("monthly5 execution guard exposure_cap mismatch", failures)
+
+    def test_runtime_verifier_rejects_monthly5_execution_guard_size_above_cap(self):
+        shadow = self._shadow()
+        selection = shadow["market_selection"]
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_execution_guard": {
+                "allowed": True,
+                "selected_plan": selection["selected_plan"],
+                "shadow_action": selection["shadow_action"],
+                "exposure_cap": selection["exposure_cap"],
+                "adjusted_size": selection["exposure_cap"] + 0.01,
+                "max_leverage": selection["max_leverage"],
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_guard_alignment(position)
+
+        self.assertIn("monthly5 execution guard adjusted size exceeds exposure cap", failures)
+
     def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
         position = {
             "open": True,
