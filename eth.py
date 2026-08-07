@@ -18693,7 +18693,7 @@ def run_bot():
                     )
                     host_opening_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
                     host_logic_applied = True
-                    if not daily_min_trade:
+                    if not daily_min_trade and not bool(monthly5_signal_override.get("direct_takeover")):
                         override_risk_rate = (
                             abs(_safe_float(price, 0.0) - _safe_float(sl, price))
                             / max(_safe_float(price, 0.0), 1e-9)
