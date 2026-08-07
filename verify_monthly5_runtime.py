@@ -456,6 +456,50 @@ def _verify_promotion_gate(position: dict) -> list[str]:
     return failures
 
 
+def _verify_monthly5_price_state(position: dict, max_age_sec: float | None) -> list[str]:
+    failures: list[str] = []
+    shadow = _shadow_from_position(position)
+    selection = shadow.get("market_selection") if isinstance(shadow.get("market_selection"), dict) else {}
+    if str(selection.get("shadow_action") or "") not in {"evaluate_long", "evaluate_short"}:
+        return failures
+    if str(position.get("strategy_signal") or "").lower() != "wait":
+        return failures
+    if str(position.get("strategy_execution_status") or "").lower() != "waiting":
+        return failures
+
+    strategy_price = _safe_float(position.get("strategy_price"), 0.0)
+    mark_price = _safe_float(position.get("binance_mark_price"), 0.0)
+    strategy_ts = _safe_float(position.get("strategy_price_ts"), 0.0)
+    mark_ts = _safe_float(position.get("binance_mark_price_ts"), 0.0)
+    _require(strategy_price > 0.0, failures, "monthly5 waiting entry missing strategy price")
+    _require(mark_price > 0.0, failures, "monthly5 waiting entry missing Binance Mark Price")
+    _require(
+        str(position.get("strategy_price_source") or "") == "binance_mark_price",
+        failures,
+        "monthly5 waiting entry strategy price source is not Binance Mark Price",
+    )
+    _require(strategy_ts > 0.0, failures, "monthly5 waiting entry missing strategy price timestamp")
+    _require(mark_ts > 0.0, failures, "monthly5 waiting entry missing Binance Mark Price timestamp")
+    if strategy_price > 0.0 and mark_price > 0.0:
+        price_gap = abs(strategy_price - mark_price) / max(mark_price, 1e-9)
+        _require(price_gap <= 0.0005, failures, "monthly5 waiting entry strategy price drifted from Binance Mark Price")
+    if strategy_ts > 0.0 and mark_ts > 0.0:
+        _require(abs(strategy_ts - mark_ts) <= 2.0, failures, "monthly5 waiting entry price timestamps diverged")
+    if max_age_sec is not None:
+        now_ts = time.time()
+        _require(
+            now_ts - mark_ts <= max_age_sec,
+            failures,
+            "monthly5 waiting entry Binance Mark Price stale",
+        )
+        _require(
+            now_ts - strategy_ts <= max_age_sec,
+            failures,
+            "monthly5 waiting entry strategy price stale",
+        )
+    return failures
+
+
 def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
     failures: list[str] = []
     probe = monthly5_research_selector.build_research_selector_probe()
@@ -766,6 +810,7 @@ def main() -> int:
     failures.extend(_verify_shadow_state("position", _shadow_from_position(position), spec, args.max_age_sec))
     failures.extend(_verify_shadow_state("shadow_file", shadow, spec, args.max_age_sec))
     failures.extend(_verify_promotion_gate(position))
+    failures.extend(_verify_monthly5_price_state(position, args.max_age_sec))
     failures.extend(_verify_research_selector_artifact(position, spec))
     history_path = Path(args.history)
     if history_path.exists():

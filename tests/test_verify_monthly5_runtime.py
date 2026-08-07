@@ -563,6 +563,60 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 waiting entry override reason must be promotion_not_ready", failures)
 
+    def test_runtime_verifier_accepts_monthly5_waiting_entry_mark_price_state(self):
+        shadow = self._shadow()
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "strategy_price": 64000.0,
+            "strategy_price_ts": 1999.0,
+            "strategy_price_source": "binance_mark_price",
+            "binance_mark_price": 64000.0,
+            "binance_mark_price_ts": 1999.0,
+            "monthly5_shadow": shadow,
+        }
+
+        with unittest.mock.patch.object(verify_monthly5_runtime.time, "time", return_value=2000.0):
+            failures = verify_monthly5_runtime._verify_monthly5_price_state(position, 10.0)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_monthly5_waiting_entry_non_mark_price_source(self):
+        shadow = self._shadow()
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "strategy_price": 64000.0,
+            "strategy_price_ts": 1999.0,
+            "strategy_price_source": "external_1m",
+            "binance_mark_price": 64000.0,
+            "binance_mark_price_ts": 1999.0,
+            "monthly5_shadow": shadow,
+        }
+
+        with unittest.mock.patch.object(verify_monthly5_runtime.time, "time", return_value=2000.0):
+            failures = verify_monthly5_runtime._verify_monthly5_price_state(position, 10.0)
+
+        self.assertIn("monthly5 waiting entry strategy price source is not Binance Mark Price", failures)
+
+    def test_runtime_verifier_rejects_monthly5_waiting_entry_stale_mark_price(self):
+        shadow = self._shadow()
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "strategy_price": 64000.0,
+            "strategy_price_ts": 1900.0,
+            "strategy_price_source": "binance_mark_price",
+            "binance_mark_price": 64000.0,
+            "binance_mark_price_ts": 1900.0,
+            "monthly5_shadow": shadow,
+        }
+
+        with unittest.mock.patch.object(verify_monthly5_runtime.time, "time", return_value=2000.0):
+            failures = verify_monthly5_runtime._verify_monthly5_price_state(position, 10.0)
+
+        self.assertIn("monthly5 waiting entry Binance Mark Price stale", failures)
+
     def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
         position = {
             "open": True,
