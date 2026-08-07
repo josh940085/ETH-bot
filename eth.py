@@ -10037,6 +10037,67 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
             }
         )
 
+    def add_monthly5_override_gate(override):
+        override = override if isinstance(override, dict) else {}
+        if not override:
+            return
+        if any(str(item.get("key") or "") == "monthly5_override_gate" for item in conditions):
+            return
+        override_reason = str(override.get("reason") or "monthly5_not_ready")
+        current = override_reason
+        target = "月報酬5%接管安全門檻通過"
+        if override_reason == "mark_price_stale":
+            price_age = _safe_float(override.get("price_age"), 0.0)
+            max_age = max(
+                3.0,
+                _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_PRICE_AGE_SEC", 10.0), 10.0),
+            )
+            current = f"Mark Price {price_age:.1f}s"
+            target = f"低於 {max_age:.1f}s"
+        elif override_reason == "monthly5_wait_override_sl_cooldown":
+            remaining = _safe_float(override.get("cooldown_remaining_sec"), 0.0)
+            current = f"SL冷卻剩 {remaining:.0f}s"
+            target = "冷卻結束後重新評估"
+        elif override_reason == "event_risk":
+            current = f"事件風險 {override.get('event_risk')}"
+            target = "事件風險回到允許範圍"
+        elif override_reason == "monthly5_plan_blocked":
+            current = str(override.get("selected_plan") or override_reason)
+            target = "月報酬5%市場選擇解除阻擋"
+        elif override_reason == "monthly5_promotion_not_ready":
+            details = [
+                item
+                for item in (override.get("promotion_blocker_details") or [])
+                if isinstance(item, dict)
+            ]
+            labels = [
+                str(item.get("label") or item.get("code") or "")
+                for item in details
+                if str(item.get("label") or item.get("code") or "")
+            ]
+            gap_items = [
+                item
+                for item in details
+                if "observed_target_gap_pct" in item
+            ]
+            current = "、".join(labels[:2]) if labels else "promotion_ready=false"
+            if gap_items:
+                current = f"{current}；缺口 {gap_items[0].get('observed_target_gap_pct')}%"
+            target = "promotion_ready=true"
+        add_condition(
+            "monthly5_override_gate",
+            "月報酬5%接管安全",
+            current,
+            target,
+            "月報酬5%策略接管前仍需通過 Mark Price、事件風險、SL冷卻與計畫狀態檢查",
+        )
+
+    monthly5_override = (
+        decision.get("monthly5_signal_override")
+        if isinstance(decision.get("monthly5_signal_override"), dict)
+        else {}
+    )
+
     breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
     breakout_quality_score = _safe_float(decision.get("breakout_quality_score"), 0.0)
     breakout_quality_required = _safe_float(decision.get("breakout_quality_required"), 3.0)
@@ -10096,11 +10157,7 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
         min_edge = max(0.0005, _safe_float(os.getenv("TRADE_MIN_EXPECTED_EDGE_RATE", 0.0012), 0.0012))
         add_condition("expected_edge", "扣除成本後期望值", f"{current_edge * 100:+.3f}%", f"至少 +{min_edge * 100:.3f}%", "等待預期報酬足以覆蓋手續費、滑價與資金費")
     elif "MLX回測輪廓不佳" in reason_text:
-        override = (
-            decision.get("monthly5_signal_override")
-            if isinstance(decision.get("monthly5_signal_override"), dict)
-            else {}
-        )
+        override = monthly5_override
         if override.get("reason") == "monthly5_profile_wait_quality_block":
             missing = []
             direction = str(override.get("direction") or "")
@@ -10137,50 +10194,7 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
                 "月報酬5%策略只能接管普通觀望；MLX輪廓不佳時仍需額外品質確認",
             )
         elif override:
-            override_reason = str(override.get("reason") or "monthly5_not_ready")
-            current = override_reason
-            target = "月報酬5%接管安全門檻通過"
-            if override_reason == "mark_price_stale":
-                price_age = _safe_float(override.get("price_age"), 0.0)
-                max_age = max(
-                    3.0,
-                    _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_PRICE_AGE_SEC", 10.0), 10.0),
-                )
-                current = f"Mark Price {price_age:.1f}s"
-                target = f"低於 {max_age:.1f}s"
-            elif override_reason == "monthly5_wait_override_sl_cooldown":
-                remaining = _safe_float(override.get("cooldown_remaining_sec"), 0.0)
-                current = f"SL冷卻剩 {remaining:.0f}s"
-                target = "冷卻結束後重新評估"
-            elif override_reason == "event_risk":
-                current = f"事件風險 {override.get('event_risk')}"
-                target = "事件風險回到允許範圍"
-            elif override_reason == "monthly5_plan_blocked":
-                current = str(override.get("selected_plan") or override_reason)
-                target = "月報酬5%市場選擇解除阻擋"
-            elif override_reason == "monthly5_promotion_not_ready":
-                details = [
-                    item
-                    for item in (override.get("promotion_blocker_details") or [])
-                    if isinstance(item, dict)
-                ]
-                labels = [str(item.get("label") or item.get("code") or "") for item in details if str(item.get("label") or item.get("code") or "")]
-                gap_items = [
-                    item
-                    for item in details
-                    if "observed_target_gap_pct" in item
-                ]
-                current = "、".join(labels[:2]) if labels else "promotion_ready=false"
-                if gap_items:
-                    current = f"{current}；缺口 {gap_items[0].get('observed_target_gap_pct')}%"
-                target = "promotion_ready=true"
-            add_condition(
-                "monthly5_override_gate",
-                "月報酬5%接管安全",
-                current,
-                target,
-                "月報酬5%策略接管前仍需通過 Mark Price、事件風險、SL冷卻與計畫狀態檢查",
-            )
+            add_monthly5_override_gate(override)
         else:
             add_condition(
                 "strategy_gate",
@@ -10191,10 +10205,13 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
             )
     elif "等待共振" in reason_text or "等支撐" in reason_text or "等壓力" in reason_text:
         add_condition("signal_confluence", "方向共振", reason_text.replace("觀望（", "").rstrip("）"), "趨勢、動能與結構同向", "條件形成後才會建立待確認訊號")
+        add_monthly5_override_gate(monthly5_override)
     elif "每日單錨定" in reason_text:
         add_condition("daily_anchor", "每日單錨定", "一般訊號品質未達標", "品質訊號通過或 22:30 保底流程", "台北時間 22:30 前保留每日保底額度")
+        add_monthly5_override_gate(monthly5_override)
     else:
         add_condition("strategy_gate", "策略條件", reason_text.replace("觀望（", "").rstrip("）"), "下一輪策略評估通過", "等待新的已驗證行情快照")
+        add_monthly5_override_gate(monthly5_override)
 
     sl_review = POSITION_PANEL_STATE.get("last_sl_review")
     opposite_review = (

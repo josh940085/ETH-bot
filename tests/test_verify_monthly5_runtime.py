@@ -715,6 +715,42 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 execution guard adjusted size exceeds exposure cap", failures)
 
+    def test_runtime_verifier_accepts_monthly5_wait_condition_for_promotion_gate(self):
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "monthly5_shadow": self._shadow(),
+            "monthly5_signal_override": {
+                "reason": "monthly5_promotion_not_ready",
+            },
+            "strategy_wait_conditions": [
+                {"key": "signal_confluence", "target": "趨勢、動能與結構同向"},
+                {"key": "monthly5_override_gate", "target": "promotion_ready=true"},
+            ],
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_wait_conditions(position)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_missing_monthly5_wait_condition_for_promotion_gate(self):
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "monthly5_shadow": self._shadow(),
+            "monthly5_signal_override": {
+                "reason": "monthly5_promotion_not_ready",
+            },
+            "strategy_wait_conditions": [
+                {"key": "signal_confluence", "target": "趨勢、動能與結構同向"},
+                {"key": "bull_reclaim_price", "target": "站上 64846.61"},
+            ],
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_wait_conditions(position)
+
+        self.assertIn("monthly5 promotion blocker missing from strategy wait conditions", failures)
+
     def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
         position = {
             "open": True,

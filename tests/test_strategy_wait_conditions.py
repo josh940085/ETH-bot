@@ -218,6 +218,51 @@ class StrategyWaitConditionsTests(unittest.TestCase):
         self.assertEqual(result[0]["current"], "樣本時間、月化投影有效性；缺口 0.3455%")
         self.assertEqual(result[0]["target"], "promotion_ready=true")
 
+    def test_monthly5_override_gate_is_preserved_for_confluence_wait(self):
+        decision = {
+            "final": "觀望（等壓力突破或反彈失敗）",
+            "monthly5_signal_override": {
+                "applied": False,
+                "reason": "monthly5_promotion_not_ready",
+                "promotion_blocker_details": [
+                    {
+                        "code": "sample_span",
+                        "label": "樣本時間",
+                        "remaining_hours": 7.3,
+                    },
+                    {
+                        "code": "shadow_projection_not_valid",
+                        "label": "月化投影有效性",
+                        "observed_target_gap_pct": -0.67,
+                    },
+                ],
+            },
+            "multitimeframe_bull_reclaim": {
+                "enabled": True,
+                "applied": False,
+                "diagnostics": {"required_price": 64846.61},
+            },
+        }
+
+        with patch.dict(
+            eth.POSITION_PANEL_STATE,
+            {"last_close_reason": "", "last_sl_review": {}},
+            clear=False,
+        ):
+            result = eth._build_strategy_wait_conditions(
+                decision,
+                64332.7,
+                "waiting",
+                "觀望（等壓力突破或反彈失敗）",
+            )
+
+        self.assertEqual([item["key"] for item in result], [
+            "signal_confluence",
+            "monthly5_override_gate",
+            "bull_reclaim_price",
+        ])
+        self.assertEqual(result[1]["target"], "promotion_ready=true")
+
 
 if __name__ == "__main__":
     unittest.main()

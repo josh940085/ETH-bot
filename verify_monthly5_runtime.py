@@ -598,6 +598,45 @@ def _verify_monthly5_guard_alignment(position: dict) -> list[str]:
     return failures
 
 
+def _verify_monthly5_wait_conditions(position: dict) -> list[str]:
+    failures: list[str] = []
+    shadow = _shadow_from_position(position)
+    selection = shadow.get("market_selection") if isinstance(shadow.get("market_selection"), dict) else {}
+    if str(selection.get("shadow_action") or "") not in {"evaluate_long", "evaluate_short"}:
+        return failures
+    if str(position.get("strategy_signal") or "").lower() != "wait":
+        return failures
+    if str(position.get("strategy_execution_status") or "").lower() != "waiting":
+        return failures
+
+    override = (
+        position.get("monthly5_signal_override")
+        if isinstance(position.get("monthly5_signal_override"), dict)
+        else {}
+    )
+    if str(override.get("reason") or "") != "monthly5_promotion_not_ready":
+        return failures
+    wait_conditions = [
+        item
+        for item in (position.get("strategy_wait_conditions") or [])
+        if isinstance(item, dict)
+    ]
+    keys = [str(item.get("key") or "") for item in wait_conditions]
+    _require(
+        "monthly5_override_gate" in keys,
+        failures,
+        "monthly5 promotion blocker missing from strategy wait conditions",
+    )
+    if "monthly5_override_gate" in keys:
+        item = wait_conditions[keys.index("monthly5_override_gate")]
+        _require(
+            str(item.get("target") or "") == "promotion_ready=true",
+            failures,
+            "monthly5 wait condition target must be promotion_ready=true",
+        )
+    return failures
+
+
 def _verify_monthly5_open_position_safety(position: dict) -> list[str]:
     failures: list[str] = []
     monthly5_entry_selection = (
@@ -956,6 +995,7 @@ def main() -> int:
     failures.extend(_verify_monthly5_price_state(position, args.max_age_sec))
     failures.extend(_verify_monthly5_real_execution_state(position))
     failures.extend(_verify_monthly5_guard_alignment(position))
+    failures.extend(_verify_monthly5_wait_conditions(position))
     failures.extend(_verify_monthly5_open_position_safety(position))
     failures.extend(_verify_research_selector_artifact(position, spec))
     history_path = Path(args.history)
