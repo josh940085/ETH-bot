@@ -796,6 +796,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                             "sl": 63881.88,
                             "size_ratio": 0.136,
                             "binance_qty": 0.001,
+                            "trade_source": "monthly5_market_selection",
                             "ts": int(eth.time.time()),
                             "monthly5_readiness": {
                                 "shadow_recovery_probe_success_keys": [
@@ -811,6 +812,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
             self.assertTrue(eth.active_trade["open"])
             self.assertEqual(eth.active_trade["position_qty"], 0.001)
+            self.assertEqual(eth.active_trade["trade_source"], "monthly5_market_selection")
             selection = eth.active_trade["monthly5_entry_selection"]
             self.assertEqual(selection["selected_plan"], "normal_long_selector")
             self.assertEqual(selection["shadow_action"], "evaluate_long")
@@ -830,13 +832,14 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 "size": 0.03,
                 "position_qty": 0.01,
                 "open_time": 1990.0,
+                "trade_source": "monthly5_market_selection",
             }
         )
         with (
             patch.object(eth, "_get_follow_mode_enabled", return_value=True),
             patch.object(eth, "_is_real_copy_enabled", return_value=True),
             patch.object(eth, "_refresh_position_panel_account_state"),
-            patch.object(eth, "_write_json_atomic"),
+            patch.object(eth, "_write_json_atomic") as write_snapshot,
             patch.object(eth, "_queue_panel_realtime_publish"),
         ):
             eth.sync_position_panel(1810.0)
@@ -844,6 +847,8 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(eth.POSITION_PANEL_STATE["execution_priority"], "real_order")
         self.assertEqual(eth.POSITION_PANEL_STATE["execution_mode"], "real")
         self.assertEqual(eth.POSITION_PANEL_STATE["position_source"], "binance")
+        payload = write_snapshot.call_args.args[1]
+        self.assertEqual(payload["trade_source"], "monthly5_market_selection")
 
     def test_panel_snapshot_publishes_breakout_quality(self):
         breakout = {

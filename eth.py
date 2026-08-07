@@ -6738,6 +6738,7 @@ def sync_position_panel(current_price=None):
             "size": round(capital_usage_ratio, 4),
             "size_ratio": round(size_ratio, 4),
             "capital_usage_ratio": round(capital_usage_ratio, 4),
+            "trade_source": str(active_trade.get("trade_source") or ""),
             "open_since_ts": _safe_int(active_trade.get("open_time"), int(time.time())),
             "time_horizon": _normalize_trade_time_horizon(active_trade.get("time_horizon")),
             "max_hold_sec": round(_trade_max_hold_sec(active_trade.get("time_horizon")), 2),
@@ -9566,6 +9567,7 @@ def restore_active_trade_from_panel():
     )
     active_trade["max_size"] = max_size
     active_trade["min_size"] = min_size
+    active_trade["trade_source"] = str(raw.get("trade_source") or "")
     active_trade["add_count"] = max(0, _safe_int(raw.get("add_count"), 0))
     active_trade["reduce_count"] = max(0, _safe_int(raw.get("reduce_count"), 0))
     active_trade["quick_reduce_count"] = max(0, _safe_int(raw.get("quick_reduce_count"), 0))
@@ -19010,7 +19012,15 @@ def run_bot():
                 active_trade["avg_entry"] = float(entry)
                 active_trade["tp"] = tp
                 active_trade["sl"] = sl
-                active_trade["trade_source"] = "daily_minimum" if daily_min_trade else "signal"
+                active_trade["trade_source"] = (
+                    "daily_minimum"
+                    if daily_min_trade
+                    else (
+                        "monthly5_market_selection"
+                        if str(decision.get("primary_indicator") or "") == "monthly5_market_selection"
+                        else "signal"
+                    )
+                )
                 active_trade["candlestick_turn_direction"] = str(
                     (decision.get("candlestick_turning") or {}).get("direction") or "neutral"
                 )
