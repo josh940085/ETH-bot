@@ -10041,7 +10041,7 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
         override = override if isinstance(override, dict) else {}
         if not override:
             return
-        if any(str(item.get("key") or "") == "monthly5_override_gate" for item in conditions):
+        if any(str(item.get("key") or "") in {"monthly5_override_gate", "monthly5_profile_quality"} for item in conditions):
             return
         override_reason = str(override.get("reason") or "monthly5_not_ready")
         current = override_reason
@@ -10205,13 +10205,12 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
             )
     elif "等待共振" in reason_text or "等支撐" in reason_text or "等壓力" in reason_text:
         add_condition("signal_confluence", "方向共振", reason_text.replace("觀望（", "").rstrip("）"), "趨勢、動能與結構同向", "條件形成後才會建立待確認訊號")
-        add_monthly5_override_gate(monthly5_override)
     elif "每日單錨定" in reason_text:
         add_condition("daily_anchor", "每日單錨定", "一般訊號品質未達標", "品質訊號通過或 22:30 保底流程", "台北時間 22:30 前保留每日保底額度")
-        add_monthly5_override_gate(monthly5_override)
     else:
         add_condition("strategy_gate", "策略條件", reason_text.replace("觀望（", "").rstrip("）"), "下一輪策略評估通過", "等待新的已驗證行情快照")
-        add_monthly5_override_gate(monthly5_override)
+
+    add_monthly5_override_gate(monthly5_override)
 
     sl_review = POSITION_PANEL_STATE.get("last_sl_review")
     opposite_review = (
