@@ -69,6 +69,29 @@ class Monthly5MaintenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "post-lock exposure drift"):
                 maintenance._check_monthly5_runtime()
 
+    def test_monthly5_account_check_wraps_verifier_pass(self):
+        command_result = SimpleNamespace(
+            returncode=0,
+            stdout='PASS monthly5_account {"symbol":"BTCUSDT","open_count":0,"positions":[]}\n',
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result) as run_command:
+            result = maintenance._check_monthly5_account()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn('"open_count":0', result["detail"])
+        self.assertIn("verify_monthly5_account.py", run_command.call_args.args[0])
+
+    def test_monthly5_account_check_raises_on_open_position(self):
+        command_result = SimpleNamespace(
+            returncode=1,
+            stdout='FAIL monthly5_account {"symbol":"BTCUSDT","open_count":1}\n',
+        )
+
+        with patch.object(maintenance, "_run_command", return_value=command_result):
+            with self.assertRaisesRegex(RuntimeError, "open_count"):
+                maintenance._check_monthly5_account()
+
     def test_monthly5_readiness_check_wraps_collecting_status(self):
         command_result = SimpleNamespace(
             returncode=0,
