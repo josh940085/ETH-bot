@@ -6269,6 +6269,17 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     selected_plan = str(selection.get("selected_plan") or "")
     if selected_plan in {"underperforming_wait", "macro_block_wait", "risk_off"}:
         return {"applied": False, "reason": "monthly5_plan_blocked", "selected_plan": selected_plan}
+    if (
+        _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1"))
+        and not bool(monthly5_state.get("promotion_ready", False))
+    ):
+        return {
+            "applied": False,
+            "reason": "monthly5_promotion_not_ready",
+            "selected_plan": selected_plan,
+            "promotion_blockers": list(monthly5_state.get("promotion_blockers") or [])[:5],
+            "promotion_blocker_details": list(monthly5_state.get("promotion_blocker_details") or [])[:5],
+        }
     reason_codes = {str(code) for code in selection.get("reason_codes") or [] if code}
     if (
         "underperforming_micro_probe" in reason_codes
@@ -6281,17 +6292,6 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
             "applied": False,
             "reason": "micro_probe_requires_host_signal",
             "selected_plan": selected_plan,
-        }
-    if (
-        _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1"))
-        and not bool(monthly5_state.get("promotion_ready", False))
-    ):
-        return {
-            "applied": False,
-            "reason": "monthly5_promotion_not_ready",
-            "selected_plan": selected_plan,
-            "promotion_blockers": list(monthly5_state.get("promotion_blockers") or [])[:5],
-            "promotion_blocker_details": list(monthly5_state.get("promotion_blocker_details") or [])[:5],
         }
 
     if protected_wait_reason:
