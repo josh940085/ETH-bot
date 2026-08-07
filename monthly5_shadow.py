@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
-SELECTOR_POLICY_VERSION = 7
+SELECTOR_POLICY_VERSION = 8
 RESEARCH_SELECTOR_SOURCE = "similar_day_selector"
 LIVE_SELECTOR_SOURCE = "market_score_proxy_shadow"
 SELECTOR_ALIGNMENT = "proxy_shadow_pending_similar_day"
