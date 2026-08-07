@@ -110,6 +110,16 @@ class VerifyMonthly5ReadinessTests(unittest.TestCase):
         self.assertIn("observed_target_gap_pct", details["shadow_projection_not_valid"])
         self.assertTrue(any("sample count" in item for item in report["warnings"]))
 
+    def test_promotion_eta_tokens_include_remaining_hours_and_local_time(self):
+        tokens = verify_monthly5_readiness._promotion_eta_tokens(
+            {"promotion_earliest_review_ts": 1786115014},
+            now_ts=1786090214,
+        )
+
+        self.assertIn("promotion_eta_ts=1786115014", tokens)
+        self.assertIn("promotion_eta_remaining_hours=6.8889", tokens)
+        self.assertIn("promotion_eta_local=2026-08-07T23:03:34+08:00", tokens)
+
     def test_default_readiness_min_span_is_eight_hours(self):
         report = monthly5_shadow.build_readiness_report(
             [self._row(1000, action="evaluate_long", plan="normal_long_selector")],

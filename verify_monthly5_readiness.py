@@ -3,7 +3,10 @@
 
 import argparse
 import json
+import time
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import monthly5_shadow
 from verify_monthly5_runtime import DEFAULT_HISTORY, DEFAULT_SPEC, _load_json, _load_jsonl
@@ -12,6 +15,19 @@ from verify_monthly5_runtime import DEFAULT_HISTORY, DEFAULT_SPEC, _load_json, _
 DEFAULT_MIN_RECORDS = 48
 DEFAULT_MIN_SPAN_HOURS = monthly5_shadow.READINESS_MIN_SPAN_HOURS
 DEFAULT_MAX_AGE_SEC = 900.0
+LOCAL_TZ = ZoneInfo("Asia/Taipei")
+
+
+def _promotion_eta_tokens(report: dict, now_ts: float | None = None) -> list[str]:
+    review_ts = float(report.get("promotion_earliest_review_ts") or 0.0)
+    if review_ts <= 0.0:
+        return []
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    return [
+        f"promotion_eta_ts={int(review_ts)}",
+        f"promotion_eta_remaining_hours={max(0.0, (review_ts - now_ts) / 3600.0):.4f}",
+        f"promotion_eta_local={datetime.fromtimestamp(review_ts, LOCAL_TZ).isoformat(timespec='seconds')}",
+    ]
 
 
 def _history_readiness(rows: list[dict], spec: dict, *, min_records: int, min_span_hours: float, max_age_sec: float | None):
@@ -71,6 +87,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     else:
+        eta_text = " ".join(_promotion_eta_tokens(report))
         print(
             "PASS monthly5_readiness "
             f"status={report.get('status')} "
@@ -122,6 +139,7 @@ def main() -> int:
             f"shadow_recovery_probe_progress_pct={report.get('shadow_recovery_probe_progress_pct', 0.0)} "
             f"promotion_blocker_count={report.get('promotion_blocker_count', 0)} "
             f"promotion_blockers={','.join(str(item) for item in (report.get('promotion_blockers') or []))} "
+            f"{eta_text + ' ' if eta_text else ''}"
             f"promotion_ready={str(bool(report.get('promotion_ready'))).lower()}"
         )
         for item in report.get("failures") or []:
