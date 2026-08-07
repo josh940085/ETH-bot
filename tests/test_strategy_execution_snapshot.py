@@ -1317,6 +1317,43 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(override["position_size"], 0.15)
         self.assertEqual(override["max_leverage"], 4)
 
+    def test_actual_trade_market_records_monthly5_selector_metadata(self):
+        eth.active_trade["trade_source"] = "monthly5_market_selection"
+        eth.active_trade["monthly5_entry_selection"] = {
+            "selected_plan": "normal_long_selector",
+            "shadow_action": "evaluate_long",
+            "selector_source": "similar_day_selector",
+            "selector_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+            "selector_primary_direction": "long",
+            "exposure_cap": 0.35,
+            "max_leverage": 4,
+            "reason_codes": ["underperforming_probe_success"],
+        }
+        decision = {
+            "primary_indicator": "monthly5_market_selection",
+            "monthly5_signal_override": {
+                "applied": True,
+                "selected_plan": "normal_long_selector",
+                "shadow_action": "evaluate_long",
+                "exposure_cap": 0.15,
+                "max_leverage": 4,
+                "reason_codes": ["underperforming_probe_success"],
+            },
+            "features": {"multi_tf_sr_bias": 0.1},
+        }
+
+        market = eth._build_actual_trade_mlx_market(
+            decision,
+            "long",
+            source="copy_trade",
+        )
+
+        self.assertEqual(market["monthly5_trade_source"], "monthly5_market_selection")
+        self.assertEqual(market["monthly5_selected_plan"], "normal_long_selector")
+        self.assertEqual(market["monthly5_selector_key"], "mom120_lf|lev4|stopNone|target0.05|redlev0.5")
+        self.assertEqual(market["monthly5_max_leverage"], 4)
+        self.assertEqual(market["monthly5"]["selector_source"], "similar_day_selector")
+
     def test_monthly5_signal_override_respects_macro_hard_block(self):
         eth.POSITION_PANEL_STATE["binance_mark_price_ts"] = 1999.0
         decision = {

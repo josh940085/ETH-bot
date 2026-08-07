@@ -12760,6 +12760,79 @@ def _build_actual_trade_mlx_market(decision, direction, source, daily_min_trade=
     market["daily_min_trade"] = bool(daily_min_trade)
     market["primary_reason"] = "每日最低一單" if daily_min_trade else "實單策略觸發"
     market["strategy_version"] = STRATEGY_VERSION
+    monthly5_override = (
+        decision.get("monthly5_signal_override")
+        if isinstance(decision.get("monthly5_signal_override"), dict)
+        else {}
+    )
+    monthly5_entry_selection = (
+        active_trade.get("monthly5_entry_selection")
+        if isinstance(active_trade.get("monthly5_entry_selection"), dict)
+        else {}
+    )
+    monthly5_selector_decision = (
+        decision.get("monthly5_live_selector_decision")
+        if isinstance(decision.get("monthly5_live_selector_decision"), dict)
+        else {}
+    )
+    is_monthly5 = (
+        str(decision.get("primary_indicator") or "") == "monthly5_market_selection"
+        or str(active_trade.get("trade_source") or "") == "monthly5_market_selection"
+        or bool(monthly5_override.get("applied"))
+        or bool(monthly5_entry_selection)
+    )
+    if is_monthly5:
+        selected_plan = str(
+            monthly5_override.get("selected_plan")
+            or monthly5_entry_selection.get("selected_plan")
+            or ""
+        )
+        shadow_action = str(
+            monthly5_override.get("shadow_action")
+            or monthly5_entry_selection.get("shadow_action")
+            or ""
+        )
+        selector_key = str(
+            monthly5_entry_selection.get("selector_key")
+            or monthly5_selector_decision.get("selected_key")
+            or ""
+        )
+        monthly5_meta = {
+            "trade_source": "monthly5_market_selection",
+            "selected_plan": selected_plan,
+            "shadow_action": shadow_action,
+            "selector_source": str(monthly5_entry_selection.get("selector_source") or monthly5_selector_decision.get("selector_source") or ""),
+            "selector_key": selector_key,
+            "selector_primary_direction": str(
+                monthly5_entry_selection.get("selector_primary_direction")
+                or monthly5_selector_decision.get("primary_direction")
+                or ""
+            ),
+            "exposure_cap": round(
+                _safe_float(
+                    monthly5_override.get("exposure_cap"),
+                    _safe_float(monthly5_entry_selection.get("exposure_cap"), 0.0),
+                ),
+                4,
+            ),
+            "max_leverage": min(
+                5,
+                max(
+                    1,
+                    _safe_int(
+                        monthly5_override.get("max_leverage"),
+                        _safe_int(monthly5_entry_selection.get("max_leverage"), 5),
+                    ),
+                ),
+            ),
+            "reason_codes": list(monthly5_override.get("reason_codes") or monthly5_entry_selection.get("reason_codes") or []),
+        }
+        market["monthly5"] = monthly5_meta
+        market["monthly5_trade_source"] = monthly5_meta["trade_source"]
+        market["monthly5_selected_plan"] = selected_plan
+        market["monthly5_shadow_action"] = shadow_action
+        market["monthly5_selector_key"] = selector_key
+        market["monthly5_max_leverage"] = monthly5_meta["max_leverage"]
     features = decision.get("features")
     if isinstance(features, dict):
         market["features"] = dict(features)
