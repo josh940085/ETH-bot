@@ -6033,6 +6033,12 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
         snapshot["promotion_ready"] = bool(readiness_report.get("promotion_ready", False))
         snapshot["promotion_blockers"] = list(readiness_report.get("promotion_blockers") or [])
         snapshot["promotion_blocker_details"] = list(readiness_report.get("promotion_blocker_details") or [])
+        if isinstance(decision.get("monthly5_live_selector_input"), dict):
+            snapshot["live_selector_input"] = dict(decision.get("monthly5_live_selector_input") or {})
+        elif isinstance(previous.get("live_selector_input"), dict):
+            snapshot["live_selector_input"] = dict(previous.get("live_selector_input") or {})
+        elif isinstance(POSITION_PANEL_STATE.get("monthly5_live_selector_input"), dict):
+            snapshot["live_selector_input"] = dict(POSITION_PANEL_STATE.get("monthly5_live_selector_input") or {})
         market_selection = monthly5_shadow.build_market_selection(
             snapshot,
             strategy_signal=effective_strategy_signal,
@@ -6851,6 +6857,11 @@ def sync_position_panel(current_price=None):
     )
     monthly5_readiness_state = _build_monthly5_readiness_panel_state()
     monthly5_research_selector_state = monthly5_research_selector.build_research_selector_probe()
+    monthly5_live_selector_input_state = (
+        monthly5_shadow_state.get("live_selector_input")
+        if isinstance(monthly5_shadow_state.get("live_selector_input"), dict)
+        else dict(POSITION_PANEL_STATE.get("monthly5_live_selector_input") or {})
+    )
     monthly5_position_guard_state = dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {})
     if not active_trade.get("open"):
         monthly5_position_guard_state = monthly5_shadow.build_position_guard(
@@ -6903,6 +6914,7 @@ def sync_position_panel(current_price=None):
             "monthly5_signal_override": dict(POSITION_PANEL_STATE.get("monthly5_signal_override") or {}),
             "monthly5_readiness": dict(monthly5_readiness_state or {}),
             "monthly5_research_selector": dict(monthly5_research_selector_state or {}),
+            "monthly5_live_selector_input": dict(monthly5_live_selector_input_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -14971,6 +14983,7 @@ def build_trade_signal_snapshot(
     )
     return {
         "features": features,
+        "monthly5_live_selector_input": _build_monthly5_live_selector_input_probe(df_1d),
         "score": score,
         "auxiliary_score": auxiliary_score,
         "primary_indicator": primary_indicator,
@@ -17334,6 +17347,15 @@ def _fetch_market_kline_rows(
     return rows, f"binance_{source}"
 
 
+def _kline_rows_to_indicator_frame(data):
+    df = pd.DataFrame(data, columns=[
+        "time","open","high","low","close","volume",
+        "_","_","_","_","_","_"
+    ])
+    df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
+    return calc_indicators(df)
+
+
 def get_kline(interval, limit=100):
     now = time.time()
     limit = max(1, min(1500, int(limit)))
@@ -17352,16 +17374,47 @@ def get_kline(interval, limit=100):
             return data
         raise
 
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "_","_","_","_","_","_"
-    ])
-    df[["open","high","low","close","volume"]] = df[["open","high","low","close","volume"]].astype(float)
-
-    df = calc_indicators(df)
+    df = _kline_rows_to_indicator_frame(data)
 
     KLINE_CACHE[interval] = (df, now)
     return df
+
+
+def _monthly5_live_daily_frame(fallback_df=None):
+    limit = max(420, monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS + 20)
+    errors = []
+    try:
+        rows, source = _fetch_binance_kline_rows(
+            DEFAULT_PAIR,
+            "1d",
+            limit=limit,
+            timeout=10,
+            prefix="monthly5 live daily selector",
+        )
+        frame = _kline_rows_to_indicator_frame(rows)
+        if len(frame) >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS:
+            return frame, f"binance_{source}"
+        errors.append(f"binance_{source}: rows={len(frame)}")
+    except Exception as exc:
+        errors.append(f"binance: {exc}")
+    try:
+        rows = _fetch_twelve_data_kline_rows(DEFAULT_PAIR, "1d", limit=limit, timeout=10)
+        frame = _kline_rows_to_indicator_frame(rows)
+        if len(frame) >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS:
+            return frame, "twelve_data"
+        errors.append(f"twelve_data: rows={len(frame)}")
+    except Exception as exc:
+        errors.append(f"twelve_data: {exc}")
+    if fallback_df is not None:
+        return fallback_df, "runtime_fallback:" + "; ".join(errors[:3])
+    raise RuntimeError("; ".join(errors) or "monthly5 live daily selector data unavailable")
+
+
+def _build_monthly5_live_selector_input_probe(df_1d=None):
+    frame, source = _monthly5_live_daily_frame(df_1d)
+    probe = monthly5_research_selector.build_live_selector_input_probe(frame)
+    probe["input_source"] = source
+    return probe
 
 # =============================
 # 主邏輯（AI接管）

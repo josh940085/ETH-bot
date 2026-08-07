@@ -4,6 +4,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+import monthly5_research_selector
 import monthly5_shadow
 import verify_monthly5_runtime
 
@@ -110,6 +111,25 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             },
         }
 
+    def _live_selector_input(self):
+        return {
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "input_source": "live_daily_kline",
+            "feature_set": "short_market_state",
+            "usable": True,
+            "blocking_reasons": [],
+            "daily_rows": monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+            "required_daily_rows": monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+            "latest_daily_key": "2026-08-02",
+            "missing_columns": [],
+            "cache_available": True,
+            "cache_feature_count": monthly5_research_selector.EXPECTED_SHORT_MARKET_STATE_FEATURES,
+            "expected_feature_count": monthly5_research_selector.EXPECTED_SHORT_MARKET_STATE_FEATURES,
+            "cache_candidate_count": 220,
+            "cache_day_count": 2407,
+            "cache_latest_day": "2026-08-03",
+        }
+
     def _history_row(self, shadow=None):
         shadow = shadow or self._shadow()
         return monthly5_shadow.build_history_record(
@@ -202,6 +222,57 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures = verify_monthly5_runtime._verify_shadow_state("shadow", shadow, spec, None)
 
         self.assertIn("shadow missing market_selection", failures)
+
+    def test_runtime_verifier_accepts_live_selector_input_probe(self):
+        spec = self._spec("summary.json", "monthly.json")
+        position = {
+            "monthly5_shadow": self._shadow(),
+            "monthly5_live_selector_input": self._live_selector_input(),
+        }
+        probe = {
+            "artifact_available": True,
+            "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "max_leverage": 4,
+            "primary_direction": "long",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with unittest.mock.patch.object(
+            verify_monthly5_runtime.monthly5_research_selector,
+            "build_research_selector_probe",
+            return_value=probe,
+        ):
+            failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_unusable_live_selector_input_probe(self):
+        spec = self._spec("summary.json", "monthly.json")
+        live_input = self._live_selector_input()
+        live_input["usable"] = False
+        live_input["blocking_reasons"] = ["daily_warmup_insufficient"]
+        position = {
+            "monthly5_shadow": self._shadow(),
+            "monthly5_live_selector_input": live_input,
+        }
+        probe = {
+            "artifact_available": True,
+            "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "max_leverage": 4,
+            "primary_direction": "long",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with unittest.mock.patch.object(
+            verify_monthly5_runtime.monthly5_research_selector,
+            "build_research_selector_probe",
+            return_value=probe,
+        ):
+            failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
+
+        self.assertIn("monthly5 live selector input not usable", failures)
 
     def test_runtime_verifier_rejects_disabled_promotion_gate(self):
         position = {"monthly5_shadow": self._shadow()}

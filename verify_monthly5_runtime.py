@@ -303,6 +303,27 @@ def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
             failures,
             "position monthly5_research_selector top_pick mismatch",
         )
+    live_input = position.get("monthly5_live_selector_input")
+    live_input = live_input if isinstance(live_input, dict) else {}
+    if live_input:
+        _require(
+            live_input.get("selector_source") == monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            failures,
+            "monthly5 live selector input source mismatch",
+        )
+        _require(bool(live_input.get("usable")), failures, "monthly5 live selector input not usable")
+        _require(
+            int(live_input.get("cache_feature_count") or 0)
+            == monthly5_research_selector.EXPECTED_SHORT_MARKET_STATE_FEATURES,
+            failures,
+            "monthly5 live selector input feature count mismatch",
+        )
+        _require(
+            int(live_input.get("daily_rows") or 0)
+            >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+            failures,
+            "monthly5 live selector input daily warmup insufficient",
+        )
     return failures
 
 
@@ -523,6 +544,8 @@ def main() -> int:
     position_shadow = _shadow_from_position(position)
     selection = position_shadow.get("market_selection") if isinstance(position_shadow.get("market_selection"), dict) else {}
     research_probe = monthly5_research_selector.build_research_selector_probe()
+    live_input = position.get("monthly5_live_selector_input")
+    live_input = live_input if isinstance(live_input, dict) else {}
     history_status = "history=ok" if Path(args.history).exists() else "history=missing"
     print(
         "PASS monthly5_runtime "
@@ -533,6 +556,7 @@ def main() -> int:
         f"research_top_pick={research_probe.get('top_pick')} "
         f"research_direction={research_probe.get('primary_direction')} "
         f"research_leverage={research_probe.get('max_leverage')} "
+        f"live_selector_input={'ok' if live_input.get('usable') else 'pending'} "
         f"{history_status} "
         "e2e=ok"
     )
