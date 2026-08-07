@@ -23,6 +23,7 @@ DEFAULT_HISTORY = Path(".runtime/data/btcusdt_monthly5_shadow_history.jsonl")
 _ACTIVE_SYMBOL = str(os.getenv("TRADE_SYMBOL", "BTCUSDT") or "BTCUSDT").strip().upper()
 _ACTIVE_SYMBOL_SLUG = re.sub(r"[^a-z0-9]+", "_", _ACTIVE_SYMBOL.lower()).strip("_") or "btcusdt"
 DEFAULT_MLX_DB = Path(".runtime/ai") / f"{_ACTIVE_SYMBOL_SLUG}_mlx_agent_learning.sqlite3"
+LOCAL_TZ = ZoneInfo("Asia/Taipei")
 
 
 def _load_json(path: Path) -> dict:
@@ -92,6 +93,8 @@ def _monthly5_readiness_summary_tokens(position: dict) -> list[str]:
     review_ts = _safe_float(readiness.get("promotion_earliest_review_ts"), 0.0)
     if review_ts > 0.0:
         tokens.append(f"promotion_eta_ts={int(review_ts)}")
+        tokens.append(f"promotion_eta_remaining_hours={max(0.0, (review_ts - time.time()) / 3600.0):.4f}")
+        tokens.append(f"promotion_eta_local={datetime.fromtimestamp(review_ts, LOCAL_TZ).isoformat(timespec='seconds')}")
     return tokens
 
 

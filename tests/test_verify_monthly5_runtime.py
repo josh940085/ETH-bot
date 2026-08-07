@@ -127,13 +127,16 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             },
         }
 
-        tokens = verify_monthly5_runtime._monthly5_readiness_summary_tokens(position)
+        with unittest.mock.patch.object(verify_monthly5_runtime.time, "time", return_value=1786090214):
+            tokens = verify_monthly5_runtime._monthly5_readiness_summary_tokens(position)
 
         self.assertIn("promotion_ready=false", tokens)
         self.assertIn("promotion_blockers=sample_span,shadow_projection_not_valid", tokens)
         self.assertIn("readiness_rows=69", tokens)
         self.assertIn("readiness_span_hours=0.8203", tokens)
         self.assertIn("promotion_eta_ts=1786115014", tokens)
+        self.assertIn("promotion_eta_remaining_hours=6.8889", tokens)
+        self.assertIn("promotion_eta_local=2026-08-07T23:03:34+08:00", tokens)
 
     def _live_selector_input(self):
         return {
