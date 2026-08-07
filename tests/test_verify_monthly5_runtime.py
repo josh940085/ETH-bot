@@ -617,6 +617,42 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 waiting entry Binance Mark Price stale", failures)
 
+    def test_runtime_verifier_accepts_monthly5_real_execution_state(self):
+        position = {
+            "strategy_signal": "wait",
+            "execution_priority": "real_order",
+            "execution_mode": "real",
+            "monthly5_shadow": self._shadow(),
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_real_execution_state(position)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_monthly5_non_real_execution_state(self):
+        position = {
+            "strategy_signal": "wait",
+            "execution_priority": "real_order",
+            "execution_mode": "real_required",
+            "monthly5_shadow": self._shadow(),
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_real_execution_state(position)
+
+        self.assertIn("monthly5 execution mode is not real", failures)
+
+    def test_runtime_verifier_rejects_monthly5_non_real_order_priority(self):
+        position = {
+            "strategy_signal": "wait",
+            "execution_priority": "strategy_signal",
+            "execution_mode": "real",
+            "monthly5_shadow": self._shadow(),
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_real_execution_state(position)
+
+        self.assertIn("monthly5 execution priority is not real_order", failures)
+
     def test_runtime_verifier_rejects_monthly5_open_position_without_trade_source(self):
         position = {
             "open": True,

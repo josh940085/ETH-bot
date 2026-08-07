@@ -500,6 +500,34 @@ def _verify_monthly5_price_state(position: dict, max_age_sec: float | None) -> l
     return failures
 
 
+def _verify_monthly5_real_execution_state(position: dict) -> list[str]:
+    failures: list[str] = []
+    shadow = _shadow_from_position(position)
+    selection = shadow.get("market_selection") if isinstance(shadow.get("market_selection"), dict) else {}
+    if str(selection.get("shadow_action") or "") not in {"evaluate_long", "evaluate_short"}:
+        return failures
+    if str(position.get("strategy_signal") or "").lower() != "wait":
+        return failures
+
+    _require(
+        str(position.get("execution_priority") or "") == "real_order",
+        failures,
+        "monthly5 execution priority is not real_order",
+    )
+    _require(
+        str(position.get("execution_mode") or "") == "real",
+        failures,
+        "monthly5 execution mode is not real",
+    )
+    if bool(position.get("strategy_actual_open", False)):
+        _require(
+            str(position.get("position_source") or "") == "binance",
+            failures,
+            "monthly5 actual open position source is not Binance",
+        )
+    return failures
+
+
 def _verify_monthly5_open_position_safety(position: dict) -> list[str]:
     failures: list[str] = []
     monthly5_entry_selection = (
@@ -856,6 +884,7 @@ def main() -> int:
     failures.extend(_verify_shadow_state("shadow_file", shadow, spec, args.max_age_sec))
     failures.extend(_verify_promotion_gate(position))
     failures.extend(_verify_monthly5_price_state(position, args.max_age_sec))
+    failures.extend(_verify_monthly5_real_execution_state(position))
     failures.extend(_verify_monthly5_open_position_safety(position))
     failures.extend(_verify_research_selector_artifact(position, spec))
     history_path = Path(args.history)
