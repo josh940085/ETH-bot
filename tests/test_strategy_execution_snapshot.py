@@ -1115,6 +1115,50 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(guard["reason_code"], "monthly5_daily_min_research_direction_mismatch")
         self.assertEqual(guard["adjusted_size"], 0.0)
 
+    def test_monthly5_shadow_gate_uses_readiness_freshness_window(self):
+        previous = {
+            "strategy_id": eth.monthly5_shadow.STRATEGY_ID,
+            "selected_candidate": eth.monthly5_shadow.SELECTED_CANDIDATE,
+            "shadow_only": True,
+        }
+        snapshot = {
+            **previous,
+            "updated_ts": 2000,
+            "max_leverage": 5,
+        }
+        readiness_report = {
+            "promotion_ready": False,
+            "promotion_blockers": ["invalid_history"],
+            "promotion_blocker_details": [{"code": "invalid_history"}],
+        }
+        selection = {
+            "selected_plan": "normal_wait",
+            "shadow_action": "wait",
+            "exposure_cap": 1.0,
+        }
+        guard = {
+            "allowed": True,
+            "adjusted_size": 0.0,
+        }
+
+        with (
+            patch.dict(eth.os.environ, {"MONTHLY5_READINESS_MAX_AGE_SEC": "900"}, clear=False),
+            patch.object(eth.monthly5_shadow, "load_state", return_value=previous),
+            patch.object(eth.monthly5_shadow, "update_shadow_state", return_value=snapshot),
+            patch.object(eth.monthly5_shadow, "load_history", return_value=[]),
+            patch.object(eth.monthly5_shadow, "build_readiness_report", return_value=readiness_report) as build_readiness,
+            patch.object(eth.monthly5_shadow, "build_market_selection", return_value=selection),
+            patch.object(eth.monthly5_shadow, "build_execution_guard", return_value=guard),
+            patch.object(eth.monthly5_shadow, "save_state"),
+            patch.object(eth.monthly5_shadow, "append_history"),
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            result = eth._update_monthly5_shadow_panel_state(mark_price=64000.0)
+
+        self.assertFalse(result["promotion_ready"])
+        self.assertEqual(result["promotion_blockers"], ["invalid_history"])
+        self.assertEqual(build_readiness.call_args.kwargs["max_age_sec"], 900.0)
+
     def test_monthly5_guard_does_not_block_regular_short_with_long_flat_research_selector(self):
         shadow_state = {
             "promotion_ready": False,

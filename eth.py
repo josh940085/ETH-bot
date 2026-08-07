@@ -6034,7 +6034,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                 os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS"),
                 monthly5_shadow.READINESS_MIN_SPAN_HOURS,
             ),
-            max_age_sec=None,
+            max_age_sec=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_AGE_SEC"), 900.0),
             max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
             required_selector_source=monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
         )
