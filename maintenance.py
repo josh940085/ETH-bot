@@ -1590,6 +1590,28 @@ def _monthly5_runtime_output_promotion_ready(output):
     return False
 
 
+def _monthly5_runtime_pending_detail(output):
+    tokens = {}
+    for token in str(output or "").replace("\n", " ").split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        if key in {"promotion_ready", "promotion_blockers", "promotion_eta_local", "promotion_eta_remaining_hours"}:
+            tokens[key] = value
+    if not tokens:
+        return ""
+    parts = []
+    if "promotion_ready" in tokens:
+        parts.append(f"promotion_ready={tokens['promotion_ready']}")
+    if tokens.get("promotion_blockers"):
+        parts.append(f"blockers={tokens['promotion_blockers']}")
+    if tokens.get("promotion_eta_local"):
+        parts.append(f"eta={tokens['promotion_eta_local']}")
+    if tokens.get("promotion_eta_remaining_hours"):
+        parts.append(f"remaining_hours={tokens['promotion_eta_remaining_hours']}")
+    return "；".join(parts)
+
+
 def _check_strategy_strictness():
     summary = _read_json(data_path("backtest_latest_summary.json")) or {}
     coverage = summary.get("trade_day_coverage") if isinstance(summary.get("trade_day_coverage"), dict) else {}
@@ -1651,7 +1673,13 @@ def _check_strategy_strictness():
                 "monthly5_candidate_detail": monthly5_cover.get("candidate_detail", ""),
                 "monthly5_runtime_detail": monthly5_cover.get("runtime_detail", ""),
             }
-        raise RuntimeError("策略可能過嚴：" + "；".join(blockers))
+        pending_detail = _monthly5_runtime_pending_detail(monthly5_cover.get("runtime_detail", ""))
+        monthly5_detail = ""
+        if monthly5_cover.get("reason") == "promotion_not_ready":
+            monthly5_detail = "；月報酬5%接管未完成"
+            if pending_detail:
+                monthly5_detail += f"（{pending_detail}）"
+        raise RuntimeError("策略可能過嚴：" + "；".join(blockers) + monthly5_detail)
 
     return {
         "status": "ok",

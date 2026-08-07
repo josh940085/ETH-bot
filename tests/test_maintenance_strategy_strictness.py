@@ -133,6 +133,35 @@ class StrategyStrictnessCheckTests(unittest.TestCase):
         self.assertEqual(cover["reason"], "promotion_not_ready")
         self.assertIn("promotion_ready=false", cover["runtime_detail"])
 
+    def test_strategy_strictness_error_includes_monthly5_promotion_eta(self):
+        with (
+            patch.object(
+                maintenance,
+                "_check_monthly5_strictness_cover",
+                return_value={
+                    "covered": False,
+                    "reason": "promotion_not_ready",
+                    "runtime_detail": (
+                        "PASS monthly5_runtime promotion_ready=false "
+                        "promotion_blockers=sample_span,shadow_projection_not_valid "
+                        "promotion_eta_remaining_hours=6.3 "
+                        "promotion_eta_local=2026-08-07T23:03:34+08:00"
+                    ),
+                },
+            ),
+            self.assertRaisesRegex(RuntimeError, "月報酬5%接管未完成.*2026-08-07T23:03:34"),
+        ):
+            self._run_check(
+                {
+                    "trades": 7,
+                    "trade_day_coverage": {
+                        "calendar_days": 7,
+                        "trade_days": 7,
+                        "daily_min_trades": 7,
+                    },
+                }
+            )
+
     def test_flags_low_trade_day_coverage(self):
         with (
             patch.object(
