@@ -103,6 +103,19 @@ def _require(condition: bool, failures: list[str], message: str):
         failures.append(message)
 
 
+def _has_monthly5_promotion_wait_condition(position: dict) -> bool:
+    wait_conditions = [
+        item
+        for item in (position.get("strategy_wait_conditions") or [])
+        if isinstance(item, dict)
+    ]
+    return any(
+        str(item.get("key") or "") == "monthly5_override_gate"
+        and str(item.get("target") or "") == "promotion_ready=true"
+        for item in wait_conditions
+    )
+
+
 def _selector_allows_action(primary_direction: str, shadow_action: str) -> bool:
     primary_direction = str(primary_direction or "").lower()
     shadow_action = str(shadow_action or "").lower()
@@ -452,16 +465,18 @@ def _verify_promotion_gate(position: dict, max_age_sec: float | None = None) -> 
         and strategy_signal == "wait"
         and strategy_status == "waiting"
     ):
-        _require(
-            str(override.get("reason") or "") == "monthly5_promotion_not_ready",
-            failures,
-            "monthly5 waiting entry override reason must be promotion_not_ready",
-        )
-        _require(
-            list(override.get("promotion_blockers") or []) == list(shadow.get("promotion_blockers") or [])[:5],
-            failures,
-            "monthly5 waiting entry override blockers do not match readiness",
-        )
+        if str(override.get("reason") or "") == "monthly5_promotion_not_ready":
+            _require(
+                list(override.get("promotion_blockers") or []) == list(shadow.get("promotion_blockers") or [])[:5],
+                failures,
+                "monthly5 waiting entry override blockers do not match readiness",
+            )
+        else:
+            _require(
+                _has_monthly5_promotion_wait_condition(position),
+                failures,
+                "monthly5 waiting entry promotion gate missing from wait conditions",
+            )
     if override.get("applied") is True:
         _require(
             bool(shadow.get("promotion_ready", False)),
@@ -641,12 +656,7 @@ def _verify_monthly5_wait_conditions(position: dict) -> list[str]:
     if str(position.get("strategy_execution_status") or "").lower() != "waiting":
         return failures
 
-    override = (
-        position.get("monthly5_signal_override")
-        if isinstance(position.get("monthly5_signal_override"), dict)
-        else {}
-    )
-    if str(override.get("reason") or "") != "monthly5_promotion_not_ready":
+    if bool(shadow.get("promotion_ready", False)):
         return failures
     wait_conditions = [
         item

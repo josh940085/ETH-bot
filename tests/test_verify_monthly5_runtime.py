@@ -594,7 +594,7 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertEqual(failures, [])
 
-    def test_runtime_verifier_rejects_waiting_entry_with_stale_override_reason(self):
+    def test_runtime_verifier_accepts_protected_wait_when_promotion_gate_is_visible(self):
         shadow = self._shadow()
         position = {
             "strategy_signal": "wait",
@@ -603,13 +603,35 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             "monthly5_signal_override": {
                 "applied": False,
                 "reason": "protected_wait_reason",
-                "promotion_blockers": list(shadow["promotion_blockers"]),
             },
+            "strategy_wait_conditions": [
+                {"key": "risk_reward", "target": "至少 1.80"},
+                {"key": "monthly5_override_gate", "target": "promotion_ready=true"},
+            ],
         }
 
         failures = verify_monthly5_runtime._verify_promotion_gate(position)
 
-        self.assertIn("monthly5 waiting entry override reason must be promotion_not_ready", failures)
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_protected_wait_without_promotion_gate(self):
+        shadow = self._shadow()
+        position = {
+            "strategy_signal": "wait",
+            "strategy_execution_status": "waiting",
+            "monthly5_shadow": shadow,
+            "monthly5_signal_override": {
+                "applied": False,
+                "reason": "protected_wait_reason",
+            },
+            "strategy_wait_conditions": [
+                {"key": "risk_reward", "target": "至少 1.80"},
+            ],
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertIn("monthly5 waiting entry promotion gate missing from wait conditions", failures)
 
     def test_runtime_verifier_accepts_monthly5_waiting_entry_mark_price_state(self):
         shadow = self._shadow()

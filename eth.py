@@ -6251,8 +6251,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     )
     rr_wait_candidate = final == "觀望（RR不足）"
     profile_wait_candidate = final == "觀望（MLX回測輪廓不佳）"
-    if final not in allowed_wait_reasons and not rr_wait_candidate and not profile_wait_candidate:
-        return {"applied": False, "reason": "protected_wait_reason", "final": final}
+    protected_wait_reason = final not in allowed_wait_reasons and not rr_wait_candidate and not profile_wait_candidate
 
     selection = {}
     if isinstance(monthly5_state, dict) and isinstance(monthly5_state.get("market_selection"), dict):
@@ -6294,6 +6293,9 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
             "promotion_blockers": list(monthly5_state.get("promotion_blockers") or [])[:5],
             "promotion_blocker_details": list(monthly5_state.get("promotion_blocker_details") or [])[:5],
         }
+
+    if protected_wait_reason:
+        return {"applied": False, "reason": "protected_wait_reason", "final": final}
 
     macro_alignment = decision.get("macro_indicator_alignment") if isinstance(decision.get("macro_indicator_alignment"), dict) else {}
     if bool(macro_alignment.get("hard_block", False)):
