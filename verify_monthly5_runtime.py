@@ -4,6 +4,8 @@
 import argparse
 import json
 import os
+import re
+import sqlite3
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +20,9 @@ DEFAULT_SPEC = Path("docs/strategy_specs/monthly5_postlock_hourly.json")
 DEFAULT_POSITION = Path(".runtime/data/docs/position.json")
 DEFAULT_SHADOW = Path(".runtime/data/btcusdt_monthly5_shadow_state.json")
 DEFAULT_HISTORY = Path(".runtime/data/btcusdt_monthly5_shadow_history.jsonl")
+_ACTIVE_SYMBOL = str(os.getenv("TRADE_SYMBOL", "BTCUSDT") or "BTCUSDT").strip().upper()
+_ACTIVE_SYMBOL_SLUG = re.sub(r"[^a-z0-9]+", "_", _ACTIVE_SYMBOL.lower()).strip("_") or "btcusdt"
+DEFAULT_MLX_DB = Path(".runtime/ai") / f"{_ACTIVE_SYMBOL_SLUG}_mlx_agent_learning.sqlite3"
 
 
 def _load_json(path: Path) -> dict:
@@ -82,6 +87,92 @@ def _selector_allows_action(primary_direction: str, shadow_action: str) -> bool:
     if primary_direction == "long":
         return shadow_action == "evaluate_long"
     return False
+
+
+def _load_recent_actual_trade_markets(db_path: Path, limit: int = 500) -> list[dict]:
+    if not db_path.exists():
+        return []
+    try:
+        with sqlite3.connect(str(db_path), timeout=5) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT id, question, market_json
+                  FROM analysis_episode
+                 WHERE question LIKE 'actual-trade:%'
+                    OR market_json LIKE '%"actual_trade"%'
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    markets = []
+    for row in rows:
+        try:
+            market = json.loads(row["market_json"] or "{}")
+        except Exception:
+            market = {}
+        if not isinstance(market, dict):
+            market = {}
+        market["_episode_id"] = int(row["id"])
+        market["_question"] = str(row["question"] or "")
+        markets.append(market)
+    return markets
+
+
+def _is_monthly5_actual_trade_market(market: dict) -> bool:
+    if not bool(market.get("actual_trade")):
+        return False
+    monthly5 = market.get("monthly5") if isinstance(market.get("monthly5"), dict) else {}
+    markers = {
+        str(market.get("actual_trade_source") or ""),
+        str(market.get("source") or ""),
+        str(market.get("monthly5_trade_source") or ""),
+        str(monthly5.get("trade_source") or ""),
+    }
+    if "monthly5_market_selection" in markers:
+        return True
+    return "actual-trade:monthly5_market_selection:" in str(market.get("_question") or "")
+
+
+def _verify_actual_trade_monthly5_metadata(db_path: Path, limit: int = 500) -> list[str]:
+    failures: list[str] = []
+    for market in _load_recent_actual_trade_markets(db_path, limit=limit):
+        if not _is_monthly5_actual_trade_market(market):
+            continue
+        prefix = f"monthly5 actual trade episode={market.get('_episode_id')}"
+        monthly5 = market.get("monthly5") if isinstance(market.get("monthly5"), dict) else {}
+        _require(bool(monthly5), failures, f"{prefix} missing monthly5 metadata")
+        _require(
+            str(monthly5.get("trade_source") or "") == "monthly5_market_selection",
+            failures,
+            f"{prefix} monthly5 trade_source mismatch",
+        )
+        _require(
+            str(market.get("monthly5_trade_source") or "") == "monthly5_market_selection",
+            failures,
+            f"{prefix} missing flat monthly5_trade_source",
+        )
+        _require(bool(monthly5.get("selected_plan")), failures, f"{prefix} missing selected_plan")
+        _require(bool(monthly5.get("shadow_action")), failures, f"{prefix} missing shadow_action")
+        _require(bool(monthly5.get("selector_key")), failures, f"{prefix} missing selector_key")
+        _require(bool(market.get("monthly5_selector_key")), failures, f"{prefix} missing flat selector_key")
+        _require(
+            str(monthly5.get("selector_source") or "") == monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            failures,
+            f"{prefix} selector source mismatch",
+        )
+        leverage = _safe_float(monthly5.get("max_leverage"), 0.0)
+        _require(1.0 <= leverage <= 5.0, failures, f"{prefix} leverage missing or exceeds 5x")
+        _require(
+            _safe_float(market.get("monthly5_max_leverage"), 0.0) == leverage,
+            failures,
+            f"{prefix} flat leverage mismatch",
+        )
+    return failures
 
 
 def _verify_spec_and_summary(spec: dict) -> list[str]:
@@ -595,6 +686,7 @@ def main() -> int:
     parser.add_argument("--position", default=str(DEFAULT_POSITION))
     parser.add_argument("--shadow", default=str(DEFAULT_SHADOW))
     parser.add_argument("--history", default=str(DEFAULT_HISTORY))
+    parser.add_argument("--mlx-db", default=str(DEFAULT_MLX_DB))
     parser.add_argument("--require-history", action="store_true")
     parser.add_argument("--max-age-sec", type=float, default=None)
     args = parser.parse_args()
@@ -614,6 +706,7 @@ def main() -> int:
         failures.extend(_verify_shadow_history("history_file", _load_jsonl(history_path), shadow, spec, args.max_age_sec))
     elif args.require_history:
         failures.append(f"history file missing: {history_path}")
+    failures.extend(_verify_actual_trade_monthly5_metadata(Path(args.mlx_db)))
     failures.extend(_verify_guard_scenarios())
     failures.extend(_verify_end_to_end_scenarios())
 

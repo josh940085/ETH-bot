@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import tempfile
 import unittest
 import unittest.mock
@@ -155,6 +156,33 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
                 "adjusted_size": 0.0,
             },
         )
+
+    def _write_actual_trade_db(self, path, markets):
+        with sqlite3.connect(str(path)) as connection:
+            connection.execute(
+                """
+                CREATE TABLE analysis_episode (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at REAL NOT NULL,
+                    question TEXT NOT NULL,
+                    market_json TEXT NOT NULL
+                )
+                """
+            )
+            for index, market in enumerate(markets, start=1):
+                source = str(market.get("actual_trade_source") or "live_trade")
+                connection.execute(
+                    """
+                    INSERT INTO analysis_episode (created_at, question, market_json)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        float(index),
+                        f"actual-trade:{source}:100{index}",
+                        json.dumps(market),
+                    ),
+                )
+            connection.commit()
 
     def test_runtime_verifier_accepts_matching_spec_summary_and_shadow(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -449,6 +477,69 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         failures = verify_monthly5_runtime._verify_promotion_gate(position)
 
         self.assertIn("monthly5 trade_source missing entry selection", failures)
+
+    def test_runtime_verifier_accepts_monthly5_actual_trade_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "learning.sqlite3"
+            self._write_actual_trade_db(
+                db_path,
+                [
+                    {
+                        "actual_trade": True,
+                        "actual_trade_source": "monthly5_market_selection",
+                        "monthly5": {
+                            "trade_source": "monthly5_market_selection",
+                            "selected_plan": "normal_long_selector",
+                            "shadow_action": "evaluate_long",
+                            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+                            "selector_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                            "max_leverage": 4,
+                        },
+                        "monthly5_trade_source": "monthly5_market_selection",
+                        "monthly5_selector_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                        "monthly5_max_leverage": 4,
+                    }
+                ],
+            )
+
+            failures = verify_monthly5_runtime._verify_actual_trade_monthly5_metadata(db_path)
+
+        self.assertEqual(failures, [])
+
+    def test_runtime_verifier_rejects_monthly5_actual_trade_missing_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "learning.sqlite3"
+            self._write_actual_trade_db(
+                db_path,
+                [
+                    {
+                        "actual_trade": True,
+                        "actual_trade_source": "monthly5_market_selection",
+                        "source": "monthly5_market_selection",
+                    }
+                ],
+            )
+
+            failures = verify_monthly5_runtime._verify_actual_trade_monthly5_metadata(db_path)
+
+        self.assertTrue(any("missing monthly5 metadata" in failure for failure in failures))
+
+    def test_runtime_verifier_ignores_non_monthly5_actual_trade_metadata(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "learning.sqlite3"
+            self._write_actual_trade_db(
+                db_path,
+                [
+                    {
+                        "actual_trade": True,
+                        "actual_trade_source": "daily_min_trade",
+                    }
+                ],
+            )
+
+            failures = verify_monthly5_runtime._verify_actual_trade_monthly5_metadata(db_path)
+
+        self.assertEqual(failures, [])
 
 
 if __name__ == "__main__":
