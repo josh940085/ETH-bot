@@ -72,6 +72,29 @@ def _shadow_from_position(position: dict) -> dict:
     return shadow if isinstance(shadow, dict) else {}
 
 
+def _monthly5_readiness_summary_tokens(position: dict) -> list[str]:
+    shadow = _shadow_from_position(position)
+    readiness = position.get("monthly5_readiness")
+    readiness = readiness if isinstance(readiness, dict) else shadow
+    blockers = [str(item) for item in readiness.get("promotion_blockers") or []]
+    if blockers:
+        blocker_text = ",".join(blockers[:5])
+    else:
+        blocker_text = "none"
+    tokens = [
+        f"promotion_ready={str(bool(readiness.get('promotion_ready', False))).lower()}",
+        f"promotion_blockers={blocker_text}",
+    ]
+    if "rows" in readiness:
+        tokens.append(f"readiness_rows={int(_safe_float(readiness.get('rows'), 0.0))}")
+    if "span_hours" in readiness:
+        tokens.append(f"readiness_span_hours={_safe_float(readiness.get('span_hours'), 0.0):.4f}")
+    review_ts = _safe_float(readiness.get("promotion_earliest_review_ts"), 0.0)
+    if review_ts > 0.0:
+        tokens.append(f"promotion_eta_ts={int(review_ts)}")
+    return tokens
+
+
 def _require(condition: bool, failures: list[str], message: str):
     if not condition:
         failures.append(message)
@@ -1020,6 +1043,7 @@ def main() -> int:
     live_decision = position.get("monthly5_live_selector_decision")
     live_decision = live_decision if isinstance(live_decision, dict) else {}
     history_status = "history=ok" if Path(args.history).exists() else "history=missing"
+    readiness_status = " ".join(_monthly5_readiness_summary_tokens(position))
     print(
         "PASS monthly5_runtime "
         f"strategy_id={position_shadow.get('strategy_id')} "
@@ -1031,6 +1055,7 @@ def main() -> int:
         f"research_leverage={research_probe.get('max_leverage')} "
         f"live_selector_input={'ok' if live_input.get('usable') else 'pending'} "
         f"live_selector_decision={'ok' if live_decision.get('usable') else 'pending'} "
+        f"{readiness_status} "
         f"{history_status} "
         "e2e=ok"
     )

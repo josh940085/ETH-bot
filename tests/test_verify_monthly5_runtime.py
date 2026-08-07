@@ -114,6 +114,27 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             },
         }
 
+    def test_readiness_summary_tokens_prefer_position_readiness(self):
+        shadow = self._shadow()
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": {
+                "promotion_ready": False,
+                "promotion_blockers": ["sample_span", "shadow_projection_not_valid"],
+                "rows": 69,
+                "span_hours": 0.8203,
+                "promotion_earliest_review_ts": 1786115014,
+            },
+        }
+
+        tokens = verify_monthly5_runtime._monthly5_readiness_summary_tokens(position)
+
+        self.assertIn("promotion_ready=false", tokens)
+        self.assertIn("promotion_blockers=sample_span,shadow_projection_not_valid", tokens)
+        self.assertIn("readiness_rows=69", tokens)
+        self.assertIn("readiness_span_hours=0.8203", tokens)
+        self.assertIn("promotion_eta_ts=1786115014", tokens)
+
     def _live_selector_input(self):
         return {
             "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
