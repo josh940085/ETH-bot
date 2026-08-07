@@ -190,8 +190,9 @@ def _get_backtest_settings():
         "no",
         "off",
     }
-    interval_sec = max(900.0, float(os.getenv("BACKTEST_INTERVAL_SEC", 6 * 3600)))
     startup_delay_sec = max(15.0, float(os.getenv("BACKTEST_STARTUP_DELAY_SEC", 90)))
+    weekly_hour, weekly_minute = _parse_daily_schedule(os.getenv("BACKTEST_TIME", "06:00"), 6, 0)
+    weekly_weekday = _parse_weekday(os.getenv("BACKTEST_WEEKDAY", "saturday"), 5)
     lookback_days = max(1, int(os.getenv("BACKTEST_LOOKBACK_DAYS", 14)))
     warmup_bars = max(200, int(os.getenv("BACKTEST_WARMUP_BARS", 1500)))
     market_source_preference = str(
@@ -200,8 +201,10 @@ def _get_backtest_settings():
     ).strip().lower()
     return {
         "enabled": enabled,
-        "interval_sec": interval_sec,
         "startup_delay_sec": startup_delay_sec,
+        "weekly_hour": weekly_hour,
+        "weekly_minute": weekly_minute,
+        "weekly_weekday": weekly_weekday,
         "lookback_days": lookback_days,
         "warmup_bars": warmup_bars,
         "market_source_preference": market_source_preference,
@@ -220,6 +223,56 @@ def _parse_daily_schedule(raw_value, default_hour=4, default_minute=30):
         return hour, minute
     except Exception:
         return default_hour, default_minute
+
+
+def _parse_weekday(raw_value, default_weekday=5):
+    text = str(raw_value or "").strip().lower()
+    names = {
+        "monday": 0,
+        "mon": 0,
+        "一": 0,
+        "週一": 0,
+        "禮拜一": 0,
+        "tuesday": 1,
+        "tue": 1,
+        "二": 1,
+        "週二": 1,
+        "禮拜二": 1,
+        "wednesday": 2,
+        "wed": 2,
+        "三": 2,
+        "週三": 2,
+        "禮拜三": 2,
+        "thursday": 3,
+        "thu": 3,
+        "四": 3,
+        "週四": 3,
+        "禮拜四": 3,
+        "friday": 4,
+        "fri": 4,
+        "五": 4,
+        "週五": 4,
+        "禮拜五": 4,
+        "saturday": 5,
+        "sat": 5,
+        "六": 5,
+        "週六": 5,
+        "禮拜六": 5,
+        "sunday": 6,
+        "sun": 6,
+        "日": 6,
+        "天": 6,
+        "週日": 6,
+        "週天": 6,
+        "禮拜日": 6,
+        "禮拜天": 6,
+    }
+    if text in names:
+        return names[text]
+    try:
+        return min(6, max(0, int(text)))
+    except Exception:
+        return default_weekday
 
 
 def _read_latest_maintenance_report():
@@ -253,6 +306,42 @@ def _compute_next_daily_run_ts(hour, minute, now_ts=None):
     return target_dt.timestamp()
 
 
+def _compute_next_weekly_run_ts(weekday, hour, minute, now_ts=None):
+    now_dt = datetime.datetime.fromtimestamp(now_ts or time.time()).astimezone()
+    target_dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    days_ahead = (int(weekday) - target_dt.weekday()) % 7
+    target_dt += datetime.timedelta(days=days_ahead)
+    if target_dt <= now_dt:
+        target_dt += datetime.timedelta(days=7)
+    return target_dt.timestamp()
+
+
+def _file_modified_at(path):
+    try:
+        return datetime.datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+    except Exception:
+        return None
+
+
+def _compute_initial_weekly_run_ts(settings, *, completed_at=None, now_ts=None):
+    now_ts = now_ts or time.time()
+    now_dt = datetime.datetime.fromtimestamp(now_ts).astimezone()
+    hour = settings["weekly_hour"]
+    minute = settings["weekly_minute"]
+    weekday = settings["weekly_weekday"]
+    next_scheduled_ts = _compute_next_weekly_run_ts(weekday, hour, minute, now_ts)
+    next_scheduled_dt = datetime.datetime.fromtimestamp(next_scheduled_ts).astimezone()
+    last_scheduled_dt = next_scheduled_dt - datetime.timedelta(days=7)
+
+    if completed_at is not None and completed_at >= last_scheduled_dt:
+        return next_scheduled_ts
+
+    today_scheduled_dt = now_dt.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if now_dt.weekday() == int(weekday) and now_dt >= today_scheduled_dt:
+        return now_ts + settings["startup_delay_sec"]
+    return next_scheduled_ts
+
+
 def _get_maintenance_settings():
     enabled = str(os.getenv("MAINTENANCE_AUTO_ENABLED", "1") or "1").strip().lower() not in {
         "0",
@@ -264,6 +353,7 @@ def _get_maintenance_settings():
     daily_hour, daily_minute = _parse_daily_schedule(os.getenv("MAINTENANCE_TIME", "04:30"))
     smoke_backtest_days = max(1, int(os.getenv("MAINTENANCE_BACKTEST_DAYS", 3)))
     smoke_backtest_warmup_bars = max(200, int(os.getenv("MAINTENANCE_BACKTEST_WARMUP_BARS", 600)))
+    smoke_backtest_weekday = _parse_weekday(os.getenv("MAINTENANCE_SMOKE_BACKTEST_WEEKDAY", "saturday"), 5)
     notify = str(os.getenv("MAINTENANCE_NOTIFY", "1") or "1").strip().lower() not in {
         "0",
         "false",
@@ -283,6 +373,7 @@ def _get_maintenance_settings():
         "daily_minute": daily_minute,
         "smoke_backtest_days": smoke_backtest_days,
         "smoke_backtest_warmup_bars": smoke_backtest_warmup_bars,
+        "smoke_backtest_weekday": smoke_backtest_weekday,
         "notify": notify,
         "package_auto_update": package_auto_update,
     }
@@ -292,12 +383,14 @@ def _get_historical_backtest_settings():
     enabled = str(os.getenv("HISTORICAL_BACKTEST_AUTO_ENABLED", "1") or "1").strip().lower() not in {
         "0", "false", "no", "off",
     }
-    daily_hour, daily_minute = _parse_daily_schedule(os.getenv("HISTORICAL_BACKTEST_TIME", "03:00"), 3, 0)
+    weekly_hour, weekly_minute = _parse_daily_schedule(os.getenv("HISTORICAL_BACKTEST_TIME", "08:00"), 8, 0)
+    weekly_weekday = _parse_weekday(os.getenv("HISTORICAL_BACKTEST_WEEKDAY", "saturday"), 5)
     startup_delay_sec = max(30.0, float(os.getenv("HISTORICAL_BACKTEST_STARTUP_DELAY_SEC", 180)))
     return {
         "enabled": enabled,
-        "daily_hour": daily_hour,
-        "daily_minute": daily_minute,
+        "weekly_hour": weekly_hour,
+        "weekly_minute": weekly_minute,
+        "weekly_weekday": weekly_weekday,
         "startup_delay_sec": startup_delay_sec,
     }
 
@@ -352,25 +445,19 @@ def _compute_initial_monthly_kline_ts(settings, now_ts=None):
     return scheduled.timestamp()
 
 
-def _compute_initial_historical_backtest_ts(settings):
-    now_ts = time.time()
-    now_dt = datetime.datetime.fromtimestamp(now_ts).astimezone()
-    scheduled_dt = now_dt.replace(hour=settings["daily_hour"], minute=settings["daily_minute"], second=0, microsecond=0)
+def _compute_initial_historical_backtest_ts(settings, now_ts=None):
+    now_ts = now_ts or time.time()
     try:
         payload = json.loads(HISTORICAL_BACKTEST_REPORT_PATH.read_text(encoding="utf-8"))
         finished_at = datetime.datetime.fromisoformat(str(payload.get("finished_at") or "")).astimezone()
-        completed_today = bool(payload.get("success")) and finished_at.date() == now_dt.date()
+        completed_at = finished_at if payload.get("success") else None
     except Exception:
-        completed_today = False
-    if completed_today:
-        return _compute_next_daily_run_ts(settings["daily_hour"], settings["daily_minute"], now_ts)
-    if now_dt >= scheduled_dt:
-        return now_ts + settings["startup_delay_sec"]
-    return scheduled_dt.timestamp()
+        completed_at = None
+    return _compute_initial_weekly_run_ts(settings, completed_at=completed_at, now_ts=now_ts)
 
 
-def _compute_initial_maintenance_ts(settings):
-    now_ts = time.time()
+def _compute_initial_maintenance_ts(settings, now_ts=None):
+    now_ts = now_ts or time.time()
     now_dt = datetime.datetime.fromtimestamp(now_ts).astimezone()
     scheduled_dt = now_dt.replace(
         hour=settings["daily_hour"],
@@ -387,6 +474,11 @@ def _compute_initial_maintenance_ts(settings):
         return now_ts + settings["startup_delay_sec"]
 
     return scheduled_dt.timestamp()
+
+
+def _maintenance_smoke_backtest_due(settings, now_ts=None):
+    now_dt = datetime.datetime.fromtimestamp(now_ts or time.time()).astimezone()
+    return now_dt.weekday() == int(settings.get("smoke_backtest_weekday", 5)) and now_dt.hour < 12
 
 
 def _start_backtest_process(env, settings):
@@ -436,6 +528,8 @@ def _start_maintenance_process(env, settings):
     ]
     if not settings["notify"]:
         cmd.append("--no-notify")
+    if not _maintenance_smoke_backtest_due(settings):
+        cmd.append("--skip-smoke-backtest")
     if settings.get("package_auto_update", True):
         cmd.append("--update-packages")
 
@@ -454,7 +548,7 @@ def _start_historical_backtest_process(env):
     if not HISTORICAL_BACKTEST_FILE.exists():
         return None
     cmd = [sys.executable, str(HISTORICAL_BACKTEST_FILE)]
-    print(f"📚 啟動每日歷年回測: {' '.join(cmd)}")
+    print(f"📚 啟動週六歷年回測: {' '.join(cmd)}")
     # Keep output attached to program.log so a multi-year run cannot block on a full PIPE buffer.
     return subprocess.Popen(cmd, cwd=str(REPO_DIR), env=env)
 
@@ -505,7 +599,10 @@ def run_once() -> int:
     maintenance_proc = None
     historical_backtest_proc = None
     monthly_kline_proc = None
-    next_backtest_ts = time.time() + backtest_settings["startup_delay_sec"]
+    next_backtest_ts = _compute_initial_weekly_run_ts(
+        backtest_settings,
+        completed_at=_file_modified_at(BACKTEST_SUMMARY_PATH),
+    )
     next_maintenance_ts = _compute_initial_maintenance_ts(maintenance_settings)
     next_historical_backtest_ts = _compute_initial_historical_backtest_ts(historical_backtest_settings)
     next_monthly_kline_ts = _compute_initial_monthly_kline_ts(monthly_kline_settings)
@@ -557,11 +654,19 @@ def run_once() -> int:
                 print(f"🧪 定時回測結束，exit_code={backtest_code}")
                 if output:
                     print(output)
-                next_backtest_ts = time.time() + backtest_settings["interval_sec"]
+                next_backtest_ts = _compute_next_weekly_run_ts(
+                    backtest_settings["weekly_weekday"],
+                    backtest_settings["weekly_hour"],
+                    backtest_settings["weekly_minute"],
+                )
                 backtest_proc = None
         elif backtest_settings["enabled"] and not real_execution_busy and maintenance_proc is None and historical_backtest_proc is None and monthly_kline_proc is None and time.time() >= next_backtest_ts:
             backtest_proc = _start_backtest_process(env, backtest_settings)
-            next_backtest_ts = time.time() + backtest_settings["interval_sec"]
+            next_backtest_ts = _compute_next_weekly_run_ts(
+                backtest_settings["weekly_weekday"],
+                backtest_settings["weekly_hour"],
+                backtest_settings["weekly_minute"],
+            )
 
         if maintenance_proc is not None:
             maintenance_code = maintenance_proc.poll()
@@ -593,9 +698,11 @@ def run_once() -> int:
         if historical_backtest_proc is not None:
             historical_code = historical_backtest_proc.poll()
             if historical_code is not None:
-                print(f"📚 每日歷年回測結束，exit_code={historical_code}")
-                next_historical_backtest_ts = _compute_next_daily_run_ts(
-                    historical_backtest_settings["daily_hour"], historical_backtest_settings["daily_minute"]
+                print(f"📚 週六歷年回測結束，exit_code={historical_code}")
+                next_historical_backtest_ts = _compute_next_weekly_run_ts(
+                    historical_backtest_settings["weekly_weekday"],
+                    historical_backtest_settings["weekly_hour"],
+                    historical_backtest_settings["weekly_minute"],
                 )
                 historical_backtest_proc = None
         elif (

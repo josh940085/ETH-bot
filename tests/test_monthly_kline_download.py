@@ -39,8 +39,9 @@ class MonthlyKlineDownloadTests(unittest.TestCase):
     def test_existing_historical_backtest_schedule_still_initializes(self):
         settings = program._get_historical_backtest_settings()
         self.assertIsInstance(settings, dict)
-        self.assertGreaterEqual(settings["daily_hour"], 0)
-        self.assertLessEqual(settings["daily_hour"], 23)
+        self.assertEqual(settings["weekly_weekday"], 5)
+        self.assertGreaterEqual(settings["weekly_hour"], 0)
+        self.assertLessEqual(settings["weekly_hour"], 23)
         self.assertIn("startup_delay_sec", settings)
 
     def test_previous_month_uses_complete_utc_calendar_month(self):
