@@ -81,6 +81,12 @@ class Monthly5MaintenanceTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("status=collecting", result["detail"])
         self.assertIn("verify_monthly5_readiness.py", run_command.call_args.args[0])
+        self.assertEqual(
+            run_command.call_args.args[0][
+                run_command.call_args.args[0].index("--min-span-hours") + 1
+            ],
+            "8.0",
+        )
 
     def test_monthly5_readiness_check_can_require_ready(self):
         command_result = SimpleNamespace(

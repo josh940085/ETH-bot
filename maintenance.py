@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+import monthly5_shadow
 from package_updates import check_and_update_packages
 from runtime_config import load_local_env
 from runtime_paths import REPO_DIR, data_path
@@ -1021,7 +1022,13 @@ def _check_monthly5_readiness():
     )
     min_span_hours = max(
         0.0,
-        float(os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS", "24") or "24"),
+        float(
+            os.getenv(
+                "MONTHLY5_READINESS_MIN_SPAN_HOURS",
+                str(monthly5_shadow.READINESS_MIN_SPAN_HOURS),
+            )
+            or monthly5_shadow.READINESS_MIN_SPAN_HOURS
+        ),
     )
     command = [
         sys.executable,
