@@ -179,6 +179,11 @@ def build_history_record(snapshot, guard=None):
         "selector_source": str(selection.get("selector_source") or ""),
         "selector_policy_source": str(selection.get("selector_policy_source") or ""),
         "selector_alignment": str(selection.get("selector_alignment") or ""),
+        "selector_key": str(selection.get("selector_key") or ""),
+        "selector_primary_direction": str(selection.get("selector_primary_direction") or ""),
+        "selector_effective_direction": str(selection.get("selector_effective_direction") or ""),
+        "selector_q25_return_pct": round(_safe_float(selection.get("selector_q25_return_pct"), 0.0), 4),
+        "selector_hit_rate": round(_safe_float(selection.get("selector_hit_rate"), 0.0), 4),
         "suppressed_plan": str(selection.get("suppressed_plan") or ""),
         "suppressed_action": str(selection.get("suppressed_action") or ""),
         "suppressed_key": str(selection.get("suppressed_key") or ""),
@@ -224,6 +229,14 @@ def _selection_from_active_row(row):
         "bear_score": round(_safe_float(row.get("bear_score"), 0.0), 4),
         "market_state": str(row.get("market_state") or ""),
         "selector_policy_version": _safe_int(row.get("selector_policy_version"), 0),
+        "selector_source": str(row.get("selector_source") or ""),
+        "selector_policy_source": str(row.get("selector_policy_source") or ""),
+        "selector_alignment": str(row.get("selector_alignment") or ""),
+        "selector_key": str(row.get("selector_key") or ""),
+        "selector_primary_direction": str(row.get("selector_primary_direction") or ""),
+        "selector_effective_direction": str(row.get("selector_effective_direction") or ""),
+        "selector_q25_return_pct": round(_safe_float(row.get("selector_q25_return_pct"), 0.0), 4),
+        "selector_hit_rate": round(_safe_float(row.get("selector_hit_rate"), 0.0), 4),
         "selected_plan": str(row.get("selected_plan") or ""),
         "shadow_action": str(row.get("shadow_action") or ""),
         "exposure_cap": round(_safe_float(row.get("exposure_cap"), 0.0), 4),
@@ -243,6 +256,14 @@ def _apply_active_selection(row, selection):
         "bear_score",
         "market_state",
         "selector_policy_version",
+        "selector_source",
+        "selector_policy_source",
+        "selector_alignment",
+        "selector_key",
+        "selector_primary_direction",
+        "selector_effective_direction",
+        "selector_q25_return_pct",
+        "selector_hit_rate",
         "selected_plan",
         "shadow_action",
         "exposure_cap",
@@ -1498,6 +1519,34 @@ def _direction_score(value):
     return 0
 
 
+def _selector_direction_allowance(research_selector_decision, market_bias):
+    decision = research_selector_decision if isinstance(research_selector_decision, dict) else {}
+    if not decision.get("usable"):
+        return {
+            "usable": False,
+            "primary_direction": "",
+            "allows_long": True,
+            "allows_short": True,
+            "effective_direction": "",
+        }
+    primary = str(decision.get("primary_direction") or "").lower()
+    market_bias = str(market_bias or "").lower()
+    allows_long = primary in {"long", "long_or_short"}
+    allows_short = primary == "long_or_short"
+    effective = ""
+    if primary == "long":
+        effective = "long"
+    elif primary == "long_or_short":
+        effective = "short" if market_bias == "bearish" else "long"
+    return {
+        "usable": True,
+        "primary_direction": primary,
+        "allows_long": allows_long,
+        "allows_short": allows_short,
+        "effective_direction": effective,
+    }
+
+
 def build_market_selection(
     shadow_state,
     *,
@@ -1513,6 +1562,7 @@ def build_market_selection(
     probe_candidate_plan_keys=None,
     previous_market_selection=None,
     previous_market_selection_ts=0,
+    research_selector_decision=None,
 ):
     shadow_state = shadow_state if isinstance(shadow_state, dict) else {}
     strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
@@ -1558,6 +1608,13 @@ def build_market_selection(
         market_bias = "mixed"
     else:
         market_bias = "neutral"
+    research_selector_decision = (
+        research_selector_decision
+        if isinstance(research_selector_decision, dict)
+        else {}
+    )
+    selector_allowance = _selector_direction_allowance(research_selector_decision, market_bias)
+    selector_usable = bool(selector_allowance.get("usable"))
 
     mode = str(shadow_state.get("mode") or "normal")
     exposure_cap = max(0.0, min(1.0, _safe_float(shadow_state.get("suggested_exposure_scale"), 0.0)))
@@ -1673,6 +1730,20 @@ def build_market_selection(
         shadow_action = "wait"
         rationale = "宏觀或事件風險硬阻擋，等待解除"
 
+    if selector_usable and shadow_action in {"evaluate_long", "evaluate_short"}:
+        if shadow_action == "evaluate_long" and not selector_allowance.get("allows_long"):
+            selected_plan = "research_selector_wait"
+            shadow_action = "wait"
+            exposure_cap = 0.0
+            reason_codes.append("research_selector_direction_mismatch")
+            rationale = "similar-day selector 未允許多方，月報酬5% shadow 等待下一個相似日方向"
+        elif shadow_action == "evaluate_short" and not selector_allowance.get("allows_short"):
+            selected_plan = "research_selector_wait"
+            shadow_action = "wait"
+            exposure_cap = 0.0
+            reason_codes.append("research_selector_direction_mismatch")
+            rationale = "similar-day selector 未允許空方，月報酬5% shadow 等待下一個相似日方向"
+
     if market_state == "chop" and shadow_action in {"evaluate_long", "evaluate_short"}:
         exposure_cap = round(min(exposure_cap, 0.35), 4)
         reason_codes.append("chop_market_reduce")
@@ -1772,9 +1843,16 @@ def build_market_selection(
     return {
         "schema_version": 1,
         "selector_policy_version": SELECTOR_POLICY_VERSION,
-        "selector_source": LIVE_SELECTOR_SOURCE,
+        "selector_source": RESEARCH_SELECTOR_SOURCE if selector_usable else LIVE_SELECTOR_SOURCE,
         "selector_policy_source": RESEARCH_SELECTOR_SOURCE,
-        "selector_alignment": SELECTOR_ALIGNMENT,
+        "selector_alignment": "live_similar_day" if selector_usable else SELECTOR_ALIGNMENT,
+        "selector_usable": selector_usable,
+        "selector_key": str(research_selector_decision.get("selected_key") or ""),
+        "selector_primary_direction": str(selector_allowance.get("primary_direction") or ""),
+        "selector_effective_direction": str(selector_allowance.get("effective_direction") or ""),
+        "selector_score": _safe_float(research_selector_decision.get("selected_score"), 0.0),
+        "selector_q25_return_pct": _safe_float(research_selector_decision.get("selected_q25_return_pct"), 0.0),
+        "selector_hit_rate": _safe_float(research_selector_decision.get("selected_hit_rate"), 0.0),
         "market_bias": market_bias,
         "bull_score": bull_score,
         "bear_score": bear_score,

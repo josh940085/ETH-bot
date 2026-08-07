@@ -6039,6 +6039,12 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             snapshot["live_selector_input"] = dict(previous.get("live_selector_input") or {})
         elif isinstance(POSITION_PANEL_STATE.get("monthly5_live_selector_input"), dict):
             snapshot["live_selector_input"] = dict(POSITION_PANEL_STATE.get("monthly5_live_selector_input") or {})
+        if isinstance(decision.get("monthly5_live_selector_decision"), dict):
+            snapshot["live_selector_decision"] = dict(decision.get("monthly5_live_selector_decision") or {})
+        elif isinstance(previous.get("live_selector_decision"), dict):
+            snapshot["live_selector_decision"] = dict(previous.get("live_selector_decision") or {})
+        elif isinstance(POSITION_PANEL_STATE.get("monthly5_live_selector_decision"), dict):
+            snapshot["live_selector_decision"] = dict(POSITION_PANEL_STATE.get("monthly5_live_selector_decision") or {})
         market_selection = monthly5_shadow.build_market_selection(
             snapshot,
             strategy_signal=effective_strategy_signal,
@@ -6077,6 +6083,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             probe_candidate_plan_keys=readiness_report.get("shadow_recovery_probe_candidate_keys") or [],
             previous_market_selection=previous.get("market_selection") if isinstance(previous.get("market_selection"), dict) else {},
             previous_market_selection_ts=_safe_int(previous.get("updated_ts"), 0),
+            research_selector_decision=snapshot.get("live_selector_decision") if isinstance(snapshot.get("live_selector_decision"), dict) else {},
         )
         if position_open:
             active_underperforming_keys = {
@@ -6862,6 +6869,11 @@ def sync_position_panel(current_price=None):
         if isinstance(monthly5_shadow_state.get("live_selector_input"), dict)
         else dict(POSITION_PANEL_STATE.get("monthly5_live_selector_input") or {})
     )
+    monthly5_live_selector_decision_state = (
+        monthly5_shadow_state.get("live_selector_decision")
+        if isinstance(monthly5_shadow_state.get("live_selector_decision"), dict)
+        else dict(POSITION_PANEL_STATE.get("monthly5_live_selector_decision") or {})
+    )
     monthly5_position_guard_state = dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {})
     if not active_trade.get("open"):
         monthly5_position_guard_state = monthly5_shadow.build_position_guard(
@@ -6915,6 +6927,7 @@ def sync_position_panel(current_price=None):
             "monthly5_readiness": dict(monthly5_readiness_state or {}),
             "monthly5_research_selector": dict(monthly5_research_selector_state or {}),
             "monthly5_live_selector_input": dict(monthly5_live_selector_input_state or {}),
+            "monthly5_live_selector_decision": dict(monthly5_live_selector_decision_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -14981,9 +14994,11 @@ def build_trade_signal_snapshot(
         breakout=breakout,
         volume_spike=volume_spike,
     )
+    monthly5_selector_decision = _build_monthly5_live_selector_decision(df_1d)
     return {
         "features": features,
-        "monthly5_live_selector_input": _build_monthly5_live_selector_input_probe(df_1d),
+        "monthly5_live_selector_input": dict(monthly5_selector_decision.get("input_probe") or {}),
+        "monthly5_live_selector_decision": monthly5_selector_decision,
         "score": score,
         "auxiliary_score": auxiliary_score,
         "primary_indicator": primary_indicator,
@@ -17415,6 +17430,16 @@ def _build_monthly5_live_selector_input_probe(df_1d=None):
     probe = monthly5_research_selector.build_live_selector_input_probe(frame)
     probe["input_source"] = source
     return probe
+
+
+def _build_monthly5_live_selector_decision(df_1d=None):
+    frame, source = _monthly5_live_daily_frame(df_1d)
+    decision = monthly5_research_selector.build_live_selector_decision(frame)
+    input_probe = decision.get("input_probe") if isinstance(decision.get("input_probe"), dict) else {}
+    input_probe["input_source"] = source
+    decision["input_source"] = source
+    decision["input_probe"] = input_probe
+    return decision
 
 # =============================
 # 主邏輯（AI接管）

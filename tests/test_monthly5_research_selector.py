@@ -122,6 +122,62 @@ class Monthly5ResearchSelectorTests(unittest.TestCase):
         self.assertFalse(probe["usable"])
         self.assertIn("daily_warmup_insufficient", probe["blocking_reasons"])
 
+    def test_live_selector_decision_selects_best_similar_day_candidate(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "selector_cache.npz"
+            feature_count = monthly5_research_selector.EXPECTED_SHORT_MARKET_STATE_FEATURES
+            xday = np.zeros((3, feature_count), dtype="float32")
+            returns = np.array(
+                [
+                    [0.01, 0.02, 0.01],
+                    [0.06, 0.07, 0.08],
+                ],
+                dtype="float32",
+            )
+            flats = np.zeros_like(returns)
+            np.savez(
+                cache_path,
+                R=returns,
+                F=flats,
+                Xday=xday,
+                C=np.zeros((2, 9), dtype="float32"),
+                keys=np.array(
+                    [
+                        "mom120_lf|lev2|stopNone|target0.05|redlev0.5",
+                        "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                    ]
+                ),
+                days=np.array(["2026-08-01", "2026-08-02", "2026-08-03"]),
+            )
+            frame = pd.DataFrame(
+                {
+                    "high": [102.0] * monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                    "low": [98.0] * monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                    "close": [100.0] * monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                },
+                index=pd.date_range(
+                    "2025-08-03",
+                    periods=monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                    freq="1D",
+                    tz="UTC",
+                ),
+            )
+
+            decision = monthly5_research_selector.build_live_selector_decision(
+                frame,
+                cache_path=cache_path,
+                nearest_days=3,
+                candidate_pool=2,
+            )
+
+        self.assertTrue(decision["usable"])
+        self.assertEqual(
+            decision["selected_key"],
+            "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        )
+        self.assertEqual(decision["primary_direction"], "long")
+        self.assertEqual(decision["max_leverage"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

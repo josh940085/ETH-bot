@@ -253,6 +253,54 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["shadow_action"], "evaluate_long")
         self.assertEqual(selection["exposure_cap"], 1.0)
 
+    def test_market_selection_marks_similar_day_selector_when_decision_is_usable(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "trend", "action": "open"},
+            research_selector_decision={
+                "usable": True,
+                "selected_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                "primary_direction": "long",
+                "selected_score": 0.08,
+                "selected_q25_return_pct": 5.5,
+                "selected_hit_rate": 0.75,
+            },
+        )
+
+        self.assertEqual(selection["selector_source"], monthly5_shadow.RESEARCH_SELECTOR_SOURCE)
+        self.assertEqual(selection["selector_alignment"], "live_similar_day")
+        self.assertEqual(selection["selector_key"], "mom120_lf|lev4|stopNone|target0.05|redlev0.5")
+        self.assertEqual(selection["selected_plan"], "normal_long_selector")
+        self.assertEqual(selection["shadow_action"], "evaluate_long")
+
+    def test_market_selection_blocks_short_when_similar_day_key_is_long_flat(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": -1, "mid_trend": -1, "macro_bias": -1.2},
+            host_logic={"direction": "short", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            donchian_state={"state": "trend", "action": "open"},
+            research_selector_decision={
+                "usable": True,
+                "selected_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                "primary_direction": "long",
+                "selected_score": 0.08,
+                "selected_q25_return_pct": 5.5,
+                "selected_hit_rate": 0.75,
+            },
+        )
+
+        self.assertEqual(selection["selector_source"], monthly5_shadow.RESEARCH_SELECTOR_SOURCE)
+        self.assertEqual(selection["selected_plan"], "research_selector_wait")
+        self.assertEqual(selection["shadow_action"], "wait")
+        self.assertEqual(selection["exposure_cap"], 0.0)
+        self.assertIn("research_selector_direction_mismatch", selection["reason_codes"])
+
     def test_market_selection_waits_when_host_profile_quality_is_bad(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},

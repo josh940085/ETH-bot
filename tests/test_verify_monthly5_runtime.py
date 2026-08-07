@@ -130,6 +130,19 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             "cache_latest_day": "2026-08-03",
         }
 
+    def _live_selector_decision(self):
+        return {
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "usable": True,
+            "blocking_reasons": [],
+            "feature_set": "short_market_state",
+            "selected_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+            "primary_direction": "long",
+            "max_leverage": 4,
+            "selected_q25_return_pct": 5.5,
+            "selected_hit_rate": 0.75,
+        }
+
     def _history_row(self, shadow=None):
         shadow = shadow or self._shadow()
         return monthly5_shadow.build_history_record(
@@ -228,6 +241,7 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         position = {
             "monthly5_shadow": self._shadow(),
             "monthly5_live_selector_input": self._live_selector_input(),
+            "monthly5_live_selector_decision": self._live_selector_decision(),
         }
         probe = {
             "artifact_available": True,
@@ -255,6 +269,7 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
         position = {
             "monthly5_shadow": self._shadow(),
             "monthly5_live_selector_input": live_input,
+            "monthly5_live_selector_decision": self._live_selector_decision(),
         }
         probe = {
             "artifact_available": True,
@@ -273,6 +288,33 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
 
         self.assertIn("monthly5 live selector input not usable", failures)
+
+    def test_runtime_verifier_rejects_unusable_live_selector_decision(self):
+        spec = self._spec("summary.json", "monthly.json")
+        live_decision = self._live_selector_decision()
+        live_decision["usable"] = False
+        position = {
+            "monthly5_shadow": self._shadow(),
+            "monthly5_live_selector_input": self._live_selector_input(),
+            "monthly5_live_selector_decision": live_decision,
+        }
+        probe = {
+            "artifact_available": True,
+            "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "max_leverage": 4,
+            "primary_direction": "long",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with unittest.mock.patch.object(
+            verify_monthly5_runtime.monthly5_research_selector,
+            "build_research_selector_probe",
+            return_value=probe,
+        ):
+            failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
+
+        self.assertIn("monthly5 live selector decision not usable", failures)
 
     def test_runtime_verifier_rejects_disabled_promotion_gate(self):
         position = {"monthly5_shadow": self._shadow()}

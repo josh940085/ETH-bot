@@ -324,6 +324,25 @@ def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
             failures,
             "monthly5 live selector input daily warmup insufficient",
         )
+    live_decision = position.get("monthly5_live_selector_decision")
+    live_decision = live_decision if isinstance(live_decision, dict) else {}
+    if live_decision:
+        _require(
+            live_decision.get("selector_source") == monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            failures,
+            "monthly5 live selector decision source mismatch",
+        )
+        _require(bool(live_decision.get("usable")), failures, "monthly5 live selector decision not usable")
+        _require(
+            str(live_decision.get("selected_key") or ""),
+            failures,
+            "monthly5 live selector decision missing selected key",
+        )
+        _require(
+            str(live_decision.get("primary_direction") or "") in {"long", "long_or_short"},
+            failures,
+            "monthly5 live selector decision direction unsupported",
+        )
     return failures
 
 
@@ -546,6 +565,8 @@ def main() -> int:
     research_probe = monthly5_research_selector.build_research_selector_probe()
     live_input = position.get("monthly5_live_selector_input")
     live_input = live_input if isinstance(live_input, dict) else {}
+    live_decision = position.get("monthly5_live_selector_decision")
+    live_decision = live_decision if isinstance(live_decision, dict) else {}
     history_status = "history=ok" if Path(args.history).exists() else "history=missing"
     print(
         "PASS monthly5_runtime "
@@ -557,6 +578,7 @@ def main() -> int:
         f"research_direction={research_probe.get('primary_direction')} "
         f"research_leverage={research_probe.get('max_leverage')} "
         f"live_selector_input={'ok' if live_input.get('usable') else 'pending'} "
+        f"live_selector_decision={'ok' if live_decision.get('usable') else 'pending'} "
         f"{history_status} "
         "e2e=ok"
     )
