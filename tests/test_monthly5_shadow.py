@@ -265,6 +265,7 @@ class Monthly5ShadowTests(unittest.TestCase):
                 "usable": True,
                 "selected_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
                 "primary_direction": "long",
+                "max_leverage": 4,
                 "selected_score": 0.08,
                 "selected_q25_return_pct": 5.5,
                 "selected_hit_rate": 0.75,
@@ -276,6 +277,36 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["selector_key"], "mom120_lf|lev4|stopNone|target0.05|redlev0.5")
         self.assertEqual(selection["selected_plan"], "normal_long_selector")
         self.assertEqual(selection["shadow_action"], "evaluate_long")
+        self.assertEqual(selection["max_leverage"], 4)
+
+    def test_selector_max_leverage_flows_to_guard_and_history(self):
+        snapshot = monthly5_shadow.update_shadow_state(
+            {},
+            now_ts=taipei_ts("2026-08-05T12:00:00"),
+            margin_balance=1000.0,
+            mark_price=112000.0,
+        )
+        selection = monthly5_shadow.build_market_selection(
+            snapshot,
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": 1, "macro_bias": 1.2},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 2.0, "hard_block": False},
+            research_selector_decision={
+                "usable": True,
+                "selected_key": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+                "primary_direction": "long",
+                "max_leverage": 4,
+            },
+        )
+        snapshot["market_selection"] = selection
+
+        guard = monthly5_shadow.build_execution_guard(snapshot, direction="long", requested_size=0.5)
+        record = monthly5_shadow.build_history_record(snapshot, guard)
+
+        self.assertEqual(selection["max_leverage"], 4)
+        self.assertEqual(guard["max_leverage"], 4)
+        self.assertEqual(record["max_leverage"], 4)
 
     def test_market_selection_blocks_short_when_similar_day_key_is_long_flat(self):
         selection = monthly5_shadow.build_market_selection(

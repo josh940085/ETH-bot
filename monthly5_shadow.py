@@ -159,7 +159,16 @@ def build_history_record(snapshot, guard=None):
         "intraday_stop_active": bool(snapshot.get("intraday_stop_active", False)),
         "recovery_active": bool(snapshot.get("recovery_active", False)),
         "suggested_exposure_scale": round(_safe_float(snapshot.get("suggested_exposure_scale"), 0.0), 4),
-        "max_leverage": min(5, max(0, _safe_int(snapshot.get("max_leverage"), 5))),
+        "max_leverage": min(
+            5,
+            max(
+                0,
+                _safe_int(
+                    selection.get("max_leverage"),
+                    _safe_int(snapshot.get("max_leverage"), 5),
+                ),
+            ),
+        ),
         "position_open": bool(snapshot.get("position_open", False)),
         "position_side": str(snapshot.get("position_side") or ""),
         "position_notional": round(_safe_float(snapshot.get("position_notional"), 0.0), 4),
@@ -1840,6 +1849,17 @@ def build_market_selection(
         exposure_cap = 0.0
         rationale = "近期同類市場選擇已累積負報酬，暫停評估以保護月報酬5%目標"
 
+    selected_max_leverage = min(
+        5,
+        max(
+            0,
+            _safe_int(
+                research_selector_decision.get("max_leverage"),
+                _safe_int(shadow_state.get("max_leverage"), 5),
+            ),
+        ),
+    )
+
     return {
         "schema_version": 1,
         "selector_policy_version": SELECTOR_POLICY_VERSION,
@@ -1867,7 +1887,7 @@ def build_market_selection(
         "suppressed_exposure_cap": round(suppressed_exposure_cap, 4),
         "recovery_probe": recovery_probe,
         "recovery_probe_key": recovery_probe_key,
-        "max_leverage": min(5, max(0, _safe_int(shadow_state.get("max_leverage"), 5))),
+        "max_leverage": selected_max_leverage,
         "strategy_signal": str(strategy_signal or "wait"),
         "strategy_execution_reason": str(strategy_execution_reason or ""),
         "reason_codes": sorted(set(str(code) for code in reason_codes if code)),
@@ -1892,6 +1912,16 @@ def build_execution_guard(
     shadow_action = str(selection.get("shadow_action") or "wait")
     selected_plan = str(selection.get("selected_plan") or "normal_wait")
     exposure_cap = max(0.0, min(1.0, _safe_float(selection.get("exposure_cap"), requested_size)))
+    max_leverage = min(
+        5,
+        max(
+            0,
+            _safe_int(
+                selection.get("max_leverage"),
+                _safe_int(shadow_state.get("max_leverage"), 5),
+            ),
+        ),
+    )
     mode = str(shadow_state.get("mode") or "normal")
 
     allowed = True
@@ -1931,7 +1961,7 @@ def build_execution_guard(
         "capped": capped,
         "selected_plan": selected_plan,
         "shadow_action": shadow_action,
-        "max_leverage": min(5, max(0, _safe_int(shadow_state.get("max_leverage"), 5))),
+        "max_leverage": max_leverage,
     }
 
 

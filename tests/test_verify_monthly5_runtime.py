@@ -109,7 +109,7 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
                 "selected_plan": "normal_long_selector",
                 "shadow_action": "evaluate_long",
                 "exposure_cap": 0.35,
-                "max_leverage": 5,
+                "max_leverage": 4,
             },
         }
 
@@ -372,6 +372,33 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
             failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
 
         self.assertIn("monthly5 market selection action not allowed by live selector direction", failures)
+
+    def test_runtime_verifier_rejects_selection_leverage_above_live_selector_key(self):
+        spec = self._spec("summary.json", "monthly.json")
+        shadow = self._shadow()
+        shadow["market_selection"]["max_leverage"] = 5
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_live_selector_input": self._live_selector_input(),
+            "monthly5_live_selector_decision": self._live_selector_decision(),
+        }
+        probe = {
+            "artifact_available": True,
+            "selected_candidate": monthly5_shadow.SELECTED_CANDIDATE,
+            "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
+            "max_leverage": 4,
+            "primary_direction": "long",
+            "top_pick": "mom120_lf|lev4|stopNone|target0.05|redlev0.5",
+        }
+
+        with unittest.mock.patch.object(
+            verify_monthly5_runtime.monthly5_research_selector,
+            "build_research_selector_probe",
+            return_value=probe,
+        ):
+            failures = verify_monthly5_runtime._verify_research_selector_artifact(position, spec)
+
+        self.assertIn("monthly5 market selection leverage exceeds live selector key", failures)
 
     def test_runtime_verifier_rejects_disabled_promotion_gate(self):
         position = {"monthly5_shadow": self._shadow()}

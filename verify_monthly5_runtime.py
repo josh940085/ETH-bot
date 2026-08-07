@@ -382,6 +382,12 @@ def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
                 failures,
                 "monthly5 market selection action not allowed by live selector direction",
             )
+            _require(
+                int(selection.get("max_leverage") or 0)
+                <= int(live_decision.get("max_leverage") or 5),
+                failures,
+                "monthly5 market selection leverage exceeds live selector key",
+            )
     return failures
 
 
