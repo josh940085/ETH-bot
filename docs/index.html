@@ -2904,6 +2904,8 @@
     const spanHours = Number.isFinite(Number(state.span_hours)) ? Number(state.span_hours) : 0;
     const minSpanHours = Number.isFinite(Number(state.min_span_hours)) ? Number(state.min_span_hours) : 8;
     const spanRemainingHours = Number.isFinite(Number(state.sample_span_remaining_hours)) ? Number(state.sample_span_remaining_hours) : Math.max(0, minSpanHours - spanHours);
+    const promotionEtaTs = Number.isFinite(Number(state.promotion_earliest_review_ts)) ? Number(state.promotion_earliest_review_ts) : 0;
+    const promotionEtaLabel = promotionEtaTs > 0 ? ts_full_str(promotionEtaTs) : "-";
     const countRemaining = Number.isFinite(Number(state.sample_count_remaining)) ? Number(state.sample_count_remaining) : Math.max(0, minRecords - rows);
     const evaluateRows = Number.isFinite(Number(state.evaluate_rows)) ? Number(state.evaluate_rows) : 0;
     const riskRows = Number.isFinite(Number(state.risk_rows)) ? Number(state.risk_rows) : 0;
@@ -2974,7 +2976,7 @@
         <div class="service-row full"><span>接管擋點</span><strong>${escapeHtml(overrideLabel)}</strong></div>
         <div class="service-row"><span>樣本</span><strong>${rows}/${minRecords} (${rowProgress.toFixed(0)}%)</strong></div>
         <div class="service-row"><span>跨度</span><strong>${spanHours.toFixed(2)}/${minSpanHours.toFixed(0)}h (${spanProgress.toFixed(0)}%)</strong></div>
-        <div class="service-row full"><span>解除進度</span><strong>span-${spanRemainingHours.toFixed(2)}h count-${countRemaining} probe ${probeProgressPct.toFixed(0)}%/${probeRemainingIntervals} candidate-${probeCandidateCount}</strong></div>
+        <div class="service-row full"><span>解除進度</span><strong>eta ${escapeHtml(promotionEtaLabel)} span-${spanRemainingHours.toFixed(2)}h count-${countRemaining} probe ${probeProgressPct.toFixed(0)}%/${probeRemainingIntervals} candidate-${probeCandidateCount}</strong></div>
         <div class="service-row"><span>Shadow 空倉</span><strong>${flatPct.toFixed(1)}% / ${maxFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>實單空倉</span><strong>${actualFlatPct.toFixed(1)}%</strong></div>
         <div class="service-row"><span>紙上報酬</span><strong>${paperReturnPct.toFixed(2)}% / ${paperWinRatePct.toFixed(0)}% (${paperIntervals})</strong></div>
