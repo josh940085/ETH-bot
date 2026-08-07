@@ -11,6 +11,7 @@ class VerifyMonthly5GoLiveTests(unittest.TestCase):
         results = [
             SimpleNamespace(returncode=0, stdout="PASS candidate\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="PASS runtime\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS account open_count=0\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="PASS readiness promotion_ready=true\n", stderr=""),
         ]
 
@@ -27,6 +28,7 @@ class VerifyMonthly5GoLiveTests(unittest.TestCase):
         results = [
             SimpleNamespace(returncode=0, stdout="PASS candidate\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="PASS runtime promotion_ready=false\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS account open_count=0\n", stderr=""),
             SimpleNamespace(
                 returncode=1,
                 stdout=(
@@ -48,6 +50,29 @@ class VerifyMonthly5GoLiveTests(unittest.TestCase):
         self.assertIn("FAIL monthly5_go_live_step=promotion", output)
         self.assertIn("BLOCKER code=sample_span remaining_hours=6.7", output)
         self.assertIn("FAIL monthly5_go_live failed_steps=promotion", output)
+
+    def test_go_live_fails_when_account_is_not_flat(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="PASS candidate\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="PASS runtime\n", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout='FAIL monthly5_account {"symbol":"BTCUSDT","open_count":1}\n',
+                stderr="",
+            ),
+            SimpleNamespace(returncode=0, stdout="PASS readiness promotion_ready=true\n", stderr=""),
+        ]
+
+        with (
+            patch.object(verify_monthly5_go_live.subprocess, "run", side_effect=results),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            code = verify_monthly5_go_live.main([])
+
+        output = stdout.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL monthly5_go_live_step=account", output)
+        self.assertIn("FAIL monthly5_go_live failed_steps=account", output)
 
 
 if __name__ == "__main__":

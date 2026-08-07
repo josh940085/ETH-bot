@@ -37,6 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     steps = [
         ("candidate", [sys.executable, "verify_monthly5_candidate.py"]),
         ("runtime", runtime_command),
+        ("account", [sys.executable, "verify_monthly5_account.py"]),
         (
             "promotion",
             [
