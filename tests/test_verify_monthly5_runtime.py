@@ -554,6 +554,35 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertNotIn("monthly5 readiness missing earliest promotion review ts", failures)
 
+    def test_runtime_verifier_rejects_entry_when_risk_audit_blocks_monthly5(self):
+        shadow = self._shadow()
+        shadow["promotion_blockers"] = [
+            "shadow_monthly_target",
+            "active_underperforming_plan",
+            "recovery_probe_probe_failed",
+        ]
+        shadow["market_selection"]["shadow_action"] = "evaluate_long"
+        shadow["market_selection"]["exposure_cap"] = 0.35
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": {
+                "promotion_ready": False,
+                "promotion_blockers": list(shadow["promotion_blockers"]),
+                "shadow_paper_return_pct": -0.5,
+            },
+        }
+
+        failures = verify_monthly5_runtime._verify_monthly5_risk_audit(position)
+
+        self.assertIn(
+            "monthly5 risk audit requires wait while active plan is underperforming",
+            failures,
+        )
+        self.assertIn(
+            "monthly5 risk audit requires zero exposure while active plan is underperforming",
+            failures,
+        )
+
     def test_runtime_verifier_rejects_stale_readiness_state(self):
         shadow = self._shadow()
         readiness = {

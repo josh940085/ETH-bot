@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 import monthly5_shadow
 import monthly5_research_selector
+import monthly5_risk_audit
 from verify_monthly5_candidate import _failures as candidate_failures
 
 
@@ -727,6 +728,29 @@ def _verify_monthly5_open_position_safety(position: dict) -> list[str]:
     return failures
 
 
+def _verify_monthly5_risk_audit(position: dict) -> list[str]:
+    failures: list[str] = []
+    audit = monthly5_risk_audit.build_audit(
+        position=position,
+        shadow=_shadow_from_position(position),
+        round_trips=[],
+    )
+    monthly5 = audit.get("monthly5") if isinstance(audit.get("monthly5"), dict) else {}
+    actions = {str(item) for item in audit.get("recommended_actions") or []}
+    if "block_monthly5_entry_until_recovery_probe_success" in actions:
+        _require(
+            str(monthly5.get("shadow_action") or "") == "wait",
+            failures,
+            "monthly5 risk audit requires wait while active plan is underperforming",
+        )
+        _require(
+            _safe_float(monthly5.get("exposure_cap"), 0.0) == 0.0,
+            failures,
+            "monthly5 risk audit requires zero exposure while active plan is underperforming",
+        )
+    return failures
+
+
 def _verify_research_selector_artifact(position: dict, spec: dict) -> list[str]:
     failures: list[str] = []
     probe = monthly5_research_selector.build_research_selector_probe()
@@ -1042,6 +1066,7 @@ def main() -> int:
     failures.extend(_verify_monthly5_guard_alignment(position))
     failures.extend(_verify_monthly5_wait_conditions(position))
     failures.extend(_verify_monthly5_open_position_safety(position))
+    failures.extend(_verify_monthly5_risk_audit(position))
     failures.extend(_verify_research_selector_artifact(position, spec))
     history_path = Path(args.history)
     if history_path.exists():
