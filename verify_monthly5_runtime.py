@@ -425,7 +425,10 @@ def _verify_promotion_gate(position: dict, max_age_sec: float | None = None) -> 
             for item in (readiness.get("promotion_blocker_details") or [])
             if isinstance(item, dict)
         }
-        if not bool(readiness.get("promotion_ready", False)):
+        if (
+            not bool(readiness.get("promotion_ready", False))
+            and ("sample_count" in blockers or "sample_span" in blockers)
+        ):
             _require(
                 _safe_float(readiness.get("promotion_earliest_review_ts"), 0.0) > 0.0,
                 failures,

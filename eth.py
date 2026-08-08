@@ -6237,6 +6237,17 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     if not _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_ENABLED", "1")):
         return {"applied": False, "reason": "disabled"}
     direct_takeover = _is_truthy(os.getenv("MONTHLY5_DIRECT_TAKEOVER", "0"))
+    promotion_blockers = [str(code) for code in (monthly5_state or {}).get("promotion_blockers") or [] if code]
+    direct_takeover_allowed_blockers = {
+        "sample_span",
+        "shadow_projection_not_valid",
+        "shadow_rolling_projection_not_valid",
+    }
+    direct_takeover_can_bypass_promotion = (
+        direct_takeover
+        and bool(promotion_blockers)
+        and set(promotion_blockers).issubset(direct_takeover_allowed_blockers)
+    )
 
     decision = decision if isinstance(decision, dict) else {}
     final = str(decision.get("final") or "")
@@ -6272,7 +6283,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
         return {"applied": False, "reason": "monthly5_plan_blocked", "selected_plan": selected_plan}
     if (
         _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1"))
-        and not direct_takeover
+        and not direct_takeover_can_bypass_promotion
         and not bool(monthly5_state.get("promotion_ready", False))
     ):
         return {
@@ -6296,7 +6307,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
             "selected_plan": selected_plan,
         }
 
-    if protected_wait_reason and not direct_takeover:
+    if protected_wait_reason and not direct_takeover_can_bypass_promotion:
         return {"applied": False, "reason": "protected_wait_reason", "final": final}
 
     macro_alignment = decision.get("macro_indicator_alignment") if isinstance(decision.get("macro_indicator_alignment"), dict) else {}
@@ -6472,7 +6483,7 @@ def _build_monthly5_signal_override(decision, monthly5_state, current_price):
     return {
         "applied": True,
         "reason": "monthly5_market_selection",
-        "direct_takeover": bool(direct_takeover),
+        "direct_takeover": bool(direct_takeover_can_bypass_promotion),
         "direction": direction,
         "final": final_text,
         "sl": float(sl),

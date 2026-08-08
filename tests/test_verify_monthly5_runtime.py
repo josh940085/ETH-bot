@@ -530,6 +530,30 @@ class VerifyMonthly5RuntimeTests(unittest.TestCase):
 
         self.assertIn("monthly5 readiness missing earliest promotion review ts", failures)
 
+    def test_runtime_verifier_allows_performance_blocker_without_review_eta(self):
+        shadow = self._shadow()
+        shadow["promotion_blockers"] = [
+            "shadow_monthly_target",
+            "active_underperforming_plan",
+        ]
+        readiness = {
+            "promotion_ready": shadow["promotion_ready"],
+            "promotion_blockers": list(shadow["promotion_blockers"]),
+            "promotion_blocker_details": [
+                {"code": "shadow_monthly_target"},
+                {"code": "active_underperforming_plan"},
+            ],
+            "promotion_earliest_review_ts": 0,
+        }
+        position = {
+            "monthly5_shadow": shadow,
+            "monthly5_readiness": readiness,
+        }
+
+        failures = verify_monthly5_runtime._verify_promotion_gate(position)
+
+        self.assertNotIn("monthly5 readiness missing earliest promotion review ts", failures)
+
     def test_runtime_verifier_rejects_stale_readiness_state(self):
         shadow = self._shadow()
         readiness = {
