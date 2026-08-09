@@ -73,6 +73,9 @@ def parse_top_pick(top_pick):
     if direction_mode == "lf":
         primary_direction = "long"
         direction_label = "long_flat"
+    elif direction_mode == "sf":
+        primary_direction = "short"
+        direction_label = "short_flat"
     elif direction_mode == "ls":
         primary_direction = "long_or_short"
         direction_label = "long_short"

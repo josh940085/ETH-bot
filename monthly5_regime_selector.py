@@ -22,6 +22,10 @@ DEVELOPMENT_END = "2023-12-31"
 HOLDOUT_START = "2024-01-01"
 TARGET_RETURN = 0.05
 REGIMES = ("up", "range", "down")
+SUPPORTED_RETURN_SCHEMAS = {
+    monthly5_selector_cache.RETURN_SCHEMA,
+    "causal_5m_trade_stop_pessimistic_v1",
+}
 CONFIGS = (
     {"lookback_days": 365, "nearest_days": 40, "min_regime_days": 30},
     {"lookback_days": 365, "nearest_days": 80, "min_regime_days": 40},
@@ -35,7 +39,6 @@ def load_cache(path=DEFAULT_CACHE_PATH):
         required_schema = {
             "schema_version": monthly5_selector_cache.SCHEMA_VERSION,
             "feature_schema": monthly5_selector_cache.FEATURE_SCHEMA,
-            "return_schema": monthly5_selector_cache.RETURN_SCHEMA,
         }
         for field, expected in required_schema.items():
             if field not in cache.files:
@@ -45,6 +48,11 @@ def load_cache(path=DEFAULT_CACHE_PATH):
                 raise ValueError(
                     f"selector cache {field} mismatch: expected {expected}, got {actual}"
                 )
+        if "return_schema" not in cache.files:
+            raise ValueError("selector cache missing return_schema")
+        return_schema = str(np.asarray(cache["return_schema"]).reshape(-1)[0])
+        if return_schema not in SUPPORTED_RETURN_SCHEMAS:
+            raise ValueError(f"selector cache unsupported return_schema: {return_schema}")
         for field in ("prefix_stable", "recursive_stable"):
             if field not in cache.files or not bool(np.asarray(cache[field]).reshape(-1)[0]):
                 raise ValueError(f"selector cache {field} verification missing or false")
@@ -208,6 +216,7 @@ def run_causal_selector(
     nearest_days,
     min_regime_days,
     warmup_days=180,
+    directional_regime_filter=False,
 ):
     """Select day t using only feature/return pairs ending no later than t-1."""
     returns = cache["R"]
@@ -242,6 +251,12 @@ def run_causal_selector(
         nearest_count = min(max(1, int(nearest_days)), len(target_history))
         nearest_targets = target_history[np.argsort(distances)[:nearest_count]]
         scores = _candidate_scores(returns[:, nearest_targets])
+        if directional_regime_filter and regimes[target_idx] in REGIMES:
+            suffix = {"up": "_lf|", "range": "_ls|", "down": "_sf|"}[
+                regimes[target_idx]
+            ]
+            allowed = np.char.find(cache["keys"].astype(str), suffix) >= 0
+            scores = np.where(allowed, scores, -np.inf)
         selected = int(np.argmax(np.nan_to_num(scores, nan=-1e12)))
         chosen[target_idx] = selected
         selected_returns[target_idx] = returns[selected, target_idx]
@@ -372,6 +387,9 @@ def verify_prefix_stability(cache, regimes, config, full_result, use_regime):
             sliced,
             regimes[:count],
             use_regime=use_regime,
+            directional_regime_filter=bool(
+                np.any(np.char.find(cache["keys"].astype(str), "_sf|") >= 0)
+            ),
             **config,
         )
         stable = np.array_equal(
@@ -388,9 +406,18 @@ def build_report(cache_path=DEFAULT_CACHE_PATH):
     regimes = target_day_regimes(cache["days"], completed_regimes)
     variants = []
     computed = {}
+    directional_filter = bool(
+        np.any(np.char.find(cache["keys"].astype(str), "_sf|") >= 0)
+    )
     for config in CONFIGS:
         key = f"lb{config['lookback_days']}_k{config['nearest_days']}_min{config['min_regime_days']}"
-        regime_result = run_causal_selector(cache, regimes, use_regime=True, **config)
+        regime_result = run_causal_selector(
+            cache,
+            regimes,
+            use_regime=True,
+            directional_regime_filter=directional_filter,
+            **config,
+        )
         baseline_result = run_causal_selector(cache, regimes, use_regime=False, **config)
         computed[key] = (config, regime_result, baseline_result)
         variants.append(
@@ -437,6 +464,7 @@ def build_report(cache_path=DEFAULT_CACHE_PATH):
             "cache_end": str(cache["days"][-1]),
             "fee_fraction_in_cache": cache["fee"],
             "max_leverage": 5,
+            "directional_regime_filter": directional_filter,
             "schema_version": cache["schema_version"],
             "feature_schema": cache["feature_schema"],
             "return_schema": cache["return_schema"],

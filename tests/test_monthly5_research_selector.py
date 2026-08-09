@@ -12,6 +12,14 @@ import monthly5_shadow
 
 
 class Monthly5ResearchSelectorTests(unittest.TestCase):
+    def test_parse_short_flat_candidate(self):
+        parsed = monthly5_research_selector.parse_top_pick(
+            "mom480_sf|lev2|stop-0.020|target0.040|cooldown12|redlev1.0"
+        )
+        self.assertEqual(parsed["primary_direction"], "short")
+        self.assertEqual(parsed["direction_label"], "short_flat")
+        self.assertEqual(parsed["max_leverage"], 2)
+
     def test_parse_top_pick_extracts_direction_and_risk(self):
         parsed = monthly5_research_selector.parse_top_pick(
             "mom120_lf|lev4|stopNone|target0.05|redlev0.5"

@@ -66,12 +66,22 @@ def build_signal(frame, prefix):
         fast = close.rolling(spec["fast"], min_periods=spec["fast"]).mean()
         slow = close.rolling(spec["slow"], min_periods=spec["slow"]).mean()
         bullish = fast > slow
-        state = bullish.astype("float64") if spec["mode"] == "lf" else bullish.map({True: 1.0, False: -1.0})
+        if spec["mode"] == "lf":
+            state = bullish.astype("float64")
+        elif spec["mode"] == "sf":
+            state = (~bullish).astype("float64") * -1.0
+        else:
+            state = bullish.map({True: 1.0, False: -1.0})
         state.loc[slow.isna()] = 0.0
     elif spec["family"] == "mom":
         reference = close.shift(spec["fast"])
         bullish = close > reference
-        state = bullish.astype("float64") if spec["mode"] == "lf" else bullish.map({True: 1.0, False: -1.0})
+        if spec["mode"] == "lf":
+            state = bullish.astype("float64")
+        elif spec["mode"] == "sf":
+            state = (~bullish).astype("float64") * -1.0
+        else:
+            state = bullish.map({True: 1.0, False: -1.0})
         state.loc[reference.isna()] = 0.0
     else:
         prior_high = pd.to_numeric(frame["high"], errors="coerce").shift(1).rolling(
@@ -81,7 +91,7 @@ def build_signal(frame, prefix):
             spec["fast"], min_periods=spec["fast"]
         ).min()
         events = pd.Series(np.nan, index=frame.index, dtype="float64")
-        events.loc[close > prior_high] = 1.0
+        events.loc[close > prior_high] = 0.0 if spec["mode"] == "sf" else 1.0
         events.loc[close < prior_low] = 0.0 if spec["mode"] == "lf" else -1.0
         state = events.ffill().fillna(0.0)
     # The position for bar t is fixed before bar t from signal state t-1.

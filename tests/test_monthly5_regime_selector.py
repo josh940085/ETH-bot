@@ -136,6 +136,28 @@ class Monthly5RegimeSelectorTests(unittest.TestCase):
         self.assertEqual(result["selected_indices"][8], 0)
         self.assertEqual(result["selected_indices"][9], 1)
 
+    def test_directional_filter_rejects_long_candidate_in_down_regime(self):
+        count = 10
+        cache = {
+            "R": np.array([[0.10] * count, [0.01] * count]),
+            "F": np.zeros((2, count)),
+            "Xday": np.zeros((count, 2)),
+            "keys": np.array(["mom480_lf|lev5", "mom480_sf|lev1"]),
+            "days": np.array(pd.date_range("2026-01-01", periods=count).strftime("%Y-%m-%d")),
+            "fee": 0.0008,
+        }
+        result = monthly5_regime_selector.run_causal_selector(
+            cache,
+            np.array(["down"] * count),
+            use_regime=True,
+            directional_regime_filter=True,
+            lookback_days=20,
+            nearest_days=5,
+            min_regime_days=2,
+            warmup_days=4,
+        )
+        self.assertEqual(result["selected_indices"][8], 1)
+
     def test_development_selector_rejects_high_return_tail_risk(self):
         def variant(name, hits, min_month, drawdown):
             return {
