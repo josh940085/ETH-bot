@@ -358,6 +358,10 @@ def _get_maintenance_settings():
     smoke_backtest_days = max(1, int(os.getenv("MAINTENANCE_BACKTEST_DAYS", 3)))
     smoke_backtest_warmup_bars = max(200, int(os.getenv("MAINTENANCE_BACKTEST_WARMUP_BARS", 600)))
     smoke_backtest_weekday = _parse_weekday(os.getenv("MAINTENANCE_SMOKE_BACKTEST_WEEKDAY", "saturday"), 5)
+    package_update_weekday = _parse_weekday(
+        os.getenv("MAINTENANCE_PACKAGE_UPDATE_WEEKDAY", "saturday"),
+        5,
+    )
     notify = str(os.getenv("MAINTENANCE_NOTIFY", "1") or "1").strip().lower() not in {
         "0",
         "false",
@@ -378,6 +382,7 @@ def _get_maintenance_settings():
         "smoke_backtest_days": smoke_backtest_days,
         "smoke_backtest_warmup_bars": smoke_backtest_warmup_bars,
         "smoke_backtest_weekday": smoke_backtest_weekday,
+        "package_update_weekday": package_update_weekday,
         "notify": notify,
         "package_auto_update": package_auto_update,
     }
@@ -485,6 +490,13 @@ def _maintenance_smoke_backtest_due(settings, now_ts=None):
     return now_dt.weekday() == int(settings.get("smoke_backtest_weekday", 5)) and now_dt.hour < 12
 
 
+def _maintenance_package_update_due(settings, now_ts=None):
+    if not settings.get("package_auto_update", True):
+        return False
+    now_dt = datetime.datetime.fromtimestamp(now_ts or time.time()).astimezone()
+    return now_dt.weekday() == int(settings.get("package_update_weekday", 5))
+
+
 def _start_backtest_process(env, settings):
     if not BACKTEST_FILE.exists():
         return None
@@ -516,7 +528,7 @@ def _start_backtest_process(env, settings):
     )
 
 
-def _start_maintenance_process(env, settings):
+def _start_maintenance_process(env, settings, *, now_ts=None):
     if not MAINTENANCE_FILE.exists():
         return None
 
@@ -534,10 +546,12 @@ def _start_maintenance_process(env, settings):
         cmd.append("--no-notify")
     if not _maintenance_smoke_backtest_due(settings):
         cmd.append("--skip-smoke-backtest")
-    if settings.get("package_auto_update", True):
+    package_update_due = _maintenance_package_update_due(settings, now_ts)
+    if package_update_due:
         cmd.append("--update-packages")
 
-    print(f"🛠️ 啟動每日巡檢: {' '.join(cmd)}")
+    label = "週六全面升級巡檢" if package_update_due else "每日健康巡檢"
+    print(f"🛠️ 啟動{label}: {' '.join(cmd)}")
     return subprocess.Popen(
         cmd,
         cwd=str(REPO_DIR),

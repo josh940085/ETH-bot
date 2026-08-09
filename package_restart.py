@@ -15,7 +15,14 @@ from runtime_paths import REPO_DIR, data_path
 POSITION_PATH = data_path("docs", "position.json")
 REPORT_PATH = data_path("package_restart_latest.json")
 SUPERVISORCTL = REPO_DIR / ".venv" / "bin" / "supervisorctl"
-SERVICE_ORDER = ("n8n", "panel-realtime", "panel-tunnel", "mlx-agent", "eth-bot")
+SERVICE_ORDER = (
+    "n8n",
+    "panel-realtime",
+    "panel-tunnel",
+    "mlx-agent",
+    "regime-drift",
+    "eth-bot",
+)
 
 
 def _iso_now():

@@ -22,3 +22,10 @@ mv .venv-py311-backup .venv
 ```
 
 After rollback, verify fresh service logs, Binance Mark Price validation, and the exchange position before treating the stack as healthy.
+
+## Upgrade Schedule
+
+Daily maintenance remains a health and safety check. Compatible Python dependency,
+Homebrew, and same-major n8n upgrades run only during the Saturday maintenance
+window, defaulting to 04:30 Asia/Taipei. Tests and compilation run before updated
+services restart; restarts wait while a live Binance position is active.

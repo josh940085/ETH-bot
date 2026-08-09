@@ -281,9 +281,15 @@ def check_and_update_packages(*, apply_updates=False):
                 report["restart_services"].append("panel-tunnel")
             if "node@22" in brew_names:
                 report["restart_services"].append("n8n")
-            if any(name in brew_names for name in ("python@3.11", "openssl@3", "libomp", "sqlite")):
+            if any(name in brew_names for name in ("python@3.12", "openssl@3", "libomp", "sqlite")):
                 report["restart_services"].extend(
-                    ["panel-realtime", "mlx-agent", "panel-tunnel", "eth-bot"]
+                    [
+                        "panel-realtime",
+                        "mlx-agent",
+                        "panel-tunnel",
+                        "regime-drift",
+                        "eth-bot",
+                    ]
                 )
             _validate_updated_runtime()
 
