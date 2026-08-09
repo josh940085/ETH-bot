@@ -27,6 +27,11 @@ TOOLS = {
         "package": "nautilus_trader",
         "expected": "1.227.0",
     },
+    "river": {
+        "python": ".runtime/research_envs/river/bin/python",
+        "package": "river",
+        "expected": "0.25.0",
+    },
 }
 
 
@@ -76,6 +81,11 @@ def build_status(root=Path(".")):
         "installed": (root / "monthly5_bias_audit.py").exists(),
         "mode": "local_lookahead_and_recursive_gate",
         "full_freqtrade_runtime_installed": tools["freqtrade"]["installed"],
+    }
+    tools["market_regime_drift"] = {
+        "installed": (root / "market_regime_drift.py").exists(),
+        "mode": "river_adwin_shadow_only",
+        "live_control_enabled": False,
     }
     return {
         "schema_version": 1,

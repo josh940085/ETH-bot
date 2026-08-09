@@ -25,6 +25,9 @@ class ResearchToolStatusTests(unittest.TestCase):
                 "full_freqtrade_runtime_installed"
             ]
         )
+        self.assertFalse(
+            status["tools"]["market_regime_drift"]["live_control_enabled"]
+        )
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ This repo should use external trading projects as engineering references, not as
 - `monthly5_bias_audit.py` applies a Freqtrade-style promotion gate for negative shifts, prefix replay stability, and recursive indicator stability.
 - `cryptofeed_binance_collector.py` records new Binance Futures trades and L2 updates for future queue/slippage replay.
 - `hftbacktest_data_probe.py` prevents an hftbacktest run until both trade and L2 records are present.
+- `market_regime_drift.py` uses River ADWIN detectors on shadow price, score, and selector features. Its output is observational and cannot control live execution or satisfy promotion gates.
 - `research_tool_status.py` verifies all isolated research environments and records that Tardis is intentionally excluded.
 - `verify_monthly5_runtime.py` remains the runtime gate for the live service.
 - Direct takeover must not bypass performance blockers such as:
@@ -32,6 +33,7 @@ This repo should use external trading projects as engineering references, not as
 - `.runtime/research_envs/hftbacktest`: Python 3.12, `hftbacktest==2.4.4`.
 - `.runtime/research_envs/cryptofeed`: Python 3.12, `cryptofeed==2.4.1`.
 - `.runtime/research_envs/nautilus`: Python 3.12, `nautilus_trader==1.227.0`.
+- `.runtime/research_envs/river`: Python 3.12, `river==0.25.0`.
 - Tardis is not installed.
 
 These environments are research-only. They are absent from `requirements.txt` and are never imported by `eth.py`.
@@ -68,6 +70,16 @@ Probe the capture before hftbacktest conversion:
 .runtime/research_envs/hftbacktest/bin/python hftbacktest_data_probe.py \
   --input .runtime/data/market_microstructure/binance_futures_btcusdt.jsonl
 ```
+
+Refresh the shadow-only market-regime drift report:
+
+```sh
+.runtime/research_envs/river/bin/python market_regime_drift.py
+```
+
+Supervisor also refreshes this report every 15 minutes through the isolated
+`regime-drift` service. The service only writes research state and is not on the
+order-execution path.
 
 Run the current validator from the repository root:
 
