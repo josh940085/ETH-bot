@@ -10,11 +10,10 @@ import numpy as np
 import pandas as pd
 
 import market_history
+import monthly5_selector_cache
 
 
-DEFAULT_CACHE_PATH = Path(
-    ".runtime/data/backtests/monthly5_search/daily_selector_cache_220_2019_20260804.npz"
-)
+DEFAULT_CACHE_PATH = monthly5_selector_cache.DEFAULT_OUTPUT
 DEFAULT_OUTPUT = Path(
     ".runtime/data/backtests/monthly5_search/causal_4h_regime_selector_2020_20260803.json"
 )
@@ -33,6 +32,22 @@ CONFIGS = (
 
 def load_cache(path=DEFAULT_CACHE_PATH):
     with np.load(Path(path), allow_pickle=True) as cache:
+        required_schema = {
+            "schema_version": monthly5_selector_cache.SCHEMA_VERSION,
+            "feature_schema": monthly5_selector_cache.FEATURE_SCHEMA,
+            "return_schema": monthly5_selector_cache.RETURN_SCHEMA,
+        }
+        for field, expected in required_schema.items():
+            if field not in cache.files:
+                raise ValueError(f"selector cache missing {field}")
+            actual = np.asarray(cache[field]).reshape(-1)[0]
+            if str(actual) != str(expected):
+                raise ValueError(
+                    f"selector cache {field} mismatch: expected {expected}, got {actual}"
+                )
+        for field in ("prefix_stable", "recursive_stable"):
+            if field not in cache.files or not bool(np.asarray(cache[field]).reshape(-1)[0]):
+                raise ValueError(f"selector cache {field} verification missing or false")
         payload = {
             "R": np.asarray(cache["R"], dtype="float64"),
             "F": np.asarray(cache["F"], dtype="float64"),
@@ -40,6 +55,13 @@ def load_cache(path=DEFAULT_CACHE_PATH):
             "keys": np.asarray(cache["keys"]).astype(str),
             "days": np.asarray(cache["days"]).astype(str),
             "fee": float(np.asarray(cache["fee"]).reshape(-1)[0]),
+            "schema_version": int(np.asarray(cache["schema_version"]).reshape(-1)[0]),
+            "feature_schema": str(np.asarray(cache["feature_schema"]).reshape(-1)[0]),
+            "return_schema": str(np.asarray(cache["return_schema"]).reshape(-1)[0]),
+            "cache_prefix_stable": bool(np.asarray(cache["prefix_stable"]).reshape(-1)[0]),
+            "cache_recursive_stable": bool(
+                np.asarray(cache["recursive_stable"]).reshape(-1)[0]
+            ),
         }
     expected = (len(payload["keys"]), len(payload["days"]))
     if payload["R"].shape != expected or payload["F"].shape != expected:
@@ -109,10 +131,22 @@ def target_day_regimes(cache_days, completed_4h_regimes):
 def summarize_4h_intervals(labels):
     valid = labels[labels.isin(REGIMES)]
     if valid.empty:
-        return {"counts": {}, "recent_intervals": []}
-    group_ids = valid.ne(valid.shift()).cumsum()
+        return {
+            "counts": {},
+            "percentages": {},
+            "latest": None,
+            "interval_count": 0,
+            "duration_bars": {},
+            "yearly": {},
+            "all_intervals": [],
+            "recent_intervals": [],
+        }
+    # Group on the original series so an unknown gap cannot join two intervals.
+    group_ids = labels.ne(labels.shift()).cumsum()
     intervals = []
-    for _, group in valid.groupby(group_ids):
+    for _, group in labels.groupby(group_ids):
+        if str(group.iloc[0]) not in REGIMES:
+            continue
         intervals.append(
             {
                 "regime": str(group.iloc[0]),
@@ -122,8 +156,38 @@ def summarize_4h_intervals(labels):
             }
         )
     counts = valid.value_counts().to_dict()
+    total = len(valid)
+    duration_bars = {}
+    for regime in REGIMES:
+        lengths = [row["bars"] for row in intervals if row["regime"] == regime]
+        duration_bars[regime] = {
+            "intervals": len(lengths),
+            "median": round(float(np.median(lengths)), 2) if lengths else 0.0,
+            "p90": round(float(np.percentile(lengths, 90)), 2) if lengths else 0.0,
+            "max": int(max(lengths)) if lengths else 0,
+        }
+    yearly = {}
+    for year, rows in valid.groupby(valid.index.year):
+        year_counts = rows.value_counts().to_dict()
+        year_total = len(rows)
+        yearly[str(year)] = {
+            regime: {
+                "bars": int(year_counts.get(regime, 0)),
+                "pct": round(float(year_counts.get(regime, 0)) / year_total * 100.0, 2),
+            }
+            for regime in REGIMES
+        }
     return {
         "counts": {regime: int(counts.get(regime, 0)) for regime in REGIMES},
+        "percentages": {
+            regime: round(float(counts.get(regime, 0)) / total * 100.0, 2)
+            for regime in REGIMES
+        },
+        "latest": intervals[-1],
+        "interval_count": len(intervals),
+        "duration_bars": duration_bars,
+        "yearly": yearly,
+        "all_intervals": intervals,
         "recent_intervals": intervals[-20:],
     }
 
@@ -300,7 +364,7 @@ def verify_prefix_stability(cache, regimes, config, full_result, use_regime):
         sliced = {
             key: value[:, :count] if key in {"R", "F"} else value[:count]
             for key, value in cache.items()
-            if key not in {"keys", "fee"}
+            if key in {"R", "F", "Xday", "days"}
         }
         sliced["keys"] = cache["keys"]
         sliced["fee"] = cache["fee"]
@@ -348,9 +412,8 @@ def build_report(cache_path=DEFAULT_CACHE_PATH):
             }
         )
     winner, growth_winner = select_development_variant(variants)
-    if winner is None:
-        winner = growth_winner
-    config, regime_result, baseline_result = computed[winner["name"]]
+    analysis_variant = winner or growth_winner
+    config, regime_result, baseline_result = computed[analysis_variant["name"]]
     regime_full = summarize_result(cache, regimes, regime_result, start=REPORT_START)
     baseline_full = summarize_result(cache, regimes, baseline_result, start=REPORT_START)
     regime_holdout = summarize_result(cache, regimes, regime_result, start=HOLDOUT_START)
@@ -374,6 +437,11 @@ def build_report(cache_path=DEFAULT_CACHE_PATH):
             "cache_end": str(cache["days"][-1]),
             "fee_fraction_in_cache": cache["fee"],
             "max_leverage": 5,
+            "schema_version": cache["schema_version"],
+            "feature_schema": cache["feature_schema"],
+            "return_schema": cache["return_schema"],
+            "cache_prefix_stable": cache["cache_prefix_stable"],
+            "cache_recursive_stable": cache["cache_recursive_stable"],
         },
         "regime_definition": {
             "up": "completed 4h close > MA25 by 0.6% and MA25 five-bar slope > 0.1%",
@@ -385,11 +453,13 @@ def build_report(cache_path=DEFAULT_CACHE_PATH):
         "selection": {
             "development_period": f"{REPORT_START}..{DEVELOPMENT_END}",
             "holdout_start": HOLDOUT_START,
-            "winner": winner["name"],
+            "winner": winner["name"] if winner else None,
+            "analysis_variant": analysis_variant["name"],
             "winner_config": config,
             "risk_gate": {"min_month_pct_gte": -25.0, "max_drawdown_pct_gte": -70.0},
             "growth_winner": growth_winner["name"],
-            "growth_winner_rejected_for_tail_risk": growth_winner["name"] != winner["name"],
+            "growth_winner_rejected_for_tail_risk": winner is None
+            or growth_winner["name"] != winner["name"],
             "variants": variants,
         },
         "regime_selector": {"full": regime_full, "holdout": regime_holdout},
@@ -409,15 +479,16 @@ def build_report(cache_path=DEFAULT_CACHE_PATH):
         },
         "bias_evidence": {
             **prefix,
-            "recursive_stable": False,
-            "recursive_blocker": "candidate cache features and returns were not rebuilt from each prefix",
+            "recursive_stable": cache["cache_recursive_stable"],
+            "recursive_source": "transparent cache generator recursive prefix rebuild",
         },
         "prefix_stable": prefix["prefix_stable"],
-        "recursive_stable": False,
+        "recursive_stable": cache["cache_recursive_stable"],
         "shadow_only": True,
         "deployment_ready": False,
         "deployment_blockers": [
-            "recursive_analysis_missing",
+            *([] if winner else ["development_tail_risk_gate_failed"]),
+            "monthly_return_target_not_consistent",
             "candidate_matched_tick_execution_evidence_missing",
             "live_shadow_promotion_not_met",
         ],

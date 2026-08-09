@@ -4,9 +4,61 @@ import numpy as np
 import pandas as pd
 
 import monthly5_regime_selector
+import monthly5_selector_cache
 
 
 class Monthly5RegimeSelectorTests(unittest.TestCase):
+    def test_interval_summary_preserves_unknown_gap(self):
+        labels = pd.Series(
+            ["up", "up", "unknown", "up", "range"],
+            index=pd.date_range("2026-01-01", periods=5, freq="4h", tz="UTC"),
+        )
+        summary = monthly5_regime_selector.summarize_4h_intervals(labels)
+        self.assertEqual(summary["interval_count"], 3)
+        self.assertEqual([row["bars"] for row in summary["all_intervals"]], [2, 1, 1])
+        self.assertEqual(summary["latest"]["regime"], "range")
+
+    def test_load_cache_rejects_opaque_schema(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "opaque.npz"
+            np.savez(
+                path,
+                R=np.zeros((1, 1)),
+                F=np.zeros((1, 1)),
+                Xday=np.zeros((1, 19)),
+                keys=np.array(["buy_hold|lev1|stopNone|targetNone|redlev1.0"]),
+                days=np.array(["2026-01-01"]),
+                fee=np.array([0.0008]),
+            )
+            with self.assertRaisesRegex(ValueError, "missing schema_version"):
+                monthly5_regime_selector.load_cache(path)
+
+    def test_load_cache_accepts_transparent_schema(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "causal.npz"
+            np.savez(
+                path,
+                R=np.zeros((1, 1)),
+                F=np.zeros((1, 1)),
+                Xday=np.zeros((1, 19)),
+                keys=np.array(["buy_hold|lev1|stopNone|targetNone|redlev1.0"]),
+                days=np.array(["2026-01-01"]),
+                fee=np.array([0.0008]),
+                schema_version=np.array([monthly5_selector_cache.SCHEMA_VERSION]),
+                feature_schema=np.array([monthly5_selector_cache.FEATURE_SCHEMA]),
+                return_schema=np.array([monthly5_selector_cache.RETURN_SCHEMA]),
+                prefix_stable=np.array([True]),
+                recursive_stable=np.array([True]),
+            )
+            cache = monthly5_regime_selector.load_cache(path)
+            self.assertEqual(cache["feature_schema"], monthly5_selector_cache.FEATURE_SCHEMA)
+
     def test_target_regime_uses_last_completed_4h_bar(self):
         states = pd.Series(
             ["up", "range", "down"],
