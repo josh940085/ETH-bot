@@ -89,6 +89,8 @@ def simulate_account_path(
     config,
     *,
     entry_allowed=None,
+    risk_profiles=None,
+    leverage=1.0,
     round_trip_fee=monthly5_risk_cache.ROUND_TRIP_FEE,
 ):
     close = pd.to_numeric(frame_5m["close"], errors="coerce").to_numpy(dtype="float64")
@@ -110,6 +112,9 @@ def simulate_account_path(
     )
     if len(entry_allowed) != count:
         raise ValueError("entry_allowed length must match frame")
+    leverage = float(leverage)
+    if not 0.0 < leverage <= 5.0:
+        raise ValueError("leverage must be greater than zero and at most 5")
     one_way_fee = float(round_trip_fee) / 2.0
     month_keys = frame_5m.index.tz_localize(None).to_period("M")
     day_keys = frame_5m.index.floor("D")
@@ -125,10 +130,12 @@ def simulate_account_path(
     recovery_active = False
     active = 0.0
     entry = 0.0
+    active_leverage = leverage
     cooldown = 0
     previous_scale = 1.0
-    previous_position = 0.0
+    previous_unscaled_exposure = 0.0
     previous_strategy_id = None
+    active_risk_profile = volatility.RISK_PROFILE
     trigger_count = 0
 
     for index, month in enumerate(month_keys):
@@ -163,9 +170,9 @@ def simulate_account_path(
         strategy_id = 100 if recovery_active else int(primary_ids[index])
         strategy_changed = previous_strategy_id is not None and strategy_id != previous_strategy_id
         previous_close = close[index - 1] if index else close[index]
-        turnover = 0.0
+        turnover_exposure = 0.0
         if active and (wanted != active or strategy_changed):
-            turnover += abs(active)
+            turnover_exposure += abs(active) * active_leverage
             active = 0.0
             entry = 0.0
         if strategy_changed:
@@ -176,19 +183,36 @@ def simulate_account_path(
             elif wanted and entry_allowed[index]:
                 active = wanted
                 entry = previous_close
-                turnover += abs(active)
+                profile_override = (risk_profiles or {}).get(strategy_id)
+                active_risk_profile = profile_override or volatility.RISK_PROFILE
+                active_leverage = float(
+                    profile_override.get("leverage", leverage)
+                    if profile_override is not None
+                    else leverage
+                )
+                if not 0.0 < active_leverage <= 5.0:
+                    raise ValueError("strategy leverage must be greater than zero and at most 5")
+                turnover_exposure += abs(active) * active_leverage
 
         exit_price = None
         if active > 0.0:
-            stop_price = entry * (1.0 - volatility.RISK_PROFILE["stop_pct"])
-            target_price = entry * (1.0 + volatility.RISK_PROFILE["target_pct"])
+            stop_price = entry * (
+                1.0 - float(active_risk_profile["stop_pct"]) / active_leverage
+            )
+            target_price = entry * (
+                1.0 + float(active_risk_profile["target_pct"]) / active_leverage
+            )
             if low[index] <= stop_price:
                 exit_price = min(stop_price, open_price[index])
             elif high[index] >= target_price:
                 exit_price = target_price
         elif active < 0.0:
-            stop_price = entry * (1.0 + volatility.RISK_PROFILE["stop_pct"])
-            target_price = entry * (1.0 - volatility.RISK_PROFILE["target_pct"])
+            stop_price = entry * (
+                1.0 + float(active_risk_profile["stop_pct"]) / active_leverage
+            )
+            target_price = entry * (
+                1.0 - float(active_risk_profile["target_pct"]) / active_leverage
+            )
             if high[index] >= stop_price:
                 exit_price = max(stop_price, open_price[index])
             elif low[index] <= target_price:
@@ -200,15 +224,17 @@ def simulate_account_path(
             mark = float(exit_price) if exit_price is not None else close[index]
             pnl = active * (mark / previous_close - 1.0)
         if exit_price is not None:
-            turnover += abs(active)
+            turnover_exposure += abs(active) * active_leverage
             active = 0.0
             entry = 0.0
-            cooldown = max(0, int(volatility.RISK_PROFILE["cooldown_bars"]))
-        positions[index] = actual * scale
+            cooldown = max(0, int(active_risk_profile["cooldown_bars"]))
+        positions[index] = actual * scale * active_leverage
 
-        scale_turnover = abs(scale - previous_scale) * abs(previous_position)
-        cost_turnover = turnover * scale + scale_turnover
-        factor = 1.0 + pnl * scale - cost_turnover * one_way_fee
+        scale_turnover = (
+            abs(scale - previous_scale) * abs(previous_unscaled_exposure)
+        )
+        cost_turnover = turnover_exposure * scale + scale_turnover
+        factor = 1.0 + pnl * scale * active_leverage - cost_turnover * one_way_fee
         factor = max(factor, 1e-9)
         factors[index] = factor
         month_equity *= factor
@@ -235,7 +261,7 @@ def simulate_account_path(
             floor_guarded = True
 
         previous_scale = scale
-        previous_position = actual
+        previous_unscaled_exposure = actual * active_leverage
         previous_strategy_id = strategy_id
     return factors, scales, recovery_flags, trigger_count, positions
 

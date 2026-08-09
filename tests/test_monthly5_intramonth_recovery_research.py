@@ -60,6 +60,30 @@ class Monthly5IntramonthRecoveryResearchTests(unittest.TestCase):
         self.assertTrue(flags[2])
         self.assertEqual(scales[2], 0.5)
 
+    def test_strategy_specific_risk_profile_controls_stop(self):
+        frame = self._frame([100.0, 100.0, 100.0, 100.0])
+        frame.loc[frame.index[2], "low"] = 98.0
+        desired = np.ones(len(frame))
+        factors, _, _, _, positions = recovery.simulate_account_path(
+            frame,
+            desired,
+            np.full(len(frame), 10, dtype="int32"),
+            desired,
+            {
+                "name": "none",
+                "mode": "none",
+                "trigger": None,
+                "scale": 0.0,
+                "exit": 0.0,
+            },
+            risk_profiles={
+                10: {"stop_pct": 0.01, "target_pct": 0.03, "cooldown_bars": 2}
+            },
+            round_trip_fee=0.0,
+        )
+        self.assertEqual(positions[2], 1.0)
+        self.assertAlmostEqual(factors[2], 0.99)
+
 
 if __name__ == "__main__":
     unittest.main()
