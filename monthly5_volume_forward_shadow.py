@@ -27,6 +27,8 @@ RANGE_GRACE_BARS = 6
 VOLUME_WINDOW = 24
 MIN_VOLUME_RATIO = 0.5
 MIN_FORWARD_DAYS = 30.0
+MIN_FORWARD_COVERAGE = 0.80
+MAX_FLAT_TIME_PCT = 66.8247
 ACCOUNT_CONFIG = {
     "name": "baseline_no_recovery",
     "mode": "none",
@@ -220,13 +222,18 @@ def update_files(state_path, history_path, probe, *, now_ts=None):
     baseline = _paper_summary(rows, "baseline_signal")
     first_ts = int(_safe_float(rows[0].get("bar_close_ts_ms"), 0.0)) // 1000 if rows else now
     span_hours = max(0.0, (now - first_ts) / 3600.0)
+    minimum_rows = int(MIN_FORWARD_DAYS * 24.0 * 12.0 * MIN_FORWARD_COVERAGE)
     blockers = []
     if span_hours < MIN_FORWARD_DAYS * 24.0:
         blockers.append("forward_span_lt_30d")
-    if candidate.get("months_ge_5", 0) < candidate.get("months", 0):
+    if candidate["rows"] < minimum_rows:
+        blockers.append("forward_rows_insufficient")
+    if span_hours < MIN_FORWARD_DAYS * 24.0 or candidate["return_pct"] < 5.0:
         blockers.append("forward_month_target_unproven")
     if candidate["return_pct"] < baseline["return_pct"]:
         blockers.append("forward_underperforms_baseline")
+    if candidate["flat_time_pct"] > MAX_FLAT_TIME_PCT:
+        blockers.append("forward_flat_time_high")
     state = {
         "schema_version": SCHEMA_VERSION,
         "candidate_id": CANDIDATE_ID,
@@ -237,6 +244,8 @@ def update_files(state_path, history_path, probe, *, now_ts=None):
         "updated_ts": now,
         "trial_started_ts": first_ts,
         "span_hours": round(span_hours, 4),
+        "minimum_rows": minimum_rows,
+        "max_flat_time_pct": MAX_FLAT_TIME_PCT,
         "latest_probe": dict(probe),
         "candidate_paper": candidate,
         "baseline_paper": baseline,

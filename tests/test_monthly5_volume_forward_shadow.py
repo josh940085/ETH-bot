@@ -42,6 +42,8 @@ class Monthly5VolumeForwardShadowTests(unittest.TestCase):
             self.assertEqual(len(rows), 1)
             self.assertFalse(state["execution_allowed"])
             self.assertIn("forward_span_lt_30d", state["promotion_blockers"])
+            self.assertIn("forward_rows_insufficient", state["promotion_blockers"])
+            self.assertIn("forward_month_target_unproven", state["promotion_blockers"])
             self.assertEqual(verifier.verify(state, rows, 1_000_000_000.0), [])
 
 
