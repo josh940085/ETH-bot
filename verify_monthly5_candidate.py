@@ -258,8 +258,9 @@ def main() -> int:
     best = summary["top"][0]
     audit = _candidate_audit(summary, spec)
     print(
-        "PASS "
-        f"{best.get('name')} months_ge_5={best.get('months_ge_5')} "
+        "PASS monthly5_candidate_artifact_consistency "
+        f"candidate={best.get('name')} deployment_evidence=not_checked "
+        f"months_ge_5={best.get('months_ge_5')} "
         f"months_ge_0={best.get('months_ge_0')} "
         f"complete_months_ge_5={audit.get('complete_months_ge_floor', 0)}/{audit.get('complete_months', 0)} "
         f"complete_hit_rate_pct={audit.get('complete_hit_rate_pct', 0.0)} "

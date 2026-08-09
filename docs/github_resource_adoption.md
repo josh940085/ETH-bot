@@ -90,3 +90,15 @@ Run the current validator from the repository root:
 ```
 
 `research_only` means the monthly metrics passed but trade-level fee and slippage evidence is still missing. It must not promote the live strategy.
+
+The final go-live gate also requires reproducible bias and execution evidence:
+
+```sh
+./.venv/bin/python verify_monthly5_go_live.py \
+  --strategy-source path/to/reproducible_strategy.py \
+  --prefix-replay-report path/to/prefix_recursive_report.json \
+  --trade-evidence path/to/binance_tick_fills.csv
+```
+
+An aggregate monthly artifact alone cannot pass this gate, even when every
+historical month reports at least 5%.

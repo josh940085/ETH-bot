@@ -6,6 +6,9 @@ import subprocess
 import sys
 
 
+SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
+
+
 def _run_step(name: str, command: list[str]) -> tuple[bool, str]:
     result = subprocess.run(
         command,
@@ -23,6 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-age-sec", type=float, default=900.0)
     parser.add_argument("--skip-history", action="store_true")
+    parser.add_argument("--strategy-source")
+    parser.add_argument("--prefix-replay-report")
+    parser.add_argument("--trade-evidence")
     args = parser.parse_args(argv)
 
     runtime_command = [
@@ -34,8 +40,25 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_history:
         runtime_command.append("--require-history")
 
+    bias_command = [sys.executable, "monthly5_bias_audit.py"]
+    if args.strategy_source:
+        bias_command.extend(["--strategy-source", args.strategy_source])
+    if args.prefix_replay_report:
+        bias_command.extend(["--prefix-replay-report", args.prefix_replay_report])
+
+    execution_evidence_command = [
+        sys.executable,
+        "monthly5_batch_validator.py",
+        "--candidate",
+        SELECTED_CANDIDATE,
+    ]
+    if args.trade_evidence:
+        execution_evidence_command.extend(["--trade-evidence", args.trade_evidence])
+
     steps = [
-        ("candidate", [sys.executable, "verify_monthly5_candidate.py"]),
+        ("artifact_consistency", [sys.executable, "verify_monthly5_candidate.py"]),
+        ("bias", bias_command),
+        ("execution_evidence", execution_evidence_command),
         ("runtime", runtime_command),
         ("account", [sys.executable, "verify_monthly5_account.py"]),
         (
