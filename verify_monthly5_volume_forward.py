@@ -23,8 +23,10 @@ def verify(state, rows, max_age_sec):
         failures.append("state execution_allowed must be false")
     if not rows:
         failures.append("history is empty")
-    elif rows[-1].get("execution_allowed") is not False:
-        failures.append("history execution_allowed must be false")
+    elif any(row.get("execution_allowed") is not False for row in rows):
+        failures.append("all history rows must set execution_allowed=false")
+    elif any(row.get("shadow_only") is not True for row in rows):
+        failures.append("all history rows must set shadow_only=true")
     age = time.time() - float(state.get("updated_ts") or 0)
     if age > max_age_sec:
         failures.append(f"state stale age={age:.1f}s")
