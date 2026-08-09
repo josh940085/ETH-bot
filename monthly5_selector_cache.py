@@ -251,15 +251,27 @@ def embed_verification(cache, verification):
 def load_history(start_day, end_day):
     start = pd.Timestamp(start_day, tz="UTC") - pd.Timedelta(days=4)
     end = pd.Timestamp(end_day, tz="UTC") + pd.Timedelta(days=1)
-    frame = market_history.fetch_klines_from_binance_history(
-        "BTCUSDT",
-        "5m",
-        int(start.timestamp() * 1000),
-        int(end.timestamp() * 1000),
-    )
+    archive_start = max(start, pd.Timestamp("2020-01-01", tz="UTC"))
+    now = pd.Timestamp.now(tz="UTC")
+    current_month_start = now.normalize().replace(day=1)
+    archive_end = min(end, current_month_start)
+    if archive_end > archive_start:
+        frame = market_history.fetch_klines_from_binance_history(
+            "BTCUSDT",
+            "5m",
+            int(archive_start.timestamp() * 1000),
+            int((archive_end - pd.Timedelta(milliseconds=1)).timestamp() * 1000),
+        )
+    else:
+        frame = pd.DataFrame(columns=("open", "high", "low", "close", "volume"))
+        frame.index = pd.DatetimeIndex([], tz="UTC")
+        frame.attrs["kline_source"] = "binance_history_um"
     first_expected_close = start + pd.Timedelta(minutes=5) - pd.Timedelta(milliseconds=1)
     if frame.empty or frame.index.min() > first_expected_close:
-        prefix_end = end if frame.empty else frame.index.min() - pd.Timedelta(milliseconds=1)
+        prefix_end = min(
+            end,
+            archive_end if frame.empty else frame.index.min() - pd.Timedelta(milliseconds=1),
+        )
         prefix = market_history.fetch_klines_from_binance_api(
             "BTCUSDT",
             "5m",
@@ -271,6 +283,21 @@ def load_history(start_day, end_day):
             frame = pd.concat([prefix, frame]).sort_index()
             frame = frame[~frame.index.duplicated(keep="last")]
             frame.attrs["kline_source"] = f"binance_futures_api+{archive_source}"
+    suffix_start = max(archive_end, frame.index.max() + pd.Timedelta(milliseconds=1))
+    if suffix_start < end:
+        suffix = market_history.fetch_klines_from_binance_api(
+            "BTCUSDT",
+            "5m",
+            int(suffix_start.timestamp() * 1000),
+            int(end.timestamp() * 1000),
+        )
+        if not suffix.empty:
+            prior_source = frame.attrs.get("kline_source", "binance_history_um")
+            frame = pd.concat([frame, suffix]).sort_index()
+            frame = frame[~frame.index.duplicated(keep="last")]
+            if not str(prior_source).startswith("binance_futures_api+"):
+                prior_source = f"binance_futures_api+{prior_source}"
+            frame.attrs["kline_source"] = prior_source
     return frame
 
 
