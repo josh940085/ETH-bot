@@ -88,6 +88,7 @@ def simulate_account_path(
     recovery_desired,
     config,
     *,
+    entry_allowed=None,
     round_trip_fee=monthly5_risk_cache.ROUND_TRIP_FEE,
 ):
     close = pd.to_numeric(frame_5m["close"], errors="coerce").to_numpy(dtype="float64")
@@ -101,6 +102,14 @@ def simulate_account_path(
     factors = np.ones(count, dtype="float64")
     scales = np.ones(count, dtype="float64")
     recovery_flags = np.zeros(count, dtype="bool")
+    positions = np.zeros(count, dtype="float64")
+    entry_allowed = (
+        np.ones(count, dtype="bool")
+        if entry_allowed is None
+        else np.asarray(entry_allowed, dtype="bool")
+    )
+    if len(entry_allowed) != count:
+        raise ValueError("entry_allowed length must match frame")
     one_way_fee = float(round_trip_fee) / 2.0
     month_keys = frame_5m.index.tz_localize(None).to_period("M")
     day_keys = frame_5m.index.floor("D")
@@ -164,7 +173,7 @@ def simulate_account_path(
         if not active:
             if cooldown > 0:
                 cooldown -= 1
-            elif wanted:
+            elif wanted and entry_allowed[index]:
                 active = wanted
                 entry = previous_close
                 turnover += abs(active)
@@ -195,6 +204,7 @@ def simulate_account_path(
             active = 0.0
             entry = 0.0
             cooldown = max(0, int(volatility.RISK_PROFILE["cooldown_bars"]))
+        positions[index] = actual * scale
 
         scale_turnover = abs(scale - previous_scale) * abs(previous_position)
         cost_turnover = turnover * scale + scale_turnover
@@ -227,7 +237,7 @@ def simulate_account_path(
         previous_scale = scale
         previous_position = actual
         previous_strategy_id = strategy_id
-    return factors, scales, recovery_flags, trigger_count
+    return factors, scales, recovery_flags, trigger_count, positions
 
 
 def _without_monthly(summary):
@@ -254,7 +264,7 @@ def verify_prefix_stability(frame_5m, config, full_factors):
     for cutoff in ("2021-12-31", "2023-12-31", "2025-12-31"):
         cutoff_ts = pd.Timestamp(cutoff, tz="UTC") + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
         truncated = frame_5m.loc[frame_5m.index <= cutoff_ts]
-        factors, _, _, _ = evaluate_config(truncated, config)
+        factors, _, _, _, _ = evaluate_config(truncated, config)
         stable = np.array_equal(np.asarray(full_factors)[: len(truncated)], np.asarray(factors))
         checks.append({"cutoff": cutoff, "bars": len(truncated), "stable": bool(stable)})
     return {
@@ -272,7 +282,7 @@ def build_report(frame_5m):
     recovery_paths = build_recovery_paths(frame_5m, primary_desired, primary_ids)
     candidates = []
     for config in recovery_configs():
-        factors, scales, recovery_flags, trigger_count = simulate_account_path(
+        factors, scales, recovery_flags, trigger_count, positions = simulate_account_path(
             frame_5m,
             primary_desired,
             primary_ids,
@@ -312,6 +322,7 @@ def build_report(frame_5m):
                 ),
                 "trigger_count": trigger_count,
                 "recovery_time_pct": round(float(np.mean(recovery_flags)) * 100.0, 4),
+                "actual_exposure_pct": round(float(np.mean(positions != 0.0)) * 100.0, 4),
                 "_factors": factors,
                 "_scales": scales,
             }
@@ -344,6 +355,7 @@ def build_report(frame_5m):
             "config": winner["config"],
             "trigger_count": winner["trigger_count"],
             "recovery_time_pct": winner["recovery_time_pct"],
+            "actual_exposure_pct": winner["actual_exposure_pct"],
         },
         "training": winner["training"],
         "validation": winner["validation"],
@@ -364,6 +376,7 @@ def build_report(frame_5m):
                 "holdout_diagnostic_only": _without_monthly(row["holdout_diagnostic"]),
                 "trigger_count": row["trigger_count"],
                 "recovery_time_pct": row["recovery_time_pct"],
+                "actual_exposure_pct": row["actual_exposure_pct"],
             }
             for row in sorted(candidates, key=specialist.selection_rank, reverse=True)[:20]
         ],

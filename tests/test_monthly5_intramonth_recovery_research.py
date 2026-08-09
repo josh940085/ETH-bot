@@ -32,7 +32,7 @@ class Monthly5IntramonthRecoveryResearchTests(unittest.TestCase):
             profile_ids,
         )
         expected, expected_scales = volatility.apply_components(frame, components)
-        actual, scales, flags, triggers = recovery.simulate_account_path(
+        actual, scales, flags, triggers, positions = recovery.simulate_account_path(
             frame,
             desired,
             profile_ids,
@@ -43,11 +43,12 @@ class Monthly5IntramonthRecoveryResearchTests(unittest.TestCase):
         np.testing.assert_allclose(scales, expected_scales)
         self.assertFalse(flags.any())
         self.assertEqual(triggers, 0)
+        self.assertTrue((positions != 0.0).any())
 
     def test_drawdown_activates_recovery_on_next_bar(self):
         frame = self._frame([100.0, 99.0, 99.0, 99.0])
         desired = np.ones(len(frame))
-        _, scales, flags, triggers = recovery.simulate_account_path(
+        _, scales, flags, triggers, _ = recovery.simulate_account_path(
             frame,
             desired,
             np.zeros(len(frame), dtype="int32"),
