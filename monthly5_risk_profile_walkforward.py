@@ -124,7 +124,14 @@ def candidate_score(history, mode):
     return mean + 0.50 * q25 + 0.05 * hit_rate + 0.01 * nonnegative
 
 
-def select_monthly_profiles(frame_5m, standalone_factors, *, lookback_months, score_mode):
+def select_monthly_profiles(
+    frame_5m,
+    standalone_factors,
+    *,
+    lookback_months,
+    score_mode,
+    profiles=PROFILE_CONFIGS,
+):
     month_keys = frame_5m.index.tz_localize(None).to_period("M")
     months = month_keys.unique()
     matrix = np.zeros((len(standalone_factors), len(months)), dtype="float64")
@@ -140,7 +147,7 @@ def select_monthly_profiles(frame_5m, standalone_factors, *, lookback_months, sc
     selections = [
         {
             "month": str(month),
-            "profile": PROFILE_CONFIGS[int(selected_months[index])]["name"],
+            "profile": profiles[int(selected_months[index])]["name"],
             "switched": bool(index and selected_months[index] != selected_months[index - 1]),
             "history_start": str(months[max(0, index - int(lookback_months))]) if index else "",
             "history_end": str(months[index - 1]) if index else "",
