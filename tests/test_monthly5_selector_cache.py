@@ -27,6 +27,13 @@ class Monthly5SelectorCacheTests(unittest.TestCase):
         self.assertEqual(signal.iloc[0], 0.0)
         self.assertTrue((signal.iloc[1:] == 1.0).all())
 
+    def test_candidate_library_includes_short_only_regime_strategies(self):
+        prefixes = monthly5_selector_cache.strategy_prefixes()
+        self.assertIn("ma6_24_sf", prefixes)
+        self.assertIn("mom48_sf", prefixes)
+        self.assertIn("don24_sf", prefixes)
+        self.assertTrue(any("_sf|" in key for key in monthly5_selector_cache.candidate_keys()))
+
     def test_fee_is_charged_on_position_turnover(self):
         frame = self._frame(3)
         position = pd.Series([0.0, 1.0, 1.0], index=frame.index)

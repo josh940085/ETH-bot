@@ -29,9 +29,10 @@ DEFAULT_REPORT = Path(
 
 def strategy_prefixes():
     prefixes = ["buy_hold"]
-    prefixes.extend(f"ma{fast}_{slow}_{mode}" for fast, slow in MA_PAIRS for mode in ("lf", "ls"))
-    prefixes.extend(f"mom{window}_{mode}" for window in MOMENTUM_WINDOWS for mode in ("lf", "ls"))
-    prefixes.extend(f"don{window}_{mode}" for window in DONCHIAN_WINDOWS for mode in ("lf", "ls"))
+    modes = ("lf", "ls", "sf")
+    prefixes.extend(f"ma{fast}_{slow}_{mode}" for fast, slow in MA_PAIRS for mode in modes)
+    prefixes.extend(f"mom{window}_{mode}" for window in MOMENTUM_WINDOWS for mode in modes)
+    prefixes.extend(f"don{window}_{mode}" for window in DONCHIAN_WINDOWS for mode in modes)
     return prefixes
 
 
