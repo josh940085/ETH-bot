@@ -48,6 +48,7 @@ from sklearn.preprocessing import StandardScaler
 from local_chat import extract_chat_text as _extract_chat_text
 import monthly5_shadow
 import monthly5_research_selector
+import monthly5_volume_forward_shadow
 from n8n_client import post_n8n_notification
 from runtime_config import (
     env_float as _safe_float_env,
@@ -208,6 +209,12 @@ TELEGRAM_POLL_BACKOFF_MAX = 60.0
 POSITION_PANEL_FILE = data_path("docs", "position.json")
 MONTHLY5_SHADOW_STATE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_monthly5_shadow_state.json")
 MONTHLY5_SHADOW_HISTORY_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_monthly5_shadow_history.jsonl")
+MONTHLY5_VOLUME_FORWARD_STATE_PATH = data_path(
+    f"{SYMBOL_DATA_PREFIX}_monthly5_volume_forward_state.json"
+)
+MONTHLY5_VOLUME_FORWARD_HISTORY_PATH = data_path(
+    f"{SYMBOL_DATA_PREFIX}_monthly5_volume_forward_history.jsonl"
+)
 PENDING_TRAINING_SAMPLE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_pending_training_sample.json")
 MAINTENANCE_REPORT_FILE = data_path("maintenance_latest_report.json")
 PROGRAM_LOG_FILE = data_path("..", "logs", "program.log").resolve()
@@ -6139,6 +6146,18 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
                     market_selection["rationale"] = "持倉同類市場組近期負報酬，降至低曝險觀察"
                 market_selection["reason_codes"] = sorted(reason_codes)
         snapshot["market_selection"] = market_selection
+        volume_probe = (
+            decision.get("monthly5_volume_forward_probe")
+            if isinstance(decision.get("monthly5_volume_forward_probe"), dict)
+            else {}
+        )
+        if volume_probe:
+            volume_forward_state = monthly5_volume_forward_shadow.update_files(
+                MONTHLY5_VOLUME_FORWARD_STATE_PATH,
+                MONTHLY5_VOLUME_FORWARD_HISTORY_PATH,
+                volume_probe,
+            )
+            POSITION_PANEL_STATE["monthly5_volume_forward_shadow"] = volume_forward_state
         guard = monthly5_shadow.build_execution_guard(
             snapshot,
             direction=effective_strategy_signal,
@@ -6960,6 +6979,9 @@ def sync_position_panel(current_price=None):
             "strategy_context": dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
             "monthly5_shadow": dict(monthly5_shadow_state or {}),
+            "monthly5_volume_forward_shadow": dict(
+                POSITION_PANEL_STATE.get("monthly5_volume_forward_shadow") or {}
+            ),
             "monthly5_execution_guard": dict(POSITION_PANEL_STATE.get("monthly5_execution_guard") or {}),
             "monthly5_position_guard": dict(monthly5_position_guard_state or {}),
             "monthly5_signal_override": dict(POSITION_PANEL_STATE.get("monthly5_signal_override") or {}),
@@ -15157,10 +15179,15 @@ def build_trade_signal_snapshot(
         volume_spike=volume_spike,
     )
     monthly5_selector_decision = _build_monthly5_live_selector_decision(df_1d, df_4h=df_4h)
+    monthly5_volume_forward_probe = monthly5_volume_forward_shadow.build_live_probe(
+        df_4h,
+        df_5m,
+    )
     return {
         "features": features,
         "monthly5_live_selector_input": dict(monthly5_selector_decision.get("input_probe") or {}),
         "monthly5_live_selector_decision": monthly5_selector_decision,
+        "monthly5_volume_forward_probe": monthly5_volume_forward_probe,
         "score": score,
         "auxiliary_score": auxiliary_score,
         "primary_indicator": primary_indicator,
