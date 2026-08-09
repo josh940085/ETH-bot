@@ -65,6 +65,16 @@ def completed_15m_rsi(frame_5m):
     return rsi
 
 
+def completed_daily_trend(frame_5m, *, window):
+    close = frame_5m["close"].resample("1D", label="right", closed="right").last().dropna()
+    average = close.rolling(int(window), min_periods=int(window)).mean()
+    trend = pd.Series("unknown", index=close.index, dtype="object")
+    trend.loc[close > average] = "up"
+    trend.loc[close < average] = "down"
+    trend.index = trend.index + pd.Timedelta(minutes=5)
+    return trend
+
+
 def align_completed_series(target_index, values, default):
     source = values.rename("value").reset_index()
     source.columns = ["available_at", "value"]
@@ -85,12 +95,35 @@ def align_completed_series(target_index, values, default):
     return merged["value"].fillna(default).to_numpy()
 
 
-def build_regime_position(frame_5m, labels, rsi, *, range_mode, rsi_low, rsi_high):
+def build_regime_position(
+    frame_5m,
+    labels,
+    rsi,
+    *,
+    range_mode,
+    rsi_low,
+    rsi_high,
+    daily_trend=None,
+    daily_alignment_mode="none",
+):
     regimes = align_completed_series(frame_5m.index, labels, "unknown").astype(str)
     rsi_values = align_completed_series(frame_5m.index, rsi, 50.0).astype("float64")
+    daily_values = (
+        align_completed_series(frame_5m.index, daily_trend, "unknown").astype(str)
+        if daily_trend is not None
+        else np.full(len(frame_5m), "unknown", dtype="object")
+    )
     position = np.zeros(len(frame_5m), dtype="float64")
     range_state = 0.0
     for index, regime in enumerate(regimes):
+        aligned = daily_values[index]
+        if daily_alignment_mode == "strict" and regime in {"up", "down"} and aligned != regime:
+            regime = "range"
+        elif daily_alignment_mode == "no_conflict" and (
+            (regime == "up" and aligned == "down")
+            or (regime == "down" and aligned == "up")
+        ):
+            regime = "range"
         if regime == "up":
             position[index] = 1.0
         elif regime == "down":
@@ -121,6 +154,11 @@ def apply_monthly_lock(
     lock_floor=LOCK_FLOOR,
     daily_stop=None,
     monthly_stop=MONTHLY_STOP,
+    monthly_recovery_scale=0.0,
+    recovery_exit=-0.03,
+    recovery_pnl=None,
+    recovery_turnover=None,
+    recovery_actual=None,
     round_trip_fee=monthly5_risk_cache.ROUND_TRIP_FEE,
 ):
     one_way_fee = float(round_trip_fee) / 2.0
@@ -132,29 +170,52 @@ def apply_monthly_lock(
     locked = False
     guarded = False
     daily_guarded = False
-    monthly_guarded = False
+    monthly_recovery = False
     previous_month = None
     previous_day = None
     previous_scale = 1.0
     previous_position = 0.0
+    previous_using_recovery = False
+    recovery_pnl = np.asarray(recovery_pnl) if recovery_pnl is not None else None
+    recovery_turnover = (
+        np.asarray(recovery_turnover) if recovery_turnover is not None else None
+    )
+    recovery_actual = np.asarray(recovery_actual) if recovery_actual is not None else None
     day_keys = frame_5m.index.floor("D")
     for index, month in enumerate(month_keys):
         if month != previous_month:
             month_equity = 1.0
             locked = False
             guarded = False
-            monthly_guarded = False
+            monthly_recovery = False
             previous_month = month
         day = day_keys[index]
         if day != previous_day:
             day_equity = 1.0
             daily_guarded = False
             previous_day = day
-        risk_off = guarded or daily_guarded or monthly_guarded
-        scale = 0.0 if risk_off else (float(lock_scale) if locked else 1.0)
+        risk_off = guarded or daily_guarded
+        using_recovery = bool(monthly_recovery and recovery_pnl is not None)
+        if risk_off:
+            scale = 0.0
+        elif locked:
+            scale = float(lock_scale)
+        elif monthly_recovery:
+            scale = max(0.0, min(1.0, float(monthly_recovery_scale)))
+        else:
+            scale = 1.0
+        active_pnl = recovery_pnl if using_recovery else pnl
+        active_turnover = recovery_turnover if using_recovery else turnover
+        active_actual = recovery_actual if using_recovery else actual
         scale_turnover = abs(scale - previous_scale) * abs(previous_position)
-        cost_turnover = float(turnover[index]) * scale + scale_turnover
-        factor = 1.0 + float(leverage) * float(pnl[index]) * scale
+        cost_turnover = float(active_turnover[index]) * scale + scale_turnover
+        if using_recovery != previous_using_recovery:
+            # Conservatively close the prior path and open the alternate path.
+            cost_turnover += (
+                abs(previous_position) * previous_scale
+                + abs(float(active_actual[index])) * scale
+            )
+        factor = 1.0 + float(leverage) * float(active_pnl[index]) * scale
         factor -= float(leverage) * cost_turnover * one_way_fee
         factor = max(factor, 1e-9)
         factors[index] = factor
@@ -163,14 +224,21 @@ def apply_monthly_lock(
         day_equity *= factor
         if daily_stop is not None and day_equity <= 1.0 + float(daily_stop):
             daily_guarded = True
-        if monthly_stop is not None and month_equity <= 1.0 + float(monthly_stop):
-            monthly_guarded = True
+        if (
+            not monthly_recovery
+            and monthly_stop is not None
+            and month_equity <= 1.0 + float(monthly_stop)
+        ):
+            monthly_recovery = True
+        elif monthly_recovery and month_equity >= 1.0 + float(recovery_exit):
+            monthly_recovery = False
         if not locked and month_equity >= 1.0 + float(lock_trigger):
             locked = True
         elif locked and month_equity < 1.0 + float(lock_floor):
             guarded = True
         previous_scale = scale
-        previous_position = float(actual[index])
+        previous_position = float(active_actual[index])
+        previous_using_recovery = using_recovery
     return factors, scales
 
 
