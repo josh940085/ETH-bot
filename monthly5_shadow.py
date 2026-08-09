@@ -1859,15 +1859,12 @@ def build_market_selection(
             {"active_underperforming_plan", "recovery_probe_probe_failed"}
         )
     )
-    if readiness_underperforming_block and shadow_action in {
-        "evaluate_long",
-        "evaluate_short",
-        "reduced_exposure",
-    }:
-        suppressed_plan = selected_plan
-        suppressed_action = shadow_action
-        suppressed_key = "|".join((selected_plan, shadow_action, market_bias, market_state))
-        suppressed_exposure_cap = exposure_cap
+    if readiness_underperforming_block:
+        if shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"}:
+            suppressed_plan = selected_plan
+            suppressed_action = shadow_action
+            suppressed_key = "|".join((selected_plan, shadow_action, market_bias, market_state))
+            suppressed_exposure_cap = exposure_cap
         selected_plan = "underperforming_wait"
         shadow_action = "wait"
         exposure_cap = 0.0

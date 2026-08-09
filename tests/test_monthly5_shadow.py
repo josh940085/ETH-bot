@@ -593,6 +593,19 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["suppressed_action"], "evaluate_long")
         self.assertIn("readiness_underperforming_block", selection["reason_codes"])
 
+    def test_readiness_underperforming_block_zeroes_natural_wait_exposure(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            promotion_blockers=["active_underperforming_plan"],
+        )
+
+        self.assertEqual(selection["selected_plan"], "underperforming_wait")
+        self.assertEqual(selection["shadow_action"], "wait")
+        self.assertEqual(selection["exposure_cap"], 0.0)
+        self.assertEqual(selection["suppressed_plan"], "")
+        self.assertIn("readiness_underperforming_block", selection["reason_codes"])
+
     def test_market_selection_uses_recovery_probe_when_suppressed_key_recovers(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
