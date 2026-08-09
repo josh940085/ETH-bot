@@ -63,7 +63,7 @@ def build_desired_paths(frame_5m):
     return paths
 
 
-def run_variant(frame_5m, *, lookback_months, score_mode):
+def build_primary_path(frame_5m, *, lookback_months, score_mode):
     desired_paths = build_desired_paths(frame_5m)
     standalone_factors = []
     for config, desired in zip(CANDIDATE_CONFIGS, desired_paths):
@@ -85,6 +85,15 @@ def run_variant(frame_5m, *, lookback_months, score_mode):
     )
     desired_matrix = np.vstack([np.asarray(path, dtype="float64") for path in desired_paths])
     desired = desired_matrix[selected, np.arange(len(frame_5m))]
+    return desired, selected, selections
+
+
+def run_variant(frame_5m, *, lookback_months, score_mode):
+    desired, selected, selections = build_primary_path(
+        frame_5m,
+        lookback_months=lookback_months,
+        score_mode=score_mode,
+    )
     components = risk_walkforward.simulate_dynamic_risk_path(
         frame_5m,
         desired,
