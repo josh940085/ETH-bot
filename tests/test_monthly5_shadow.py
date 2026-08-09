@@ -269,6 +269,10 @@ class Monthly5ShadowTests(unittest.TestCase):
                 "selected_score": 0.08,
                 "selected_q25_return_pct": 5.5,
                 "selected_hit_rate": 0.75,
+                "market_regime_4h": {
+                    "regime": "up",
+                    "decision_role": "shadow_diagnostic_only",
+                },
             },
         )
 
@@ -278,6 +282,7 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["selected_plan"], "normal_long_selector")
         self.assertEqual(selection["shadow_action"], "evaluate_long")
         self.assertEqual(selection["max_leverage"], 4)
+        self.assertEqual(selection["selector_market_regime_4h"], "up")
 
     def test_selector_max_leverage_flows_to_guard_and_history(self):
         snapshot = monthly5_shadow.update_shadow_state(

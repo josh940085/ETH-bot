@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pandas as pd
@@ -98,6 +99,7 @@ class Monthly5ResearchSelectorTests(unittest.TestCase):
         self.assertEqual(probe["selector_source"], monthly5_shadow.RESEARCH_SELECTOR_SOURCE)
         self.assertEqual(probe["cache_feature_count"], monthly5_research_selector.EXPECTED_SHORT_MARKET_STATE_FEATURES)
         self.assertEqual(probe["daily_rows"], monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS)
+        self.assertEqual(probe["completed_daily_rows"], monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS)
         self.assertEqual(probe["latest_daily_key"], "2026-08-02")
 
     def test_live_selector_input_probe_reports_missing_warmup(self):
@@ -177,6 +179,80 @@ class Monthly5ResearchSelectorTests(unittest.TestCase):
         )
         self.assertEqual(decision["primary_direction"], "long")
         self.assertEqual(decision["max_leverage"], 4)
+        self.assertEqual(decision["causal_lag_days"], 1)
+
+    def test_live_selector_pairs_prior_state_with_next_day_return(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "selector_cache.npz"
+            feature_count = monthly5_research_selector.EXPECTED_SHORT_MARKET_STATE_FEATURES
+            returns = np.array(
+                [
+                    [-0.50, 0.10, -0.50],
+                    [1.00, 0.01, 1.00],
+                ],
+                dtype="float32",
+            )
+            np.savez(
+                cache_path,
+                R=returns,
+                F=np.zeros_like(returns),
+                Xday=np.array(
+                    [
+                        np.zeros(feature_count),
+                        np.full(feature_count, 100.0),
+                        np.zeros(feature_count),
+                    ],
+                    dtype="float32",
+                ),
+                keys=np.array(["causal_winner|lev2", "same_day_leak_winner|lev4"]),
+                days=np.array(["2026-08-01", "2026-08-02", "2026-08-03"]),
+            )
+            frame = pd.DataFrame(
+                {
+                    "high": [101.0] * monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                    "low": [99.0] * monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                    "close": [100.0] * monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                },
+                index=pd.date_range(
+                    "2025-08-05",
+                    periods=monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS,
+                    freq="1D",
+                    tz="UTC",
+                ),
+            )
+            with mock.patch.object(
+                monthly5_research_selector,
+                "_live_short_market_state_vector",
+                return_value=np.zeros(feature_count, dtype="float32"),
+            ):
+                decision = monthly5_research_selector.build_live_selector_decision(
+                    frame,
+                    cache_path=cache_path,
+                    nearest_days=1,
+                    candidate_pool=2,
+                    now_ts=pd.Timestamp("2026-08-05T00:00:00Z").timestamp(),
+                )
+
+        self.assertTrue(decision["usable"])
+        self.assertEqual(decision["selected_key"], "causal_winner|lev2")
+        self.assertEqual(decision["nearest_state_sample_days"], ["2026-08-01"])
+        self.assertEqual(decision["nearest_sample_days"], ["2026-08-02"])
+
+    def test_live_4h_regime_is_diagnostic_only(self):
+        close = np.linspace(100.0, 140.0, 40)
+        timestamps = pd.date_range("2026-08-01", periods=40, freq="4h", tz="UTC")
+        frame = pd.DataFrame(
+            {
+                "time": (timestamps.as_unit("ns").astype("int64") // 1_000_000).astype("int64"),
+                "close": close,
+            },
+        )
+        probe = monthly5_research_selector._live_4h_regime_probe(frame)
+
+        self.assertTrue(probe["usable"])
+        self.assertEqual(probe["regime"], "up")
+        self.assertEqual(probe["decision_role"], "shadow_diagnostic_only")
+        self.assertEqual(probe["completed_at"], "2026-08-07T12:00:00+00:00")
 
 
 if __name__ == "__main__":

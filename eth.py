@@ -15155,7 +15155,7 @@ def build_trade_signal_snapshot(
         breakout=breakout,
         volume_spike=volume_spike,
     )
-    monthly5_selector_decision = _build_monthly5_live_selector_decision(df_1d)
+    monthly5_selector_decision = _build_monthly5_live_selector_decision(df_1d, df_4h=df_4h)
     return {
         "features": features,
         "monthly5_live_selector_input": dict(monthly5_selector_decision.get("input_probe") or {}),
@@ -17593,9 +17593,9 @@ def _build_monthly5_live_selector_input_probe(df_1d=None):
     return probe
 
 
-def _build_monthly5_live_selector_decision(df_1d=None):
+def _build_monthly5_live_selector_decision(df_1d=None, df_4h=None):
     frame, source = _monthly5_live_daily_frame(df_1d)
-    decision = monthly5_research_selector.build_live_selector_decision(frame)
+    decision = monthly5_research_selector.build_live_selector_decision(frame, df_4h=df_4h)
     input_probe = decision.get("input_probe") if isinstance(decision.get("input_probe"), dict) else {}
     input_probe["input_source"] = source
     decision["input_source"] = source

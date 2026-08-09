@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 import monthly5_shadow
+import monthly5_regime_selector
 
 
 DEFAULT_SPEC_PATH = Path("docs/strategy_specs/monthly5_postlock_hourly.json")
@@ -161,6 +162,63 @@ def _latest_daily_key(df_1d):
         return ""
 
 
+def _completed_daily_frame(df_1d, *, now_ts=None):
+    frame = df_1d.copy() if df_1d is not None else pd.DataFrame()
+    if frame.empty:
+        return frame
+    timestamps = None
+    if "time" in frame:
+        timestamps = pd.to_datetime(frame["time"], unit="ms", utc=True, errors="coerce")
+    elif isinstance(frame.index, pd.DatetimeIndex):
+        timestamps = pd.Series(
+            pd.to_datetime(frame.index, utc=True, errors="coerce"),
+            index=frame.index,
+        )
+    if timestamps is None:
+        return frame
+    now = (
+        pd.Timestamp.now(tz="UTC")
+        if now_ts is None
+        else pd.Timestamp(float(now_ts), unit="s", tz="UTC")
+    )
+    complete = timestamps < now.normalize()
+    if bool(complete.any()):
+        return frame.loc[np.asarray(complete, dtype=bool)].copy()
+    return frame.iloc[0:0].copy()
+
+
+def _live_4h_regime_probe(df_4h):
+    frame = df_4h.copy() if df_4h is not None else pd.DataFrame()
+    # Runtime frames include the currently forming candle. This label is
+    # diagnostic only and must use a completed 4h candle.
+    completed = frame.iloc[:-1] if len(frame) > 1 else frame.iloc[0:0]
+    if len(completed) < 30 or "close" not in completed:
+        return {"usable": False, "regime": "unknown", "completed_bars": len(completed)}
+    labels = monthly5_regime_selector.classify_4h_regimes(completed)
+    regime = str(labels.iloc[-1]) if len(labels) else "unknown"
+    try:
+        if "time" in completed:
+            completed_at = pd.to_datetime(
+                completed["time"].iloc[-1],
+                unit="ms",
+                utc=True,
+            ) + pd.Timedelta(hours=4)
+            completed_at = completed_at.isoformat()
+        elif isinstance(completed.index, pd.DatetimeIndex):
+            completed_at = pd.to_datetime(completed.index[-1], utc=True).isoformat()
+        else:
+            completed_at = ""
+    except Exception:
+        completed_at = ""
+    return {
+        "usable": regime in monthly5_regime_selector.REGIMES,
+        "regime": regime,
+        "completed_bars": len(completed),
+        "completed_at": completed_at,
+        "decision_role": "shadow_diagnostic_only",
+    }
+
+
 def _numeric_series(df, column):
     if df is None or column not in df:
         return pd.Series(dtype="float64")
@@ -216,14 +274,18 @@ def build_live_selector_input_probe(
     *,
     cache_path=DEFAULT_SELECTOR_CACHE_PATH,
     required_rows=REQUIRED_LIVE_DAILY_ROWS,
+    now_ts=None,
 ):
     """Report whether live data can feed the research similar-day selector."""
     required_rows = max(1, _safe_int(required_rows, REQUIRED_LIVE_DAILY_ROWS))
     daily_rows = max(0, len(df_1d) if df_1d is not None else 0)
+    completed_frame = _completed_daily_frame(df_1d, now_ts=now_ts)
+    completed_daily_rows = len(completed_frame)
     required_columns = {"high", "low", "close"}
     available_columns = set(list(getattr(df_1d, "columns", [])))
     missing_columns = sorted(required_columns - available_columns)
     latest_day = _latest_daily_key(df_1d)
+    latest_completed_day = _latest_daily_key(completed_frame)
     cache_path = Path(cache_path)
     blocking_reasons = []
     cache_feature_count = 0
@@ -248,16 +310,16 @@ def build_live_selector_input_probe(
                 blocking_reasons.append("selector_feature_count_mismatch")
             if cache_candidate_count <= 0:
                 blocking_reasons.append("selector_candidate_cache_empty")
-            if cache_day_count <= 0:
+            if cache_day_count <= 1:
                 blocking_reasons.append("selector_day_cache_empty")
         except Exception as exc:
             blocking_reasons.append(f"selector_cache_unreadable:{exc}")
 
-    if daily_rows < required_rows:
+    if completed_daily_rows < required_rows:
         blocking_reasons.append("daily_warmup_insufficient")
     if missing_columns:
         blocking_reasons.append("daily_columns_missing")
-    if not latest_day:
+    if not latest_completed_day:
         blocking_reasons.append("daily_latest_day_missing")
 
     usable = not blocking_reasons
@@ -269,8 +331,10 @@ def build_live_selector_input_probe(
         "usable": usable,
         "blocking_reasons": blocking_reasons,
         "daily_rows": daily_rows,
+        "completed_daily_rows": completed_daily_rows,
         "required_daily_rows": required_rows,
         "latest_daily_key": latest_day,
+        "latest_completed_daily_key": latest_completed_day,
         "missing_columns": missing_columns,
         "cache_path": str(cache_path),
         "cache_available": cache_available,
@@ -289,8 +353,14 @@ def build_live_selector_decision(
     nearest_days=DEFAULT_NEAREST_DAYS,
     candidate_pool=DEFAULT_CANDIDATE_POOL,
     target_return=0.05,
+    df_4h=None,
+    now_ts=None,
 ):
-    input_probe = build_live_selector_input_probe(df_1d, cache_path=cache_path)
+    input_probe = build_live_selector_input_probe(
+        df_1d,
+        cache_path=cache_path,
+        now_ts=now_ts,
+    )
     if not input_probe.get("usable"):
         return {
             "schema_version": 1,
@@ -300,7 +370,8 @@ def build_live_selector_decision(
             "input_probe": input_probe,
         }
 
-    vector = _live_short_market_state_vector(df_1d)
+    completed_daily = _completed_daily_frame(df_1d, now_ts=now_ts)
+    vector = _live_short_market_state_vector(completed_daily)
     if vector.shape[0] != EXPECTED_SHORT_MARKET_STATE_FEATURES:
         return {
             "schema_version": 1,
@@ -328,7 +399,15 @@ def build_live_selector_decision(
     flats = cache["F"]
     keys = cache["keys"]
     days = cache["days"]
-    if xday.ndim != 2 or xday.shape[1] != vector.shape[0] or len(keys) <= 0 or len(days) <= 0:
+    expected_shape = (len(keys), len(days))
+    if (
+        xday.ndim != 2
+        or xday.shape != (len(days), vector.shape[0])
+        or returns.shape != expected_shape
+        or flats.shape != expected_shape
+        or len(keys) <= 0
+        or len(days) <= 1
+    ):
         return {
             "schema_version": 1,
             "selector_source": monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
@@ -337,17 +416,29 @@ def build_live_selector_decision(
             "input_probe": input_probe,
         }
 
-    mean = np.nanmean(xday, axis=0)
-    std = np.nanstd(xday, axis=0)
+    # Completed state day j-1 predicts the candidate return on target day j.
+    # X[j] -> R[j] would leak target-day information into candidate ranking.
+    historical_features = xday[:-1]
+    target_returns = returns[:, 1:]
+    target_flats = flats[:, 1:]
+    state_days = days[:-1]
+    target_days = days[1:]
+    mean = np.nanmean(historical_features, axis=0)
+    std = np.nanstd(historical_features, axis=0)
     std = np.where(std > 1e-9, std, 1.0)
-    normalized_cache = np.nan_to_num((xday - mean) / std, nan=0.0, posinf=0.0, neginf=0.0)
+    normalized_cache = np.nan_to_num(
+        (historical_features - mean) / std,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
     normalized_vector = np.nan_to_num((vector - mean) / std, nan=0.0, posinf=0.0, neginf=0.0)
     distances = np.linalg.norm(normalized_cache - normalized_vector, axis=1)
     nearest_count = max(1, min(_safe_int(nearest_days, DEFAULT_NEAREST_DAYS), len(distances)))
     nearest_idx = np.argsort(distances)[:nearest_count]
 
-    candidate_returns = returns[:, nearest_idx]
-    candidate_flats = flats[:, nearest_idx] if flats.shape == returns.shape else np.zeros_like(candidate_returns)
+    candidate_returns = target_returns[:, nearest_idx]
+    candidate_flats = target_flats[:, nearest_idx]
     q25 = np.nanpercentile(candidate_returns, 25, axis=1)
     hit_rate = np.nanmean(candidate_returns >= max(0.0, _safe_float(target_return, 0.05)), axis=1)
     mean_return = np.nanmean(candidate_returns, axis=1)
@@ -357,7 +448,10 @@ def build_live_selector_decision(
     ranked = np.argsort(-np.nan_to_num(score, nan=-1e9))[:pool_size]
     best_idx = int(ranked[0])
     parsed = parse_top_pick(keys[best_idx])
-    nearest_days_sample = [str(days[int(idx)]) for idx in nearest_idx[: min(5, len(nearest_idx))]]
+    sample_idx = nearest_idx[: min(5, len(nearest_idx))]
+    nearest_days_sample = [str(target_days[int(idx)]) for idx in sample_idx]
+    nearest_state_days_sample = [str(state_days[int(idx)]) for idx in sample_idx]
+    regime_4h = _live_4h_regime_probe(df_4h)
 
     return {
         "schema_version": 1,
@@ -366,6 +460,9 @@ def build_live_selector_decision(
         "blocking_reasons": [],
         "input_probe": input_probe,
         "feature_set": "short_market_state",
+        "causal_lag_days": 1,
+        "live_state_day": input_probe.get("latest_completed_daily_key", ""),
+        "market_regime_4h": regime_4h,
         "live_feature_count": int(vector.shape[0]),
         "nearest_days": nearest_count,
         "candidate_pool": pool_size,
@@ -377,5 +474,6 @@ def build_live_selector_decision(
         "selected_hit_rate": round(float(hit_rate[best_idx]), 4),
         "selected_flat_time_pct": round(float(flat_time[best_idx]) * 100.0, 4),
         "nearest_sample_days": nearest_days_sample,
+        "nearest_state_sample_days": nearest_state_days_sample,
         **parsed,
     }

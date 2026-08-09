@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 STRATEGY_ID = "monthly5_postlock_hourly_v0"
 SELECTED_CANDIDATE = "postlock_scale0.15_floor_pdaystopNone"
-SELECTOR_POLICY_VERSION = 8
+SELECTOR_POLICY_VERSION = 9
 RESEARCH_SELECTOR_SOURCE = "similar_day_selector"
 LIVE_SELECTOR_SOURCE = "market_score_proxy_shadow"
 SELECTOR_ALIGNMENT = "proxy_shadow_pending_similar_day"
@@ -193,6 +193,7 @@ def build_history_record(snapshot, guard=None):
         "selector_effective_direction": str(selection.get("selector_effective_direction") or ""),
         "selector_q25_return_pct": round(_safe_float(selection.get("selector_q25_return_pct"), 0.0), 4),
         "selector_hit_rate": round(_safe_float(selection.get("selector_hit_rate"), 0.0), 4),
+        "selector_market_regime_4h": str(selection.get("selector_market_regime_4h") or ""),
         "suppressed_plan": str(selection.get("suppressed_plan") or ""),
         "suppressed_action": str(selection.get("suppressed_action") or ""),
         "suppressed_key": str(selection.get("suppressed_key") or ""),
@@ -1873,6 +1874,9 @@ def build_market_selection(
         "selector_score": _safe_float(research_selector_decision.get("selected_score"), 0.0),
         "selector_q25_return_pct": _safe_float(research_selector_decision.get("selected_q25_return_pct"), 0.0),
         "selector_hit_rate": _safe_float(research_selector_decision.get("selected_hit_rate"), 0.0),
+        "selector_market_regime_4h": str(
+            (research_selector_decision.get("market_regime_4h") or {}).get("regime") or ""
+        ),
         "market_bias": market_bias,
         "bull_score": bull_score,
         "bear_score": bear_score,

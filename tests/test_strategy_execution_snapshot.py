@@ -871,6 +871,8 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(payload["strategy_breakout"], breakout)
 
     def test_panel_snapshot_publishes_monthly5_shadow_state(self):
+        eth.active_trade["open"] = False
+        eth.active_trade["size"] = 0.0
         shadow_state = {
             "strategy_id": "monthly5_postlock_hourly_v0",
             "shadow_only": True,
