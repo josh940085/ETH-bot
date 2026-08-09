@@ -1,5 +1,7 @@
 .env
 token.env
+.venv
+.venv*/
 .DS_Store
 __pycache__/
 .runtime/
@@ -7,6 +9,7 @@ __pycache__/
 *.pkl
 *.jsonl
 program.log
+feedhandler.log
 supervisord.log
 supervisord.pid
 .supervisor.sock

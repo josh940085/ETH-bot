@@ -2,8 +2,11 @@ import json
 import os
 import sys
 
+from runtime_python import require_supported_python
 from runtime_config import is_truthy, load_local_env
 from runtime_paths import REPO_DIR
+
+require_supported_python("mlx-agent")
 
 
 def _install_fast_models_endpoint(server_module, model):

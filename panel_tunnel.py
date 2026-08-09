@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+from runtime_python import require_supported_python
+
+require_supported_python("panel-tunnel")
+
 import os
 import re
 import signal

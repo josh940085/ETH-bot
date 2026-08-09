@@ -7,6 +7,10 @@ import signal
 import subprocess
 import sys
 import time
+from runtime_python import require_supported_python
+
+require_supported_python("eth-bot")
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows fallback

@@ -21,24 +21,57 @@ def _rows(start="2023-01", periods=24, *, return_pct=6.0, flat_time_pct=20.0, le
 
 
 class Monthly5BatchValidatorTests(unittest.TestCase):
-    def _trade_evidence(self, root):
+    def _trade_evidence(self, root, candidate="qualified"):
         path = Path(root) / "trades.csv"
         with path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.DictWriter(
                 handle,
-                fieldnames=["entry_time", "exit_time", "side", "pnl", "fee", "slippage"],
+                fieldnames=[
+                    "entry_time",
+                    "exit_time",
+                    "entry_fill_time",
+                    "exit_fill_time",
+                    "side",
+                    "quantity",
+                    "pnl",
+                    "fee",
+                    "slippage",
+                    "data_source",
+                    "candidate",
+                ],
             )
             writer.writeheader()
             writer.writerow(
                 {
-                    "entry_time": "2024-01-01",
-                    "exit_time": "2024-01-02",
+                    "entry_time": "2023-01-01",
+                    "exit_time": "2023-01-02",
+                    "entry_fill_time": "2023-01-01T00:00:00Z",
+                    "exit_fill_time": "2023-01-02T00:00:00Z",
                     "side": "long",
+                    "quantity": "0.001",
                     "pnl": "1.0",
                     "fee": "0.1",
                     "slippage": "0.01",
+                    "data_source": "binance_public_data_usdm_aggTrades",
+                    "candidate": candidate,
                 }
             )
+            for month in __import__("pandas").period_range("2023-02", "2024-12", freq="M"):
+                writer.writerow(
+                    {
+                        "entry_time": f"{month.strftime('%Y-%m')}-01T00:00:00Z",
+                        "exit_time": f"{month.strftime('%Y-%m')}-02T00:00:00Z",
+                        "entry_fill_time": f"{month.strftime('%Y-%m')}-01T00:00:01Z",
+                        "exit_fill_time": f"{month.strftime('%Y-%m')}-02T00:00:01Z",
+                        "side": "long",
+                        "quantity": "0.001",
+                        "pnl": "1.0",
+                        "fee": "0.1",
+                        "slippage": "0.01",
+                        "data_source": "binance_public_data_usdm_aggTrades",
+                        "candidate": candidate,
+                    }
+                )
         return path
 
     def test_candidate_is_deployment_candidate_with_holdout_and_cost_evidence(self):

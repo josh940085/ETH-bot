@@ -7,7 +7,10 @@ import stat
 import sys
 from pathlib import Path
 
+from runtime_python import require_supported_python
 from runtime_config import REPO_DIR, read_local_env_values
+
+require_supported_python("n8n")
 
 
 N8N_HOME = REPO_DIR / ".runtime" / "n8n-home"

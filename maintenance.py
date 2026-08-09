@@ -39,6 +39,7 @@ REPORT_PREFIX = "REPORT_JSON="
 CHECK_NAME_ZH = {
     "conflict_markers": "程式衝突標記",
     "dependency_constraints": "套件依賴",
+    "python_runtime": "Python 執行版本",
     "package_versions": "套件版本更新",
     "runtime_memory": "記憶體使用與優化",
     "panel_tunnel_health": "面板連線與隧道",
@@ -99,6 +100,8 @@ UNNECESSARY_TMP_MIN_AGE_SEC = max(
 UNNECESSARY_CLEANUP_SKIP_DIRS = {
     ".git",
     ".venv",
+    ".venv-py312",
+    ".venv-py311-backup",
     "node_modules",
 }
 ENTRY_CONFIRM_FUNCTION_RE = re.compile(
@@ -972,6 +975,24 @@ def _check_py_compile():
         "status": "ok",
         "detail": f"compiled {len(compiled)} python files",
         "files": compiled,
+    }
+
+
+def _check_python_runtime():
+    from runtime_python import runtime_report
+
+    report = runtime_report()
+    if not report["supported"]:
+        raise RuntimeError(
+            f"Python {report['required']}.x required; current={report['current']}"
+        )
+    return {
+        "status": "ok",
+        "detail": (
+            f"Python {report['current']} {report['implementation']} "
+            f"executable={report['executable']}"
+        ),
+        **report,
     }
 
 
@@ -1908,6 +1929,7 @@ def main():
 
     checks = [
         ("conflict_markers", _check_conflict_markers),
+        ("python_runtime", _check_python_runtime),
         (
             "package_versions",
             lambda: check_and_update_packages(apply_updates=args.update_packages),

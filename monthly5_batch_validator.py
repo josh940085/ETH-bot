@@ -83,8 +83,20 @@ def _summarize_rows(rows, target_pct):
     }
 
 
-def inspect_trade_evidence(path):
-    required = ["entry_time", "exit_time", "side", "pnl", "fee", "slippage"]
+def inspect_trade_evidence(path, *, expected_candidate="", expected_months=None):
+    required = [
+        "entry_time",
+        "exit_time",
+        "entry_fill_time",
+        "exit_fill_time",
+        "side",
+        "quantity",
+        "pnl",
+        "fee",
+        "slippage",
+        "data_source",
+        "candidate",
+    ]
     if not path:
         return {
             "available": False,
@@ -106,7 +118,8 @@ def inspect_trade_evidence(path):
         with source.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             fieldnames = {str(name or "").strip().lower() for name in (reader.fieldnames or [])}
-            rows = sum(1 for _ in reader)
+            evidence_rows = list(reader)
+            rows = len(evidence_rows)
     except Exception as exc:
         return {
             "available": True,
@@ -119,18 +132,54 @@ def inspect_trade_evidence(path):
     aliases = {
         "entry_time": {"entry_time", "open_time", "entry_ts"},
         "exit_time": {"exit_time", "close_time", "exit_ts"},
+        "entry_fill_time": {"entry_fill_time"},
+        "exit_fill_time": {"exit_fill_time"},
         "side": {"side", "direction", "position_side"},
+        "quantity": {"quantity", "qty", "size"},
         "pnl": {"pnl", "net_pnl", "realized_pnl", "return_pct"},
         "fee": {"fee", "fees", "commission", "commission_usdt"},
         "slippage": {"slippage", "slippage_pct", "slippage_usdt"},
+        "data_source": {"data_source"},
+        "candidate": {"candidate"},
     }
     missing = [name for name, names in aliases.items() if not (fieldnames & names)]
+    invalid_rows = 0
+    for row in evidence_rows:
+        try:
+            if float(row.get("quantity", 0)) <= 0 or float(row.get("fee", -1)) < 0:
+                invalid_rows += 1
+            if not str(row.get("data_source") or "").startswith("binance_public_data_"):
+                invalid_rows += 1
+        except (TypeError, ValueError):
+            invalid_rows += 1
+    candidate_values = {str(row.get("candidate") or "") for row in evidence_rows}
+    candidate_matches = bool(expected_candidate) and candidate_values == {str(expected_candidate)}
+    evidence_months = sorted(
+        {
+            str(row.get("entry_time") or "")[:7]
+            for row in evidence_rows
+            if len(str(row.get("entry_time") or "")) >= 7
+        }
+    )
+    required_months = sorted(set(expected_months or []))
+    missing_evidence_months = [month for month in required_months if month not in evidence_months]
     return {
         "available": True,
-        "usable": rows > 0 and not missing,
+        "usable": (
+            rows > 0
+            and not missing
+            and invalid_rows == 0
+            and candidate_matches
+            and not missing_evidence_months
+        ),
         "path": str(source),
         "rows": rows,
         "missing_columns": missing,
+        "invalid_rows": invalid_rows,
+        "candidate_values": sorted(candidate_values),
+        "candidate_matches": candidate_matches,
+        "evidence_months": evidence_months,
+        "missing_evidence_months": missing_evidence_months,
     }
 
 
@@ -191,7 +240,11 @@ def validate_candidate(
         if abs(_safe_float(row.get("return_pct")) - target_pct) <= 1e-9
     ]
     exact_floor_ratio = len(exact_floor_months) / len(normalized) if normalized else 0.0
-    evidence = inspect_trade_evidence(trade_evidence)
+    evidence = inspect_trade_evidence(
+        trade_evidence,
+        expected_candidate=name,
+        expected_months=[row["month"] for row in normalized],
+    )
 
     metric_blockers = []
     if missing_months:
