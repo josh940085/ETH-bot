@@ -1570,6 +1570,7 @@ def build_market_selection(
     recovering_plan_keys=None,
     probe_success_plan_keys=None,
     probe_candidate_plan_keys=None,
+    promotion_blockers=None,
     previous_market_selection=None,
     previous_market_selection_ts=0,
     research_selector_decision=None,
@@ -1653,6 +1654,9 @@ def build_market_selection(
         str(key)
         for key in (probe_candidate_plan_keys or [])
         if str(key)
+    }
+    readiness_blockers = {
+        str(code) for code in (promotion_blockers or []) if str(code)
     }
     previous_market_selection = previous_market_selection if isinstance(previous_market_selection, dict) else {}
     previous_selection_age_sec = _safe_int(shadow_state.get("updated_ts"), 0) - _safe_int(previous_market_selection_ts, 0)
@@ -1849,6 +1853,28 @@ def build_market_selection(
         shadow_action = "wait"
         exposure_cap = 0.0
         rationale = "近期同類市場選擇已累積負報酬，暫停評估以保護月報酬5%目標"
+
+    readiness_underperforming_block = bool(
+        readiness_blockers.intersection(
+            {"active_underperforming_plan", "recovery_probe_probe_failed"}
+        )
+    )
+    if readiness_underperforming_block and shadow_action in {
+        "evaluate_long",
+        "evaluate_short",
+        "reduced_exposure",
+    }:
+        suppressed_plan = selected_plan
+        suppressed_action = shadow_action
+        suppressed_key = "|".join((selected_plan, shadow_action, market_bias, market_state))
+        suppressed_exposure_cap = exposure_cap
+        selected_plan = "underperforming_wait"
+        shadow_action = "wait"
+        exposure_cap = 0.0
+        recovery_probe = False
+        recovery_probe_key = ""
+        reason_codes.append("readiness_underperforming_block")
+        rationale = "readiness 仍有低效策略封鎖，僅記錄 counterfactual 並保持零曝險等待恢復"
 
     selected_max_leverage = min(
         5,

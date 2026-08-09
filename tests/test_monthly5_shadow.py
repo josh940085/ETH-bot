@@ -572,6 +572,27 @@ class Monthly5ShadowTests(unittest.TestCase):
         self.assertEqual(selection["suppressed_exposure_cap"], 0.35)
         self.assertIn("underperforming_plan_wait", selection["reason_codes"])
 
+    def test_readiness_underperforming_block_suppresses_different_probe_key(self):
+        selection = monthly5_shadow.build_market_selection(
+            {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},
+            strategy_signal="wait",
+            strategy_context={"htf": 1, "mid_trend": -1, "macro_bias": -0.5},
+            host_logic={"direction": "long", "confidence": 0.8},
+            macro_alignment={"score": 0.0, "hard_block": False},
+            donchian_state={"state": "fake_breakout_high", "action": "block"},
+            underperforming_plan_keys=[
+                "normal_long_selector|evaluate_long|bullish|fake_breakout_high",
+            ],
+            promotion_blockers=["active_underperforming_plan"],
+        )
+
+        self.assertEqual(selection["selected_plan"], "underperforming_wait")
+        self.assertEqual(selection["shadow_action"], "wait")
+        self.assertEqual(selection["exposure_cap"], 0.0)
+        self.assertEqual(selection["suppressed_plan"], "mixed_bias_long_probe")
+        self.assertEqual(selection["suppressed_action"], "evaluate_long")
+        self.assertIn("readiness_underperforming_block", selection["reason_codes"])
+
     def test_market_selection_uses_recovery_probe_when_suppressed_key_recovers(self):
         selection = monthly5_shadow.build_market_selection(
             {"mode": "normal", "suggested_exposure_scale": 1.0, "max_leverage": 5},

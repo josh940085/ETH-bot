@@ -6089,6 +6089,7 @@ def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy
             recovering_plan_keys=readiness_report.get("shadow_suppressed_recovering_plan_keys") or [],
             probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
             probe_candidate_plan_keys=readiness_report.get("shadow_recovery_probe_candidate_keys") or [],
+            promotion_blockers=readiness_report.get("promotion_blockers") or [],
             previous_market_selection=previous.get("market_selection") if isinstance(previous.get("market_selection"), dict) else {},
             previous_market_selection_ts=_safe_int(previous.get("updated_ts"), 0),
             research_selector_decision=snapshot.get("live_selector_decision") if isinstance(snapshot.get("live_selector_decision"), dict) else {},
