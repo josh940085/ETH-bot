@@ -91,6 +91,8 @@ def simulate_account_path(
     entry_allowed=None,
     risk_profiles=None,
     leverage=1.0,
+    stop_cooldown_bars=None,
+    stop_reentry_policy="cooldown",
     round_trip_fee=monthly5_risk_cache.ROUND_TRIP_FEE,
 ):
     close = pd.to_numeric(frame_5m["close"], errors="coerce").to_numpy(dtype="float64")
@@ -115,6 +117,8 @@ def simulate_account_path(
     leverage = float(leverage)
     if not 0.0 < leverage <= 5.0:
         raise ValueError("leverage must be greater than zero and at most 5")
+    if stop_reentry_policy not in {"cooldown", "signal_reset"}:
+        raise ValueError("stop_reentry_policy must be cooldown or signal_reset")
     one_way_fee = float(round_trip_fee) / 2.0
     month_keys = frame_5m.index.tz_localize(None).to_period("M")
     day_keys = frame_5m.index.floor("D")
@@ -136,9 +140,12 @@ def simulate_account_path(
     previous_unscaled_exposure = 0.0
     previous_strategy_id = None
     active_risk_profile = volatility.RISK_PROFILE
+    blocked_direction = 0.0
+    blocked_strategy_id = None
     trigger_count = 0
 
     for index, month in enumerate(month_keys):
+        month_started = month != previous_month
         if month != previous_month:
             month_equity = 1.0
             locked = False
@@ -168,6 +175,13 @@ def simulate_account_path(
         if risk_off:
             wanted = 0.0
         strategy_id = 100 if recovery_active else int(primary_ids[index])
+        if blocked_direction and (
+            month_started
+            or wanted != blocked_direction
+            or strategy_id != blocked_strategy_id
+        ):
+            blocked_direction = 0.0
+            blocked_strategy_id = None
         strategy_changed = previous_strategy_id is not None and strategy_id != previous_strategy_id
         previous_close = close[index - 1] if index else close[index]
         turnover_exposure = 0.0
@@ -180,7 +194,7 @@ def simulate_account_path(
         if not active:
             if cooldown > 0:
                 cooldown -= 1
-            elif wanted and entry_allowed[index]:
+            elif wanted and not blocked_direction and entry_allowed[index]:
                 active = wanted
                 entry = previous_close
                 profile_override = (risk_profiles or {}).get(strategy_id)
@@ -195,6 +209,7 @@ def simulate_account_path(
                 turnover_exposure += abs(active) * active_leverage
 
         exit_price = None
+        exit_was_stop = False
         if active > 0.0:
             stop_price = entry * (
                 1.0 - float(active_risk_profile["stop_pct"]) / active_leverage
@@ -204,6 +219,7 @@ def simulate_account_path(
             )
             if low[index] <= stop_price:
                 exit_price = min(stop_price, open_price[index])
+                exit_was_stop = True
             elif high[index] >= target_price:
                 exit_price = target_price
         elif active < 0.0:
@@ -215,6 +231,7 @@ def simulate_account_path(
             )
             if high[index] >= stop_price:
                 exit_price = max(stop_price, open_price[index])
+                exit_was_stop = True
             elif low[index] <= target_price:
                 exit_price = target_price
 
@@ -225,9 +242,17 @@ def simulate_account_path(
             pnl = active * (mark / previous_close - 1.0)
         if exit_price is not None:
             turnover_exposure += abs(active) * active_leverage
+            if exit_was_stop and stop_reentry_policy == "signal_reset":
+                blocked_direction = active
+                blocked_strategy_id = strategy_id
             active = 0.0
             entry = 0.0
-            cooldown = max(0, int(active_risk_profile["cooldown_bars"]))
+            if exit_was_stop and stop_reentry_policy == "signal_reset":
+                cooldown = 0
+            elif exit_was_stop and stop_cooldown_bars is not None:
+                cooldown = max(0, int(stop_cooldown_bars))
+            else:
+                cooldown = max(0, int(active_risk_profile["cooldown_bars"]))
         positions[index] = actual * scale * active_leverage
 
         scale_turnover = (
