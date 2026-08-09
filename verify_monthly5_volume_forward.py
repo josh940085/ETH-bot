@@ -21,6 +21,13 @@ def verify(state, rows, max_age_sec):
         failures.append("state must be shadow_only")
     if state.get("execution_allowed") is not False:
         failures.append("state execution_allowed must be false")
+    if shadow.RESEARCH_VALID is False:
+        if state.get("research_valid") is not False:
+            failures.append("invalidated research must set research_valid=false")
+        if "historical_research_invalidated" not in state.get("promotion_blockers", []):
+            failures.append("invalidated research must block promotion")
+        if state.get("promotion_ready") is not False:
+            failures.append("invalidated research cannot be promotion_ready")
     if not rows:
         failures.append("history is empty")
     elif any(row.get("execution_allowed") is not False for row in rows):

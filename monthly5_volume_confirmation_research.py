@@ -9,6 +9,7 @@ import pandas as pd
 
 import monthly5_intraday_regime as regime
 import monthly5_intramonth_recovery_research as account
+import monthly5_regime_hysteresis_research as hysteresis
 import monthly5_regime_specialist_research as specialist
 import monthly5_selector_cache
 import monthly5_volatility_regime_research as volatility
@@ -159,6 +160,7 @@ def build_report(frame_5m):
     return {
         "schema_version": 1,
         "method": "completed_4h_relative_volume_entry_gate",
+        "confirmation_timebase": hysteresis.CONFIRMATION_TIMEBASE,
         "source": frame_5m.attrs.get("kline_source", "binance_history_um"),
         "primary_config": account.PRIMARY_CONFIG,
         "primary_monthly_selections": selections,

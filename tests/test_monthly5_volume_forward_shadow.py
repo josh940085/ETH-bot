@@ -42,6 +42,8 @@ class Monthly5VolumeForwardShadowTests(unittest.TestCase):
             rows = shadow.load_history(history_path)
             self.assertEqual(len(rows), 1)
             self.assertFalse(state["execution_allowed"])
+            self.assertFalse(state["research_valid"])
+            self.assertIn("historical_research_invalidated", state["promotion_blockers"])
             self.assertIn("forward_span_lt_30d", state["promotion_blockers"])
             self.assertIn("forward_rows_insufficient", state["promotion_blockers"])
             self.assertIn("forward_month_target_unproven", state["promotion_blockers"])

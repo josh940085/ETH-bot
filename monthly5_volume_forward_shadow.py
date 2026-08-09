@@ -29,6 +29,8 @@ VOLUME_WINDOW = 24
 MIN_VOLUME_RATIO = 0.5
 RESEARCH_HISTORY_END = "2026-08-03T23:59:59.999999Z"
 FORWARD_START = "2026-08-04T00:00:00Z"
+RESEARCH_VALID = False
+RESEARCH_INVALIDATION_REASON = "historical_4h_confirmation_counted_aligned_5m_rows"
 MIN_FORWARD_DAYS = 30.0
 MIN_FORWARD_COVERAGE = 0.80
 MAX_FLAT_TIME_PCT = 66.8247
@@ -335,6 +337,8 @@ def update_files(state_path, history_path, probe, *, now_ts=None):
     span_hours = max(0.0, (now - first_ts) / 3600.0)
     minimum_rows = int(MIN_FORWARD_DAYS * 24.0 * 12.0 * MIN_FORWARD_COVERAGE)
     blockers = []
+    if not RESEARCH_VALID:
+        blockers.append("historical_research_invalidated")
     if span_hours < MIN_FORWARD_DAYS * 24.0:
         blockers.append("forward_span_lt_30d")
     if candidate["rows"] < minimum_rows:
@@ -350,6 +354,9 @@ def update_files(state_path, history_path, probe, *, now_ts=None):
         "candidate_id": CANDIDATE_ID,
         "shadow_only": True,
         "execution_allowed": False,
+        "confirmation_timebase": hysteresis.CONFIRMATION_TIMEBASE,
+        "research_valid": RESEARCH_VALID,
+        "research_invalidation_reason": RESEARCH_INVALIDATION_REASON,
         "promotion_ready": not blockers,
         "promotion_blockers": blockers,
         "updated_ts": now,

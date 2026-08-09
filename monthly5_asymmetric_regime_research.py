@@ -10,6 +10,7 @@ import pandas as pd
 
 import monthly5_intraday_regime as regime
 import monthly5_intramonth_recovery_research as account
+import monthly5_regime_hysteresis_research as hysteresis
 import monthly5_regime_specialist_research as specialist
 import monthly5_selector_cache
 import monthly5_volume_confirmation_research as volume
@@ -49,12 +50,12 @@ def build_asymmetric_position(
     range_grace_bars,
 ):
     regimes = regime.align_completed_series(frame_5m.index, labels, "unknown").astype(str)
-    position = np.zeros(len(frame_5m), dtype="float64")
     active = 0.0
     pending = ""
     pending_count = 0
     range_count = 0
-    for index, market_regime in enumerate(regimes):
+    event_positions = []
+    for market_regime in labels.astype(str):
         if market_regime in {"up", "down"}:
             range_count = 0
             if market_regime == pending:
@@ -80,7 +81,15 @@ def build_asymmetric_position(
             pending = ""
             pending_count = 0
             range_count = 0
-        position[index] = active
+        event_positions.append(active)
+    position_events = pd.Series(
+        event_positions,
+        index=labels.index,
+        dtype="float64",
+    )
+    position = regime.align_completed_series(frame_5m.index, position_events, 0.0).astype(
+        "float64"
+    )
     return pd.Series(position, index=frame_5m.index), regimes
 
 
@@ -235,6 +244,7 @@ def build_report(frame_5m):
     return {
         "schema_version": 1,
         "method": "completed_4h_asymmetric_confirmation_with_frozen_volume_gate",
+        "confirmation_timebase": hysteresis.CONFIRMATION_TIMEBASE,
         "source": frame_5m.attrs.get("kline_source", "binance_history_um"),
         "primary_config": account.PRIMARY_CONFIG,
         "primary_monthly_selections": selections,

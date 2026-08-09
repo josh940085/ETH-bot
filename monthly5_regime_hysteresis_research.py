@@ -23,16 +23,17 @@ RISK_PROFILES = (
 DEFAULT_OUTPUT = Path(
     ".runtime/data/backtests/monthly5_search/regime_hysteresis_v1_2020_20260803.json"
 )
+CONFIRMATION_TIMEBASE = "completed_4h_events"
 
 
 def build_hysteresis_position(frame_5m, labels, *, confirmation_bars, range_grace_bars):
     regimes = regime.align_completed_series(frame_5m.index, labels, "unknown").astype(str)
-    position = np.zeros(len(frame_5m), dtype="float64")
     active = 0.0
     pending = ""
     pending_count = 0
     range_count = 0
-    for index, market_regime in enumerate(regimes):
+    event_positions = []
+    for market_regime in labels.astype(str):
         if market_regime in {"up", "down"}:
             range_count = 0
             if market_regime == pending:
@@ -53,7 +54,15 @@ def build_hysteresis_position(frame_5m, labels, *, confirmation_bars, range_grac
             pending = ""
             pending_count = 0
             range_count = 0
-        position[index] = active
+        event_positions.append(active)
+    position_events = pd.Series(
+        event_positions,
+        index=labels.index,
+        dtype="float64",
+    )
+    position = regime.align_completed_series(frame_5m.index, position_events, 0.0).astype(
+        "float64"
+    )
     return pd.Series(position, index=frame_5m.index), regimes
 
 
@@ -194,6 +203,7 @@ def build_report(frame_5m):
     return {
         "schema_version": 1,
         "method": "completed_4h_regime_confirmation_and_range_grace",
+        "confirmation_timebase": CONFIRMATION_TIMEBASE,
         "source": frame_5m.attrs.get("kline_source", "binance_history_um"),
         "selection_uses_holdout": False,
         "candidate_count": len(candidates),

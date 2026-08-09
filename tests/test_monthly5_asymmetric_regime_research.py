@@ -10,8 +10,11 @@ class Monthly5AsymmetricRegimeResearchTests(unittest.TestCase):
         index = pd.date_range("2026-01-01", periods=12, freq="5min", tz="UTC")
         frame = pd.DataFrame({"close": range(12)}, index=index)
         labels = pd.Series(
-            ["up", "down", "range", "up", "down"],
-            index=index[[0, 2, 5, 7, 10]],
+            [
+                "up", "up", "down", "down", "down", "range",
+                "range", "up", "up", "up", "down", "down",
+            ],
+            index=index,
         )
         position, regimes = research.build_asymmetric_position(
             frame,

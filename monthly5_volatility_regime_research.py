@@ -251,6 +251,7 @@ def build_report(frame_5m):
     return {
         "schema_version": 1,
         "method": "completed_4h_atr_adx_regime_nested_validation",
+        "confirmation_timebase": hysteresis.CONFIRMATION_TIMEBASE,
         "source": frame_5m.attrs.get("kline_source", "binance_history_um"),
         "selection_uses_holdout": False,
         "risk_profile": RISK_PROFILE,
