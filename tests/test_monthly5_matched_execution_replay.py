@@ -89,6 +89,30 @@ class Monthly5MatchedExecutionReplayTests(unittest.TestCase):
         )
         self.assertEqual(exposures.tolist(), [1.0, -1.0, 1.0])
 
+    def test_recovery_uses_inverse_selected_at_bounded_leverage(self):
+        index = pd.date_range("2026-01-01 01:00:00Z", periods=4, freq="1h")
+        frame = pd.DataFrame(
+            {"close": [100.0, 99.0, 98.0, 97.0]}, index=index
+        )
+        key = "buy_hold|lev5|stopNone|targetNone|redlev1.0"
+        overlay = {
+            **replay.ACCOUNT_OVERLAYS[-1],
+            "direction_policy": "selected_signal",
+            "recovery_policy": "inverse_selected",
+            "recovery_trigger": -0.02,
+            "recovery_leverage": 0.5,
+            "recovery_exit": 0.0,
+        }
+        _, exposures = replay.simulate(
+            frame,
+            {"2026-01": key},
+            {key: np.ones(len(frame))},
+            overlay,
+        )
+        self.assertEqual(exposures[1], 5.0)
+        self.assertEqual(exposures[2], -0.5)
+        self.assertEqual(exposures[3], -0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

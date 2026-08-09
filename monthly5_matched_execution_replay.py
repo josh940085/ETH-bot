@@ -49,7 +49,7 @@ ACCOUNT_OVERLAYS = (
         "floor_guard": 0.051,
     },
 )
-OVERLAYS = tuple(
+BASE_OVERLAYS = tuple(
     {
         **account,
         "name": f"{account['name']}__{direction_policy}",
@@ -66,6 +66,30 @@ OVERLAYS = tuple(
         "completed_4h_specialist_don480",
     )
 )
+RECOVERY_OVERLAYS = tuple(
+    {
+        **ACCOUNT_OVERLAYS[-1],
+        "name": (
+            "monthly_stop8_lock5.5_red0.15_guard5.1"
+            f"__completed_4h_gate__recovery_{recovery_policy}"
+            f"_trigger{trigger}_lev{recovery_leverage}"
+        ),
+        "direction_policy": "completed_4h_gate",
+        "recovery_policy": recovery_policy,
+        "recovery_trigger": trigger,
+        "recovery_leverage": recovery_leverage,
+        "recovery_exit": 0.0,
+    }
+    for recovery_policy in (
+        "inverse_selected",
+        "completed_4h_force",
+        "specialist_ma24_96",
+        "specialist_mom480",
+    )
+    for trigger in (-0.02, -0.04, -0.06)
+    for recovery_leverage in (0.25, 0.5, 1.0)
+)
+OVERLAYS = BASE_OVERLAYS + RECOVERY_OVERLAYS
 
 
 def _load_json(path):
@@ -194,6 +218,7 @@ def simulate(
     effective_leverage = 0.0
     risk_off = False
     reduced = False
+    recovery_active = False
 
     for index, month in enumerate(month_keys):
         key = selected_by_month.get(str(month))
@@ -206,9 +231,11 @@ def simulate(
             effective_leverage = float(spec["leverage"])
             risk_off = False
             reduced = False
+            recovery_active = False
             previous_month = month
 
-        wanted = float(np.sign(desired_by_key[key][index]))
+        selected_wanted = float(np.sign(desired_by_key[key][index]))
+        wanted = selected_wanted
         market_regime = (
             str(market_regimes[index]) if market_regimes is not None else "unknown"
         )
@@ -234,6 +261,25 @@ def simulate(
                 wanted = min(0.0, float(specialist_paths["short"][index]))
         elif direction_policy != "selected_signal":
             raise ValueError(f"unsupported direction policy: {direction_policy}")
+        recovery_policy = str(overlay.get("recovery_policy") or "")
+        if recovery_active:
+            if recovery_policy == "inverse_selected":
+                wanted = -selected_wanted
+            elif recovery_policy == "completed_4h_force":
+                wanted = {"up": 1.0, "down": -1.0}.get(market_regime, 0.0)
+            elif recovery_policy.startswith("specialist_"):
+                specialist = recovery_policy.removeprefix("specialist_")
+                specialist_paths = (specialist_desired or {}).get(specialist)
+                if specialist_paths is None:
+                    raise ValueError(f"recovery specialist path missing: {specialist}")
+                if market_regime == "up":
+                    wanted = max(0.0, float(specialist_paths["long"][index]))
+                elif market_regime == "down":
+                    wanted = min(0.0, float(specialist_paths["short"][index]))
+                else:
+                    wanted = -selected_wanted
+            else:
+                raise ValueError(f"unsupported recovery policy: {recovery_policy}")
         exposure = 0.0 if risk_off else wanted * effective_leverage
         turnover = abs(exposure - previous_exposure)
         factor = max(
@@ -286,6 +332,28 @@ def simulate(
                 float(spec["leverage"]), float(reduced_leverage)
             )
             reduced = True
+            recovery_active = False
+        recovery_trigger = overlay.get("recovery_trigger")
+        recovery_exit = overlay.get("recovery_exit")
+        if (
+            recovery_active
+            and not reduced
+            and recovery_exit is not None
+            and month_equity >= 1.0 + float(recovery_exit)
+        ):
+            recovery_active = False
+            effective_leverage = float(spec["leverage"])
+        elif (
+            not recovery_active
+            and not reduced
+            and not risk_off
+            and recovery_trigger is not None
+            and month_equity <= 1.0 + float(recovery_trigger)
+        ):
+            recovery_active = True
+            effective_leverage = min(
+                float(spec["leverage"]), float(overlay["recovery_leverage"])
+            )
         previous_exposure = 0.0 if guard_triggered else exposure
     return factors, exposures
 
@@ -470,6 +538,8 @@ def build_report(frame_5m, selector_report):
         "deployment_ready": False,
         "deployment_blockers": [
             "monthly_return_target_not_consistent",
+            "flat_time_target_not_met",
+            "recovery_holdout_consistency_not_met",
             "hourly_matrix_replay_error_not_zero",
             "candidate_matrix_evaluation_period_reused_during_research",
             "live_shadow_promotion_not_met",
