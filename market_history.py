@@ -14,6 +14,7 @@ from runtime_paths import data_path
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "ETH-bot-market-history/1.0"})
+BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 
 
 def _month_start(value):
@@ -126,6 +127,55 @@ def _history_interval_ms(interval):
     value = int(match.group(1))
     unit_ms = {"m": 60_000, "h": 3_600_000, "d": 86_400_000}[match.group(2)]
     return value * unit_ms
+
+
+def fetch_klines_from_binance_api(symbol, interval, start_ms, end_ms, *, session=None):
+    """Fetch an inclusive historical range from the official Futures K-line API."""
+    interval_ms = _history_interval_ms(interval)
+    if interval_ms <= 0:
+        raise ValueError(f"unsupported Binance Futures interval: {interval}")
+    client = session or HTTP_SESSION
+    rows = []
+    cursor = int(start_ms)
+    while cursor <= int(end_ms):
+        response = client.get(
+            BINANCE_FUTURES_KLINES_URL,
+            params={
+                "symbol": str(symbol).upper(),
+                "interval": str(interval),
+                "startTime": cursor,
+                "endTime": int(end_ms),
+                "limit": 1500,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        page = response.json()
+        if not isinstance(page, list) or not page:
+            break
+        rows.extend(page)
+        next_cursor = int(page[-1][6]) + 1
+        if next_cursor <= cursor:
+            raise RuntimeError("Binance Futures K-line pagination did not advance")
+        cursor = next_cursor
+        if len(page) < 1500:
+            break
+    if not rows:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+    raw = pd.DataFrame(
+        rows,
+        columns=[
+            "open_time", "open", "high", "low", "close", "volume", "close_time",
+            "quote_volume", "count", "taker_buy_volume", "taker_buy_quote_volume", "ignore",
+        ],
+    )
+    raw = raw.drop_duplicates(subset=["open_time"]).sort_values("open_time")
+    raw["close_time"] = pd.to_datetime(raw["close_time"], unit="ms", utc=True)
+    for column in ("open", "high", "low", "close", "volume"):
+        raw[column] = pd.to_numeric(raw[column], errors="raise").astype("float64")
+    frame = raw.set_index("close_time")[["open", "high", "low", "close", "volume"]]
+    frame.attrs["kline_source"] = "binance_futures_api"
+    return frame
 
 def validate_binance_history_zip(path, symbol, interval, year, month, day=None):
     path = Path(path)

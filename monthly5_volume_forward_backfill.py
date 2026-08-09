@@ -6,7 +6,6 @@ import time
 from pathlib import Path
 
 import pandas as pd
-import requests
 
 import market_history
 import monthly5_volume_forward_shadow as shadow
@@ -15,53 +14,6 @@ import verify_monthly5_volume_forward as verifier
 
 DEFAULT_STATE = Path(".runtime/data/btcusdt_monthly5_volume_forward_state.json")
 DEFAULT_HISTORY = Path(".runtime/data/btcusdt_monthly5_volume_forward_history.jsonl")
-BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
-
-
-def _fetch_binance_tail(symbol, interval, start_ms, end_ms):
-    rows = []
-    cursor = int(start_ms)
-    session = requests.Session()
-    session.headers.update({"User-Agent": "ETH-bot-monthly5-forward/1.0"})
-    while cursor < int(end_ms):
-        response = session.get(
-            BINANCE_FUTURES_KLINES_URL,
-            params={
-                "symbol": symbol,
-                "interval": interval,
-                "startTime": cursor,
-                "endTime": int(end_ms),
-                "limit": 1500,
-            },
-            timeout=20,
-        )
-        response.raise_for_status()
-        page = response.json()
-        if not isinstance(page, list) or not page:
-            break
-        rows.extend(page)
-        next_cursor = int(page[-1][6]) + 1
-        if next_cursor <= cursor:
-            raise RuntimeError("Binance kline pagination did not advance")
-        cursor = next_cursor
-        if len(page) < 1500:
-            break
-    if not rows:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-    frame = pd.DataFrame(
-        rows,
-        columns=[
-            "open_time", "open", "high", "low", "close", "volume", "close_time",
-            "quote_volume", "count", "taker_buy_volume", "taker_buy_quote_volume", "ignore",
-        ],
-    )
-    frame = frame.drop_duplicates(subset=["open_time"]).sort_values("open_time")
-    frame["close_time"] = pd.to_datetime(frame["close_time"], unit="ms", utc=True)
-    for column in ("open", "high", "low", "close", "volume"):
-        frame[column] = pd.to_numeric(frame[column], errors="raise").astype("float64")
-    frame = frame.set_index("close_time")[["open", "high", "low", "close", "volume"]]
-    frame.attrs["kline_source"] = "binance_futures_api"
-    return frame
 
 
 def fetch_forward_frame(symbol, interval, start_ms, end_ms):
@@ -69,7 +21,9 @@ def fetch_forward_frame(symbol, interval, start_ms, end_ms):
         symbol, interval, start_ms, end_ms
     )
     last_close_ms = int(archived.index.max().timestamp() * 1000)
-    tail = _fetch_binance_tail(symbol, interval, last_close_ms + 1, end_ms)
+    tail = market_history.fetch_klines_from_binance_api(
+        symbol, interval, last_close_ms + 1, end_ms
+    )
     if tail.empty:
         return archived
     frame = pd.concat([archived, tail]).sort_index()

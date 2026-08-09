@@ -250,12 +250,27 @@ def embed_verification(cache, verification):
 def load_history(start_day, end_day):
     start = pd.Timestamp(start_day, tz="UTC") - pd.Timedelta(days=4)
     end = pd.Timestamp(end_day, tz="UTC") + pd.Timedelta(days=1)
-    return market_history.fetch_klines_from_binance_history(
+    frame = market_history.fetch_klines_from_binance_history(
         "BTCUSDT",
         "5m",
         int(start.timestamp() * 1000),
         int(end.timestamp() * 1000),
     )
+    first_expected_close = start + pd.Timedelta(minutes=5) - pd.Timedelta(milliseconds=1)
+    if frame.empty or frame.index.min() > first_expected_close:
+        prefix_end = end if frame.empty else frame.index.min() - pd.Timedelta(milliseconds=1)
+        prefix = market_history.fetch_klines_from_binance_api(
+            "BTCUSDT",
+            "5m",
+            int(start.timestamp() * 1000),
+            int(prefix_end.timestamp() * 1000),
+        )
+        if not prefix.empty:
+            archive_source = frame.attrs.get("kline_source", "binance_history_um")
+            frame = pd.concat([prefix, frame]).sort_index()
+            frame = frame[~frame.index.duplicated(keep="last")]
+            frame.attrs["kline_source"] = f"binance_futures_api+{archive_source}"
+    return frame
 
 
 def main():
