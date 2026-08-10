@@ -7155,6 +7155,26 @@ def manage_monthly5_position_guard(current_price, decision=None):
             sync_position_panel(current_price)
         return False
 
+    # This guard exists to enforce monthly5's own shadow-candidate exposure
+    # caps (lock/recovery/floor-guard) on positions that were actually
+    # opened per monthly5's own signal. It must not act on a position opened
+    # by the regular strategy - monthly5's current exposure_cap reflects its
+    # own unrelated directional opinion, not a judgment on that trade, and
+    # applying it there force-closes/reduces a position for no real reason
+    # (observed live: a real short opened at 00:25:11 got force-closed via
+    # this path 9 seconds later, entirely by monthly5's own "wait" state).
+    entry_selection = (
+        active_trade.get("monthly5_entry_selection")
+        if isinstance(active_trade.get("monthly5_entry_selection"), dict)
+        else {}
+    )
+    if str(entry_selection.get("shadow_action") or "") not in {
+        "evaluate_long",
+        "evaluate_short",
+        "reduced_exposure",
+    }:
+        return False
+
     now_ts = time.time()
     cooldown = max(20.0, _safe_float(os.getenv("MONTHLY5_POSITION_GUARD_COOLDOWN_SEC", 60), 60))
     last_ts = _safe_float(active_trade.get("monthly5_position_guard_ts"), 0.0)
@@ -18914,7 +18934,11 @@ def run_bot():
                 active_trade["scale_add_pause_ts"] = 0.0
                 active_trade["last_scale_skip_notify_key"] = ""
                 active_trade["last_scale_skip_notify_ts"] = 0.0
-                active_trade["monthly5_position_guard_ts"] = 0.0
+                # 0.0 here means "epoch", so now_ts - 0.0 always exceeds the
+                # cooldown and the guard fires on its very first evaluation
+                # right after open. Seed it with now so the intended
+                # cooldown actually delays that first check.
+                active_trade["monthly5_position_guard_ts"] = time.time()
                 active_trade["monthly5_entry_selection"] = dict(
                     (
                         (
