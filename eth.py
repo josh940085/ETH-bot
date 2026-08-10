@@ -94,8 +94,6 @@ from telegram import (
     _send_trade_notification,
     _send_telegram_message,
     _sanitize_telegram_text,
-    DISCORD_WEBHOOK,
-    DISCORD_NEWS,
 )
 
 load_local_env(overwrite=True, names=(".env",))
@@ -300,18 +298,12 @@ def _safe_float_env_names(names, default: float) -> float:
 MINI_APP_URL = _normalize_mini_app_url(os.getenv("TELEGRAM_MINI_APP_URL", DEFAULT_MINI_APP_URL))
 
 # ===== News service =====
-from telegram import _post_discord_webhook
 from news import (
     _is_market_relevant_news,
-    _major_equity_market_move_override,
-    _news_dedupe_key,
     _process_pending_news_evaluations,
-    _register_news_push_if_new,
-    analyze_news_text,
-    build_news_message,
-    build_panel_news_items,
     load_news_model,
     normalize_news_text,
+    process_and_push_news,
     refresh_rss_news_cache,
     translate_news_to_zh,
 )
@@ -17371,21 +17363,6 @@ def _build_monthly5_live_selector_decision(df_1d=None, df_4h=None):
     decision["input_probe"] = input_probe
     return decision
 
-def _trim_recent_news_keys(seen, max_keep=200):
-    """Keep only the most-recently-inserted `max_keep` keys.
-
-    `seen` must be an insertion-ordered mapping (a plain dict). A set was
-    used here previously; set iteration order is not insertion order, so
-    trimming via set(list(some_set)[-n:]) silently dropped an arbitrary
-    selection of keys instead of the oldest ones, letting already-pushed
-    headlines fall out of memory early and get reprocessed as "new".
-    """
-    if max_keep <= 0:
-        return {}
-    items = list(seen.items())
-    return dict(items[-max_keep:])
-
-
 # =============================
 # 主邏輯（AI接管）
 # =============================
@@ -17796,97 +17773,8 @@ def run_bot():
             )
 
             # ===== 🔥 即時新聞推送（任何時候都推送，不依賴是否持倉）=====
-            if not hasattr(run_bot, "last_news_set"):
-                # Insertion-ordered (plain dict, Python 3.7+) rather than a
-                # set: the trim below keeps the most-recently-seen keys, and
-                # a set's iteration order is not insertion order, so it was
-                # evicting arbitrary keys instead of the oldest ones.
-                run_bot.last_news_set = {}
-
-            if not hasattr(run_bot, "startup_news_snapshot_sent"):
-                run_bot.startup_news_snapshot_sent = False
-
             if news_list:
-                POSITION_PANEL_STATE["latest_news"] = build_panel_news_items(news_list, limit=5)
-                new_news = []
-
-                for n in news_list:
-                    news_key = _news_dedupe_key(n)
-                    if news_key and news_key not in run_bot.last_news_set:
-                        new_news.append(n)
-
-                if not run_bot.startup_news_snapshot_sent and news_list:
-                    snapshot_header = (
-                        "🧭 啟動新聞快照\n"
-                        "━━━━━━━━━━━━━━\n"
-                        f"已抓到 {len(news_list)} 則 RSS 即時訊息\n"
-                        "━━━━━━━━━━━━━━"
-                    )
-                    print("\n" + snapshot_header)
-                    # 啟動時 RSS 會回傳目前仍在 feed 裡的舊標題；只拿來建立
-                    # 面板/分析快照並寫入持久化去重，不重新推送一輪。
-                    urgent_startup_news = []
-                    for startup_news in news_list:
-                        startup_key = _news_dedupe_key(startup_news)
-                        if startup_key:
-                            run_bot.last_news_set[startup_key] = True
-                        startup_raw = re.sub(r"^\[[^\]]+\]\s*", "", str(startup_news)).strip()
-                        if startup_raw:
-                            urgent_bias, _ = _major_equity_market_move_override(startup_raw)
-                            if urgent_bias and len(urgent_startup_news) < 3:
-                                # Let the normal push path apply persistent dedupe.
-                                # This preserves startup flood protection while not
-                                # suppressing a current national-index crash/rally headline.
-                                urgent_startup_news.append(startup_news)
-                            else:
-                                _register_news_push_if_new(startup_raw)
-                    new_news = urgent_startup_news
-                    run_bot.startup_news_snapshot_sent = True
-
-                new_news = new_news[:15]
-
-                if new_news:
-                    now_time = datetime.datetime.now().strftime("%H:%M:%S")
-
-                    for n in new_news:
-                        # Mark every inspected title as processed. Previously neutral/noise
-                        # titles were retried every loop and polluted the learning log.
-                        news_key = _news_dedupe_key(n)
-                        if news_key:
-                            run_bot.last_news_set[news_key] = True
-                        raw_news = re.sub(r"^\[[^\]]+\]\s*", "", str(n)).strip()
-                        if not _is_market_relevant_news(raw_news):
-                            continue
-
-                        analysis = analyze_news_text(raw_news)
-                        min_confidence = max(
-                            0.0,
-                            min(1.0, _safe_float(os.getenv("NEWS_PUSH_MIN_CONFIDENCE", 0.55), 0.55)),
-                        )
-                        if (
-                            _safe_int(analysis.get("bias"), 0) == 0
-                            or _safe_float(analysis.get("ai_confidence"), 0.0) < min_confidence
-                        ):
-                            continue
-
-                        if not _register_news_push_if_new(raw_news):
-                            print(f"🔕 重複/近似新聞已略過: {raw_news[:90]}")
-                            continue
-
-                        msg_news = build_news_message(n, now_time, analysis=analysis)
-
-                        # 🔥 過濾中性新聞
-                        if "📊 解讀: 中性" in msg_news:
-                            continue
-
-                        print("\n" + msg_news)
-                        if DISCORD_NEWS:
-                            try:
-                                _post_discord_webhook(DISCORD_NEWS, msg_news, timeout=5)
-                            except Exception as _e:
-                                print("Discord news error:", _e)
-                    if len(run_bot.last_news_set) > 500:
-                        run_bot.last_news_set = _trim_recent_news_keys(run_bot.last_news_set, max_keep=200)
+                POSITION_PANEL_STATE["latest_news"] = process_and_push_news(news_list)
 
             # ===== 即時新聞摘要（顯示在主訊號內）=====
             news_text = ""

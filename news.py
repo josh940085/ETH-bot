@@ -13,6 +13,7 @@ from sklearn.naive_bayes import ComplementNB
 from sklearn.pipeline import FeatureUnion
 from runtime_config import is_truthy as _is_truthy
 from runtime_paths import data_path, ensure_parent_dir
+from telegram import _post_discord_webhook, DISCORD_NEWS
 
 def _safe_float(value, default=0.0):
     try: return float(value)
@@ -683,6 +684,123 @@ def _is_market_relevant_news(text: str) -> bool:
     return bool(_news_relevance_reason(text))
 
 
+def _trim_recent_news_keys(seen, max_keep=200):
+    """Keep only the most-recently-inserted `max_keep` keys.
+
+    `seen` must be an insertion-ordered mapping (a plain dict). A set was
+    used here previously; set iteration order is not insertion order, so
+    trimming via set(list(some_set)[-n:]) silently dropped an arbitrary
+    selection of keys instead of the oldest ones, letting already-pushed
+    headlines fall out of memory early and get reprocessed as "new".
+    """
+    if max_keep <= 0:
+        return {}
+    items = list(seen.items())
+    return dict(items[-max_keep:])
+
+
+def process_and_push_news(news_list, *, discord_webhook=None, now_time=None):
+    """Decide which headlines are new, analyze, dedupe, and push to Discord.
+
+    Owns its own last-seen/startup-snapshot state as function attributes,
+    mirroring the existing idiom used by refresh_rss_news_cache.seen_news
+    and _register_news_push_if_new._history. Callers should only invoke
+    this when `news_list` is non-empty (matches the previous inline
+    behavior of leaving the panel's last snapshot untouched otherwise).
+
+    Returns the panel items list for POSITION_PANEL_STATE["latest_news"].
+    """
+    if not hasattr(process_and_push_news, "last_news_set"):
+        process_and_push_news.last_news_set = {}
+    if not hasattr(process_and_push_news, "startup_news_snapshot_sent"):
+        process_and_push_news.startup_news_snapshot_sent = False
+
+    discord_webhook = discord_webhook if discord_webhook is not None else DISCORD_NEWS
+    panel_items = build_panel_news_items(news_list, limit=5)
+
+    new_news = []
+    for n in news_list:
+        news_key = _news_dedupe_key(n)
+        if news_key and news_key not in process_and_push_news.last_news_set:
+            new_news.append(n)
+
+    if not process_and_push_news.startup_news_snapshot_sent and news_list:
+        snapshot_header = (
+            "🧭 啟動新聞快照\n"
+            "━━━━━━━━━━━━━━\n"
+            f"已抓到 {len(news_list)} 則 RSS 即時訊息\n"
+            "━━━━━━━━━━━━━━"
+        )
+        print("\n" + snapshot_header)
+        # 啟動時 RSS 會回傳目前仍在 feed 裡的舊標題；只拿來建立
+        # 面板/分析快照並寫入持久化去重，不重新推送一輪。
+        urgent_startup_news = []
+        for startup_news in news_list:
+            startup_key = _news_dedupe_key(startup_news)
+            if startup_key:
+                process_and_push_news.last_news_set[startup_key] = True
+            startup_raw = re.sub(r"^\[[^\]]+\]\s*", "", str(startup_news)).strip()
+            if startup_raw:
+                urgent_bias, _ = _major_equity_market_move_override(startup_raw)
+                if urgent_bias and len(urgent_startup_news) < 3:
+                    # Let the normal push path apply persistent dedupe.
+                    # This preserves startup flood protection while not
+                    # suppressing a current national-index crash/rally headline.
+                    urgent_startup_news.append(startup_news)
+                else:
+                    _register_news_push_if_new(startup_raw)
+        new_news = urgent_startup_news
+        process_and_push_news.startup_news_snapshot_sent = True
+
+    new_news = new_news[:15]
+
+    if new_news:
+        now_time = now_time or datetime.datetime.now().strftime("%H:%M:%S")
+
+        for n in new_news:
+            # Mark every inspected title as processed. Previously neutral/noise
+            # titles were retried every loop and polluted the learning log.
+            news_key = _news_dedupe_key(n)
+            if news_key:
+                process_and_push_news.last_news_set[news_key] = True
+            raw_news = re.sub(r"^\[[^\]]+\]\s*", "", str(n)).strip()
+            if not _is_market_relevant_news(raw_news):
+                continue
+
+            analysis = analyze_news_text(raw_news)
+            min_confidence = max(
+                0.0,
+                min(1.0, _safe_float(os.getenv("NEWS_PUSH_MIN_CONFIDENCE", 0.55), 0.55)),
+            )
+            if (
+                _safe_int(analysis.get("bias"), 0) == 0
+                or _safe_float(analysis.get("ai_confidence"), 0.0) < min_confidence
+            ):
+                continue
+
+            if not _register_news_push_if_new(raw_news):
+                print(f"🔕 重複/近似新聞已略過: {raw_news[:90]}")
+                continue
+
+            msg_news = build_news_message(n, now_time, analysis=analysis)
+
+            # 🔥 過濾中性新聞
+            if "📊 解讀: 中性" in msg_news:
+                continue
+
+            print("\n" + msg_news)
+            if discord_webhook:
+                try:
+                    _post_discord_webhook(discord_webhook, msg_news, timeout=5)
+                except Exception as _e:
+                    print("Discord news error:", _e)
+
+        if len(process_and_push_news.last_news_set) > 500:
+            process_and_push_news.last_news_set = _trim_recent_news_keys(
+                process_and_push_news.last_news_set, max_keep=200
+            )
+
+    return panel_items
 
 
 def _sanitize_news_label(label):
