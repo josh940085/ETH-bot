@@ -46,9 +46,6 @@ from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from local_chat import extract_chat_text as _extract_chat_text
-import monthly5_shadow
-import monthly5_research_selector
-import monthly5_volume_forward_shadow
 from runtime_config import (
     env_float as _safe_float_env,
     env_int as _safe_int_env,
@@ -215,14 +212,6 @@ TELEGRAM_POLL_BACKOFF_MAX = 60.0
 
 # ===== Discord（同步通知） =====
 POSITION_PANEL_FILE = data_path("docs", "position.json")
-MONTHLY5_SHADOW_STATE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_monthly5_shadow_state.json")
-MONTHLY5_SHADOW_HISTORY_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_monthly5_shadow_history.jsonl")
-MONTHLY5_VOLUME_FORWARD_STATE_PATH = data_path(
-    f"{SYMBOL_DATA_PREFIX}_monthly5_volume_forward_state.json"
-)
-MONTHLY5_VOLUME_FORWARD_HISTORY_PATH = data_path(
-    f"{SYMBOL_DATA_PREFIX}_monthly5_volume_forward_history.jsonl"
-)
 PENDING_TRAINING_SAMPLE_PATH = data_path(f"{SYMBOL_DATA_PREFIX}_pending_training_sample.json")
 MAINTENANCE_REPORT_FILE = data_path("maintenance_latest_report.json")
 PROGRAM_LOG_FILE = data_path("..", "logs", "program.log").resolve()
@@ -4586,7 +4575,6 @@ def sync_active_trade_from_binance(send_notice=False):
     active_trade["scale_add_pause_ts"] = _safe_float(active_trade.get("scale_add_pause_ts"), 0.0) if preserve_local_state else 0.0
     active_trade["last_scale_skip_notify_key"] = str(active_trade.get("last_scale_skip_notify_key") or "") if preserve_local_state else ""
     active_trade["last_scale_skip_notify_ts"] = _safe_float(active_trade.get("last_scale_skip_notify_ts"), 0.0) if preserve_local_state else 0.0
-    active_trade["monthly5_position_guard_ts"] = _safe_float(active_trade.get("monthly5_position_guard_ts"), 0.0) if preserve_local_state else 0.0
     prev_open_time = _safe_float(active_trade.get("open_time"), 0.0)
     active_trade["open_time"] = prev_open_time if preserve_local_state and prev_open_time > 0 else time.time()
     active_trade["tp_sl_adjusted_4h"] = bool(active_trade.get("tp_sl_adjusted_4h", False)) if preserve_local_state else False
@@ -5883,705 +5871,6 @@ def _recent_sl_guard_reason(final, score, net_edge_rate_est, risk_rate, macro_bi
     return ""
 
 
-def _update_monthly5_shadow_panel_state(mark_price=None, decision=None, strategy_signal=None, strategy_execution_reason=None):
-    if not _is_truthy(os.getenv("MONTHLY5_SHADOW_ENABLED", "1")):
-        cached = dict(POSITION_PANEL_STATE.get("monthly5_shadow") or {})
-        cached["enabled"] = False
-        cached["shadow_only"] = True
-        POSITION_PANEL_STATE["monthly5_shadow"] = cached
-        return cached
-
-    try:
-        decision = decision if isinstance(decision, dict) else {}
-        previous = monthly5_shadow.load_state(MONTHLY5_SHADOW_STATE_PATH)
-        position_qty = max(0.0, _safe_float(POSITION_PANEL_STATE.get("binance_qty"), 0.0))
-        position_open = bool(active_trade.get("open")) or position_qty > 0
-        position_side = str(
-            active_trade.get("direction") or POSITION_PANEL_STATE.get("direction") or ""
-        ).lower()
-        effective_strategy_signal = str(
-            strategy_signal or POSITION_PANEL_STATE.get("strategy_signal") or "wait"
-        ).lower()
-        if position_open and position_side in {"long", "short"}:
-            effective_strategy_signal = position_side
-        snapshot = monthly5_shadow.update_shadow_state(
-            previous,
-            now_ts=time.time(),
-            mark_price=_safe_float(mark_price, POSITION_PANEL_STATE.get("binance_mark_price", 0.0)),
-            wallet_balance=_safe_float(POSITION_PANEL_STATE.get("account_wallet_balance_usdt"), 0.0),
-            margin_balance=_safe_float(POSITION_PANEL_STATE.get("account_margin_balance_usdt"), 0.0),
-            unrealized_pnl=_safe_float(POSITION_PANEL_STATE.get("binance_unrealized_pnl_usdt"), 0.0),
-            position_open=position_open,
-            position_side=position_side,
-            position_notional=_safe_float(POSITION_PANEL_STATE.get("position_notional_usdt"), 0.0),
-            selected_candidate=(
-                (POSITION_PANEL_STATE.get("monthly5_shadow") or {}).get("selected_candidate")
-            ),
-        )
-        readiness_report = monthly5_shadow.build_readiness_report(
-            monthly5_shadow.load_history(MONTHLY5_SHADOW_HISTORY_PATH),
-            strategy_id=monthly5_shadow.STRATEGY_ID,
-            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
-            min_records=_safe_int(os.getenv("MONTHLY5_READINESS_MIN_RECORDS"), 48),
-            min_span_hours=_safe_float(
-                os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS"),
-                monthly5_shadow.READINESS_MIN_SPAN_HOURS,
-            ),
-            max_age_sec=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_AGE_SEC"), 900.0),
-            max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
-            required_selector_source=monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
-        )
-        snapshot["promotion_ready"] = bool(readiness_report.get("promotion_ready", False))
-        snapshot["promotion_blockers"] = list(readiness_report.get("promotion_blockers") or [])
-        snapshot["promotion_blocker_details"] = list(readiness_report.get("promotion_blocker_details") or [])
-        if isinstance(decision.get("monthly5_live_selector_input"), dict):
-            snapshot["live_selector_input"] = dict(decision.get("monthly5_live_selector_input") or {})
-        elif isinstance(previous.get("live_selector_input"), dict):
-            snapshot["live_selector_input"] = dict(previous.get("live_selector_input") or {})
-        elif isinstance(POSITION_PANEL_STATE.get("monthly5_live_selector_input"), dict):
-            snapshot["live_selector_input"] = dict(POSITION_PANEL_STATE.get("monthly5_live_selector_input") or {})
-        if isinstance(decision.get("monthly5_live_selector_decision"), dict):
-            snapshot["live_selector_decision"] = dict(decision.get("monthly5_live_selector_decision") or {})
-        elif isinstance(previous.get("live_selector_decision"), dict):
-            snapshot["live_selector_decision"] = dict(previous.get("live_selector_decision") or {})
-        elif isinstance(POSITION_PANEL_STATE.get("monthly5_live_selector_decision"), dict):
-            snapshot["live_selector_decision"] = dict(POSITION_PANEL_STATE.get("monthly5_live_selector_decision") or {})
-        market_selection = monthly5_shadow.build_market_selection(
-            snapshot,
-            strategy_signal=effective_strategy_signal,
-            strategy_execution_reason=str(
-                strategy_execution_reason
-                or POSITION_PANEL_STATE.get("strategy_execution_reason")
-                or ""
-            ),
-            strategy_context=(
-                {
-                    "htf": decision.get("htf"),
-                    "mid_trend": decision.get("mid_trend"),
-                    "macro_bias": decision.get("macro_bias"),
-                }
-                if decision
-                else dict(POSITION_PANEL_STATE.get("strategy_context") or {})
-            ),
-            host_logic=(
-                dict(decision.get("host_opening_logic") or {})
-                if decision
-                else dict(POSITION_PANEL_STATE.get("strategy_host_logic") or {})
-            ),
-            macro_alignment=(
-                dict(decision.get("macro_indicator_alignment") or {})
-                if decision
-                else dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {})
-            ),
-            donchian_state=(
-                dict(decision.get("donchian_market_state") or {})
-                if decision
-                else dict(POSITION_PANEL_STATE.get("strategy_donchian_market_state") or {})
-            ),
-            underperforming_plan_keys=readiness_report.get("shadow_active_underperforming_plan_keys") or [],
-            recovering_plan_keys=readiness_report.get("shadow_suppressed_recovering_plan_keys") or [],
-            probe_success_plan_keys=readiness_report.get("shadow_recovery_probe_success_keys") or [],
-            probe_candidate_plan_keys=readiness_report.get("shadow_recovery_probe_candidate_keys") or [],
-            promotion_blockers=readiness_report.get("promotion_blockers") or [],
-            previous_market_selection=previous.get("market_selection") if isinstance(previous.get("market_selection"), dict) else {},
-            previous_market_selection_ts=_safe_int(previous.get("updated_ts"), 0),
-            research_selector_decision=snapshot.get("live_selector_decision") if isinstance(snapshot.get("live_selector_decision"), dict) else {},
-        )
-        if position_open:
-            active_underperforming_keys = {
-                str(key)
-                for key in (readiness_report.get("shadow_active_underperforming_plan_keys") or [])
-                if str(key)
-            }
-            entry_selection = (
-                active_trade.get("monthly5_entry_selection")
-                if isinstance(active_trade.get("monthly5_entry_selection"), dict)
-                else {}
-            )
-            if str(entry_selection.get("shadow_action") or "") in {"evaluate_long", "evaluate_short", "reduced_exposure"}:
-                market_selection = dict(entry_selection)
-                market_selection["strategy_signal"] = effective_strategy_signal
-                market_selection["strategy_execution_reason"] = str(
-                    strategy_execution_reason
-                    or POSITION_PANEL_STATE.get("strategy_execution_reason")
-                    or "持倉中保留月報酬5%入場選擇"
-                )
-                market_selection["rationale"] = str(
-                    market_selection.get("rationale")
-                    or "持倉中保留月報酬5%入場選擇"
-                )
-                reason_codes = set(str(code) for code in market_selection.get("reason_codes") or [] if code)
-                reason_codes.add("entry_selection_preserved")
-                selection_key = "|".join(
-                    (
-                        str(market_selection.get("selected_plan") or ""),
-                        str(market_selection.get("shadow_action") or ""),
-                        str(market_selection.get("market_bias") or ""),
-                        str(market_selection.get("market_state") or ""),
-                    )
-                )
-                if selection_key in active_underperforming_keys:
-                    market_selection["exposure_cap"] = round(
-                        min(
-                            _safe_float(market_selection.get("exposure_cap"), 1.0),
-                            monthly5_shadow.RECOVERY_PROBE_EXPOSURE_CAP,
-                        ),
-                        4,
-                    )
-                    reason_codes.add("active_underperforming_position_cap")
-                    market_selection["rationale"] = "持倉同類市場組近期負報酬，降至低曝險觀察"
-                market_selection["reason_codes"] = sorted(reason_codes)
-        snapshot["market_selection"] = market_selection
-        volume_probe = (
-            decision.get("monthly5_volume_forward_probe")
-            if isinstance(decision.get("monthly5_volume_forward_probe"), dict)
-            else {}
-        )
-        if volume_probe:
-            volume_forward_state = monthly5_volume_forward_shadow.update_files(
-                MONTHLY5_VOLUME_FORWARD_STATE_PATH,
-                MONTHLY5_VOLUME_FORWARD_HISTORY_PATH,
-                volume_probe,
-            )
-            POSITION_PANEL_STATE["monthly5_volume_forward_shadow"] = volume_forward_state
-        guard = monthly5_shadow.build_execution_guard(
-            snapshot,
-            direction=effective_strategy_signal,
-            requested_size=_safe_float((decision or {}).get("position_size"), 0.0),
-        )
-        POSITION_PANEL_STATE["monthly5_execution_guard"] = guard
-        monthly5_shadow.save_state(MONTHLY5_SHADOW_STATE_PATH, snapshot)
-        monthly5_shadow.append_history(
-            MONTHLY5_SHADOW_HISTORY_PATH,
-            snapshot,
-            guard,
-            min_interval_sec=_safe_int(os.getenv("MONTHLY5_SHADOW_HISTORY_MIN_INTERVAL_SEC"), 300),
-        )
-        POSITION_PANEL_STATE["monthly5_shadow"] = snapshot
-        return snapshot
-    except Exception as exc:
-        print(f"⚠️ monthly5 shadow 更新失敗: {exc}")
-        return dict(POSITION_PANEL_STATE.get("monthly5_shadow") or {})
-
-
-def _apply_monthly5_execution_guard(decision, direction, requested_size, mark_price=None):
-    if not _is_truthy(os.getenv("MONTHLY5_EXECUTION_GUARD_ENABLED", "1")):
-        return {
-            "enabled": False,
-            "allowed": True,
-            "requested_size": round(max(0.0, _safe_float(requested_size, 0.0)), 4),
-            "adjusted_size": round(max(0.0, _safe_float(requested_size, 0.0)), 4),
-            "reason_code": "disabled",
-            "reason": "monthly5 execution guard disabled",
-        }
-    shadow_state = _update_monthly5_shadow_panel_state(
-        mark_price,
-        decision=decision,
-        strategy_signal=direction,
-        strategy_execution_reason=str((decision or {}).get("final") or ""),
-    )
-    guard = monthly5_shadow.build_execution_guard(
-        shadow_state,
-        direction=direction,
-        requested_size=requested_size,
-    )
-    daily_min_trade = bool((decision or {}).get("daily_min_trade", False))
-    if guard.get("allowed", True) and daily_min_trade and not bool(shadow_state.get("promotion_ready", False)):
-        research_probe = monthly5_research_selector.build_research_selector_probe()
-        primary_direction = str(research_probe.get("primary_direction") or "wait").lower()
-        direction_label = str(research_probe.get("direction_label") or "")
-        if (
-            research_probe.get("artifact_available")
-            and not research_probe.get("stale")
-            and primary_direction == "long"
-            and direction == "short"
-            and direction_label in {"long_flat", "long_only"}
-        ):
-            guard = dict(guard)
-            guard.update(
-                {
-                    "allowed": False,
-                    "reason_code": "monthly5_daily_min_research_direction_mismatch",
-                    "reason": "月報酬5% research selector 本月偏多/空倉，禁止每日最低空單",
-                    "adjusted_size": 0.0,
-                    "capped": True,
-                    "research_selector_top_pick": str(research_probe.get("top_pick") or ""),
-                    "research_selector_direction": primary_direction,
-                }
-            )
-    selection = shadow_state.get("market_selection") if isinstance(shadow_state.get("market_selection"), dict) else {}
-    reason_codes = {str(code) for code in selection.get("reason_codes") or [] if code}
-    last_close_reason = str(POSITION_PANEL_STATE.get("last_close_reason") or "").upper()
-    last_close_ts = _safe_float(POSITION_PANEL_STATE.get("last_close_ts"), 0.0)
-    cooldown_sec = max(
-        60.0,
-        _safe_float(os.getenv("MONTHLY5_MICRO_PROBE_SL_COOLDOWN_SEC", 900), 900),
-    )
-    if (
-        guard.get("allowed", True)
-        and "underperforming_micro_probe" in reason_codes
-        and last_close_reason == "SL"
-        and time.time() - last_close_ts <= cooldown_sec
-    ):
-        guard = dict(guard)
-        guard.update(
-            {
-                "allowed": False,
-                "reason_code": "monthly5_micro_probe_sl_cooldown",
-                "reason": "月報酬5% micro-probe 剛停損，等待重新確認",
-                "adjusted_size": 0.0,
-                "capped": True,
-                "last_close_reason": last_close_reason,
-                "cooldown_remaining_sec": round(max(0.0, cooldown_sec - (time.time() - last_close_ts)), 1),
-            }
-        )
-    POSITION_PANEL_STATE["monthly5_execution_guard"] = guard
-    return guard
-
-
-def _build_monthly5_signal_override(decision, monthly5_state, current_price):
-    if not _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_ENABLED", "1")):
-        return {"applied": False, "reason": "disabled"}
-    direct_takeover = _is_truthy(os.getenv("MONTHLY5_DIRECT_TAKEOVER", "0"))
-    promotion_blockers = [str(code) for code in (monthly5_state or {}).get("promotion_blockers") or [] if code]
-    direct_takeover_allowed_blockers = {
-        "sample_span",
-        "shadow_projection_not_valid",
-        "shadow_rolling_projection_not_valid",
-    }
-    direct_takeover_can_bypass_promotion = (
-        direct_takeover
-        and bool(promotion_blockers)
-        and set(promotion_blockers).issubset(direct_takeover_allowed_blockers)
-    )
-
-    decision = decision if isinstance(decision, dict) else {}
-    final = str(decision.get("final") or "")
-    if not final.startswith("觀望"):
-        return {"applied": False, "reason": "host_signal_active"}
-
-    allowed_wait_reasons = (
-        "觀望",
-        "觀望（等支撐跌破或承接確認）",
-        "觀望（等壓力突破或反彈失敗）",
-        "觀望（支撐連測未跌破）",
-        "觀望（壓力連測未突破）",
-    )
-    rr_wait_candidate = final == "觀望（RR不足）"
-    profile_wait_candidate = final == "觀望（MLX回測輪廓不佳）"
-    protected_wait_reason = final not in allowed_wait_reasons and not rr_wait_candidate and not profile_wait_candidate
-
-    selection = {}
-    if isinstance(monthly5_state, dict) and isinstance(monthly5_state.get("market_selection"), dict):
-        selection = monthly5_state.get("market_selection") or {}
-    shadow_action = str(selection.get("shadow_action") or "")
-    if shadow_action == "evaluate_long":
-        direction = "long"
-        final_text = "📈 月報酬5%策略做多"
-    elif shadow_action == "evaluate_short":
-        direction = "short"
-        final_text = "📉 月報酬5%策略做空"
-    else:
-        return {"applied": False, "reason": "monthly5_not_entry", "shadow_action": shadow_action}
-
-    selected_plan = str(selection.get("selected_plan") or "")
-    if selected_plan in {"underperforming_wait", "macro_block_wait", "risk_off"}:
-        return {"applied": False, "reason": "monthly5_plan_blocked", "selected_plan": selected_plan}
-    if (
-        _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_REQUIRE_PROMOTION_READY", "1"))
-        and not direct_takeover_can_bypass_promotion
-        and not bool(monthly5_state.get("promotion_ready", False))
-    ):
-        return {
-            "applied": False,
-            "reason": "monthly5_promotion_not_ready",
-            "selected_plan": selected_plan,
-            "promotion_blockers": list(monthly5_state.get("promotion_blockers") or [])[:5],
-            "promotion_blocker_details": list(monthly5_state.get("promotion_blocker_details") or [])[:5],
-        }
-    reason_codes = {str(code) for code in selection.get("reason_codes") or [] if code}
-    if (
-        "underperforming_micro_probe" in reason_codes
-        or "profile_quality_recovery_probe" in reason_codes
-        or "mixed_bias_shadow_probe" in reason_codes
-        or "context_grace_shadow_probe" in reason_codes
-        or "profile_quality_shadow_probe" in reason_codes
-    ):
-        return {
-            "applied": False,
-            "reason": "micro_probe_requires_host_signal",
-            "selected_plan": selected_plan,
-        }
-
-    if protected_wait_reason and not direct_takeover_can_bypass_promotion:
-        return {"applied": False, "reason": "protected_wait_reason", "final": final}
-
-    macro_alignment = decision.get("macro_indicator_alignment") if isinstance(decision.get("macro_indicator_alignment"), dict) else {}
-    if bool(macro_alignment.get("hard_block", False)):
-        return {"applied": False, "reason": "macro_hard_block"}
-
-    last_close_reason = str(POSITION_PANEL_STATE.get("last_close_reason") or "").upper()
-    last_close_ts = _safe_float(POSITION_PANEL_STATE.get("last_close_ts"), 0.0)
-    sl_override_cooldown_sec = max(
-        60.0,
-        _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_SL_COOLDOWN_SEC", 900), 900),
-    )
-    if (
-        last_close_reason == "SL"
-        and last_close_ts > 0
-        and time.time() - last_close_ts <= sl_override_cooldown_sec
-    ):
-        return {
-            "applied": False,
-            "reason": "monthly5_wait_override_sl_cooldown",
-            "selected_plan": selected_plan,
-            "cooldown_remaining_sec": round(max(0.0, sl_override_cooldown_sec - (time.time() - last_close_ts)), 1),
-        }
-
-    max_event_risk = max(0, _safe_int(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_EVENT_RISK", 1), 1))
-    event_risk = _safe_int(decision.get("event_risk"), 0)
-    if event_risk > max_event_risk:
-        return {"applied": False, "reason": "event_risk", "event_risk": event_risk}
-
-    price_age = max(
-        0.0,
-        time.time() - _safe_float(POSITION_PANEL_STATE.get("binance_mark_price_ts"), 0.0),
-    )
-    max_price_age = max(3.0, _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_PRICE_AGE_SEC", 10.0), 10.0))
-    if price_age > max_price_age:
-        return {"applied": False, "reason": "mark_price_stale", "price_age": round(price_age, 4)}
-
-    entry = _safe_float(current_price, 0.0)
-    atr = max(0.0, _safe_float(decision.get("atr"), 0.0))
-    if entry <= 0:
-        return {"applied": False, "reason": "invalid_price"}
-
-    min_risk_rate = max(
-        0.0015,
-        _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MIN_RISK_RATE", 0.002), 0.002),
-    )
-    stop_atr = max(
-        0.35,
-        _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_STOP_ATR", 0.7), 0.7),
-    )
-    risk = max(entry * min_risk_rate, atr * stop_atr, 0.3)
-    rr = max(1.2, _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR", 1.5), 1.5))
-    if direction == "long":
-        sl = entry - risk
-        tp = entry + risk * rr
-        score = max(_safe_float(decision.get("score"), 0.5), 0.62)
-        ai_long_prob = max(_safe_float(decision.get("ai_long_prob"), 0.5), 0.62)
-        ai_short_prob = _safe_float(decision.get("ai_short_prob"), 0.5)
-        ai_prob = max(_safe_float(decision.get("ai_prob"), 0.5), ai_long_prob)
-    else:
-        sl = entry + risk
-        tp = entry - risk * rr
-        score = min(_safe_float(decision.get("score"), 0.5), 0.38)
-        ai_short_prob = max(_safe_float(decision.get("ai_short_prob"), 0.5), 0.62)
-        ai_long_prob = _safe_float(decision.get("ai_long_prob"), 0.5)
-        ai_prob = max(_safe_float(decision.get("ai_prob"), 0.5), ai_short_prob)
-    final_text, sl, tp = auto_fix_trade_plan(final_text, entry, sl, tp, atr)
-
-    if rr_wait_candidate:
-        monthly5_risk = abs(entry - _safe_float(sl, entry))
-        monthly5_reward = abs(_safe_float(tp, entry) - entry)
-        monthly5_rr = monthly5_reward / max(monthly5_risk, 1e-9)
-        min_monthly5_rr = max(
-            1.2,
-            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR_WAIT_MIN_RR", 1.45), 1.45),
-        )
-        net_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
-        min_net_edge = _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR_WAIT_MIN_NET_EDGE", 0.0), 0.0)
-        breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
-        breakout_confirmed = bool(decision.get("breakout_confirmed", False))
-        breakout_quality = _safe_float(decision.get("breakout_quality_score"), 0.0)
-        min_breakout_quality = max(
-            0.0,
-            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_RR_WAIT_MIN_BREAKOUT_QUALITY", 2.5), 2.5),
-        )
-        if (
-            monthly5_rr < min_monthly5_rr
-            or net_edge < min_net_edge
-            or (breakout_attempt and not breakout_confirmed and breakout_quality < min_breakout_quality)
-        ):
-            return {
-                "applied": False,
-                "reason": "monthly5_rr_wait_quality_block",
-                "final": final,
-                "monthly5_rr": round(monthly5_rr, 4),
-                "min_monthly5_rr": round(min_monthly5_rr, 4),
-                "net_edge_rate_est": round(net_edge, 6),
-                "min_net_edge_rate_est": round(min_net_edge, 6),
-                "breakout_quality_score": round(breakout_quality, 4),
-                "min_breakout_quality": round(min_breakout_quality, 4),
-                "breakout_confirmed": breakout_confirmed,
-                "selected_plan": selected_plan,
-            }
-
-    if profile_wait_candidate:
-        market_bias = str(selection.get("market_bias") or "")
-        bull_score = _safe_float(selection.get("bull_score"), 0.0)
-        bear_score = _safe_float(selection.get("bear_score"), 0.0)
-        score_gap = abs(bull_score - bear_score)
-        net_edge = _safe_float(decision.get("net_edge_rate_est"), 0.0)
-        min_net_edge = _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_PROFILE_WAIT_MIN_NET_EDGE", 0.003), 0.003)
-        min_score_gap = max(
-            0.0,
-            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_PROFILE_WAIT_MIN_SCORE_GAP", 2.0), 2.0),
-        )
-        breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
-        breakout_confirmed = bool(decision.get("breakout_confirmed", False))
-        breakout_quality = _safe_float(decision.get("breakout_quality_score"), 0.0)
-        breakout_required = max(
-            0.0,
-            _safe_float(decision.get("breakout_quality_required"), 3.5),
-        )
-        direction_prob = ai_long_prob if direction == "long" else ai_short_prob
-        min_direction_prob = max(
-            0.5,
-            _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_PROFILE_WAIT_MIN_DIRECTION_PROB", 0.65), 0.65),
-        )
-        bias_matches = (
-            (direction == "long" and market_bias == "bullish" and bull_score > bear_score)
-            or (direction == "short" and market_bias == "bearish" and bear_score > bull_score)
-        )
-        breakout_ok = (
-            not breakout_attempt
-            or breakout_confirmed
-            or breakout_quality >= breakout_required
-        )
-        if (
-            not bias_matches
-            or score_gap < min_score_gap
-            or net_edge < min_net_edge
-            or not breakout_ok
-            or direction_prob < min_direction_prob
-        ):
-            return {
-                "applied": False,
-                "reason": "monthly5_profile_wait_quality_block",
-                "final": final,
-                "direction": direction,
-                "market_bias": market_bias,
-                "bull_score": round(bull_score, 4),
-                "bear_score": round(bear_score, 4),
-                "min_score_gap": round(min_score_gap, 4),
-                "net_edge_rate_est": round(net_edge, 6),
-                "min_net_edge_rate_est": round(min_net_edge, 6),
-                "breakout_quality_score": round(breakout_quality, 4),
-                "breakout_quality_required": round(breakout_required, 4),
-                "breakout_confirmed": breakout_confirmed,
-                "direction_prob": round(direction_prob, 4),
-                "min_direction_prob": round(min_direction_prob, 4),
-                "selected_plan": selected_plan,
-            }
-
-    exposure_cap = max(0.0, min(1.0, _safe_float(selection.get("exposure_cap"), 0.0)))
-    max_leverage = min(5, max(1, _safe_int(selection.get("max_leverage"), 5)))
-    max_size = max(
-        0.01,
-        min(0.15, _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_SIZE", 0.15), 0.15)),
-    )
-    position_size = min(max_size, exposure_cap)
-    if position_size <= 0:
-        return {"applied": False, "reason": "zero_exposure_cap", "exposure_cap": exposure_cap}
-
-    return {
-        "applied": True,
-        "reason": "monthly5_market_selection",
-        "direct_takeover": bool(direct_takeover_can_bypass_promotion),
-        "direction": direction,
-        "final": final_text,
-        "sl": float(sl),
-        "tp": float(tp),
-        "position_size": round(position_size, 4),
-        "score": round(score, 4),
-        "ai_prob": round(ai_prob, 4),
-        "ai_long_prob": round(ai_long_prob, 4),
-        "ai_short_prob": round(ai_short_prob, 4),
-        "selected_plan": selected_plan,
-        "shadow_action": shadow_action,
-        "exposure_cap": round(exposure_cap, 4),
-        "max_leverage": max_leverage,
-        "recovery_probe": bool(selection.get("recovery_probe", False)),
-        "reason_codes": list(selection.get("reason_codes") or []),
-    }
-
-
-def _build_monthly5_readiness_panel_state():
-    try:
-        rows = monthly5_shadow.load_history(MONTHLY5_SHADOW_HISTORY_PATH)
-        report = monthly5_shadow.build_readiness_report(
-            rows,
-            strategy_id=monthly5_shadow.STRATEGY_ID,
-            selected_candidate=monthly5_shadow.SELECTED_CANDIDATE,
-            min_records=_safe_int(os.getenv("MONTHLY5_READINESS_MIN_RECORDS"), 48),
-            min_span_hours=_safe_float(
-                os.getenv("MONTHLY5_READINESS_MIN_SPAN_HOURS"),
-                monthly5_shadow.READINESS_MIN_SPAN_HOURS,
-            ),
-            max_age_sec=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_AGE_SEC"), 900.0),
-            max_flat_time_pct=_safe_float(os.getenv("MONTHLY5_READINESS_MAX_FLAT_TIME_PCT"), 41.65),
-            required_selector_source=monthly5_shadow.RESEARCH_SELECTOR_SOURCE,
-        )
-        promotion_review_ts = _safe_int(report.get("promotion_earliest_review_ts"), 0)
-        promotion_eta_local = ""
-        promotion_eta_remaining_hours = 0.0
-        if promotion_review_ts > 0:
-            promotion_eta_local = datetime.datetime.fromtimestamp(
-                promotion_review_ts,
-                ZoneInfo("Asia/Taipei"),
-            ).isoformat(timespec="seconds")
-            promotion_eta_remaining_hours = max(0.0, (promotion_review_ts - time.time()) / 3600.0)
-        return {
-            "schema_version": 1,
-            "status": str(report.get("status") or "invalid"),
-            "ready": bool(report.get("ready", False)),
-            "promotion_ready": bool(report.get("promotion_ready", False)),
-            "promotion_blockers": list(report.get("promotion_blockers") or [])[:12],
-            "promotion_blocker_details": list(report.get("promotion_blocker_details") or [])[:12],
-            "promotion_blocker_count": _safe_int(report.get("promotion_blocker_count"), 0),
-            "rows": _safe_int(report.get("rows"), 0),
-            "min_selector_policy_version": _safe_int(report.get("min_selector_policy_version"), 0),
-            "ignored_legacy_selector_policy_rows": _safe_int(report.get("ignored_legacy_selector_policy_rows"), 0),
-            "required_selector_source": str(report.get("required_selector_source") or ""),
-            "selector_policy_aligned": bool(report.get("selector_policy_aligned", True)),
-            "selector_policy_proxy_rows": _safe_int(report.get("selector_policy_proxy_rows"), 0),
-            "selector_source_counts": dict(report.get("selector_source_counts") or {}),
-            "span_hours": round(_safe_float(report.get("span_hours"), 0.0), 4),
-            "sample_count_remaining": _safe_int(report.get("sample_count_remaining"), 0),
-            "sample_count_progress_pct": round(_safe_float(report.get("sample_count_progress_pct"), 0.0), 4),
-            "sample_count_ready_ts": _safe_int(report.get("sample_count_ready_ts"), 0),
-            "sample_unique_timestamps": _safe_int(report.get("sample_unique_timestamps"), 0),
-            "sample_median_interval_sec": round(_safe_float(report.get("sample_median_interval_sec"), 0.0), 4),
-            "sample_rows_per_hour_est": round(_safe_float(report.get("sample_rows_per_hour_est"), 0.0), 4),
-            "sample_span_remaining_hours": round(_safe_float(report.get("sample_span_remaining_hours"), 0.0), 4),
-            "sample_span_progress_pct": round(_safe_float(report.get("sample_span_progress_pct"), 0.0), 4),
-            "sample_span_ready_ts": _safe_int(report.get("sample_span_ready_ts"), 0),
-            "promotion_earliest_review_ts": promotion_review_ts,
-            "promotion_eta_local": promotion_eta_local,
-            "promotion_eta_remaining_hours": round(promotion_eta_remaining_hours, 4),
-            "latest_age_sec": round(_safe_float(report.get("latest_age_sec"), 0.0), 1),
-            "evaluate_rows": _safe_int(report.get("evaluate_rows"), 0),
-            "risk_rows": _safe_int(report.get("risk_rows"), 0),
-            "open_rows": _safe_int(report.get("open_rows"), 0),
-            "flat_rows": _safe_int(report.get("flat_rows"), 0),
-            "shadow_active_rows": _safe_int(report.get("shadow_active_rows"), 0),
-            "shadow_flat_rows": _safe_int(report.get("shadow_flat_rows"), 0),
-            "open_sample_pct": round(_safe_float(report.get("open_sample_pct"), 0.0), 4),
-            "flat_sample_pct": round(_safe_float(report.get("flat_sample_pct"), 0.0), 4),
-            "shadow_active_sample_pct": round(_safe_float(report.get("shadow_active_sample_pct"), 0.0), 4),
-            "shadow_flat_sample_pct": round(_safe_float(report.get("shadow_flat_sample_pct"), 0.0), 4),
-            "open_time_pct": round(_safe_float(report.get("open_time_pct"), 0.0), 4),
-            "flat_time_pct": round(_safe_float(report.get("flat_time_pct"), 0.0), 4),
-            "actual_open_time_pct": round(_safe_float(report.get("actual_open_time_pct"), 0.0), 4),
-            "actual_flat_time_pct": round(_safe_float(report.get("actual_flat_time_pct"), 0.0), 4),
-            "shadow_active_time_pct": round(_safe_float(report.get("shadow_active_time_pct"), 0.0), 4),
-            "shadow_flat_time_pct": round(_safe_float(report.get("shadow_flat_time_pct"), 0.0), 4),
-            "shadow_flat_time_gap_pct": round(_safe_float(report.get("shadow_flat_time_gap_pct"), 0.0), 4),
-            "weighted_total_sec": round(_safe_float(report.get("weighted_total_sec"), 0.0), 4),
-            "shadow_active_time_groups": list(report.get("shadow_active_time_groups") or [])[:5],
-            "shadow_flat_time_groups": list(report.get("shadow_flat_time_groups") or [])[:5],
-            "shadow_paper_return_pct": round(_safe_float(report.get("shadow_paper_return_pct"), 0.0), 4),
-            "shadow_paper_max_drawdown_pct": round(_safe_float(report.get("shadow_paper_max_drawdown_pct"), 0.0), 4),
-            "shadow_paper_intervals": _safe_int(report.get("shadow_paper_intervals"), 0),
-            "shadow_paper_win_intervals": _safe_int(report.get("shadow_paper_win_intervals"), 0),
-            "shadow_paper_loss_intervals": _safe_int(report.get("shadow_paper_loss_intervals"), 0),
-            "shadow_paper_win_rate_pct": round(_safe_float(report.get("shadow_paper_win_rate_pct"), 0.0), 4),
-            "shadow_paper_long_intervals": _safe_int(report.get("shadow_paper_long_intervals"), 0),
-            "shadow_paper_short_intervals": _safe_int(report.get("shadow_paper_short_intervals"), 0),
-            "shadow_paper_last_interval_pct": round(_safe_float(report.get("shadow_paper_last_interval_pct"), 0.0), 4),
-            "shadow_projected_monthly_return_pct": round(_safe_float(report.get("shadow_projected_monthly_return_pct"), 0.0), 4),
-            "shadow_monthly_target_pct": round(_safe_float(report.get("shadow_monthly_target_pct"), 5.0), 4),
-            "shadow_monthly_projection_valid": bool(report.get("shadow_monthly_projection_valid", False)),
-            "shadow_monthly_target_met": bool(report.get("shadow_monthly_target_met", False)),
-            "shadow_monthly_target_progress_pct": round(_safe_float(report.get("shadow_monthly_target_progress_pct"), 0.0), 4),
-            "shadow_observed_target_return_pct": round(_safe_float(report.get("shadow_observed_target_return_pct"), 0.0), 4),
-            "shadow_observed_target_gap_pct": round(_safe_float(report.get("shadow_observed_target_gap_pct"), 0.0), 4),
-            "shadow_monthly_projection_hours": round(_safe_float(report.get("shadow_monthly_projection_hours"), 720.0), 4),
-            "shadow_monthly_min_projection_span_hours": round(
-                _safe_float(report.get("shadow_monthly_min_projection_span_hours"), monthly5_shadow.READINESS_MIN_SPAN_HOURS),
-                4,
-            ),
-            "shadow_rolling_window_hours": round(_safe_float(report.get("shadow_rolling_window_hours"), 24.0), 4),
-            "shadow_rolling_rows": _safe_int(report.get("shadow_rolling_rows"), 0),
-            "shadow_rolling_span_hours": round(_safe_float(report.get("shadow_rolling_span_hours"), 0.0), 4),
-            "shadow_rolling_paper_return_pct": round(_safe_float(report.get("shadow_rolling_paper_return_pct"), 0.0), 4),
-            "shadow_rolling_paper_intervals": _safe_int(report.get("shadow_rolling_paper_intervals"), 0),
-            "shadow_rolling_paper_win_rate_pct": round(_safe_float(report.get("shadow_rolling_paper_win_rate_pct"), 0.0), 4),
-            "shadow_rolling_projected_monthly_return_pct": round(_safe_float(report.get("shadow_rolling_projected_monthly_return_pct"), 0.0), 4),
-            "shadow_rolling_monthly_projection_valid": bool(report.get("shadow_rolling_monthly_projection_valid", False)),
-            "shadow_rolling_monthly_target_met": bool(report.get("shadow_rolling_monthly_target_met", False)),
-            "shadow_rolling_monthly_target_progress_pct": round(_safe_float(report.get("shadow_rolling_monthly_target_progress_pct"), 0.0), 4),
-            "shadow_rolling_observed_target_return_pct": round(_safe_float(report.get("shadow_rolling_observed_target_return_pct"), 0.0), 4),
-            "shadow_rolling_observed_target_gap_pct": round(_safe_float(report.get("shadow_rolling_observed_target_gap_pct"), 0.0), 4),
-            "shadow_activation_rows": _safe_int(report.get("shadow_activation_rows"), 0),
-            "shadow_activation_span_hours": round(_safe_float(report.get("shadow_activation_span_hours"), 0.0), 4),
-            "shadow_activation_paper_return_pct": round(_safe_float(report.get("shadow_activation_paper_return_pct"), 0.0), 4),
-            "shadow_activation_paper_intervals": _safe_int(report.get("shadow_activation_paper_intervals"), 0),
-            "shadow_activation_paper_win_rate_pct": round(_safe_float(report.get("shadow_activation_paper_win_rate_pct"), 0.0), 4),
-            "shadow_activation_projected_monthly_return_pct": round(_safe_float(report.get("shadow_activation_projected_monthly_return_pct"), 0.0), 4),
-            "shadow_activation_monthly_projection_valid": bool(report.get("shadow_activation_monthly_projection_valid", False)),
-            "shadow_activation_monthly_target_met": bool(report.get("shadow_activation_monthly_target_met", False)),
-            "shadow_activation_monthly_target_progress_pct": round(_safe_float(report.get("shadow_activation_monthly_target_progress_pct"), 0.0), 4),
-            "shadow_activation_observed_target_return_pct": round(_safe_float(report.get("shadow_activation_observed_target_return_pct"), 0.0), 4),
-            "shadow_activation_observed_target_gap_pct": round(_safe_float(report.get("shadow_activation_observed_target_gap_pct"), 0.0), 4),
-            "shadow_grouped_paper_returns": list(report.get("shadow_grouped_paper_returns") or [])[:5],
-            "shadow_underperforming_plan_keys": list(report.get("shadow_underperforming_plan_keys") or [])[:5],
-            "shadow_underperforming_plan_count": _safe_int(report.get("shadow_underperforming_plan_count"), 0),
-            "shadow_active_underperforming_plan_keys": list(report.get("shadow_active_underperforming_plan_keys") or [])[:5],
-            "shadow_active_underperforming_plan_count": _safe_int(report.get("shadow_active_underperforming_plan_count"), 0),
-            "shadow_active_grouped_paper_returns": list(report.get("shadow_active_grouped_paper_returns") or [])[:5],
-            "shadow_suppressed_recovering_plan_keys": list(report.get("shadow_suppressed_recovering_plan_keys") or [])[:5],
-            "shadow_suppressed_recovering_plan_count": _safe_int(report.get("shadow_suppressed_recovering_plan_count"), 0),
-            "shadow_suppressed_grouped_paper_returns": list(report.get("shadow_suppressed_grouped_paper_returns") or [])[:5],
-            "shadow_suppressed_recovery_min_intervals": _safe_int(report.get("shadow_suppressed_recovery_min_intervals"), 6),
-            "shadow_suppressed_observed_intervals": _safe_int(report.get("shadow_suppressed_observed_intervals"), 0),
-            "shadow_suppressed_recovery_remaining_intervals": _safe_int(report.get("shadow_suppressed_recovery_remaining_intervals"), 0),
-            "shadow_suppressed_recovery_progress_pct": round(_safe_float(report.get("shadow_suppressed_recovery_progress_pct"), 0.0), 4),
-            "shadow_recovery_probe_success_keys": list(report.get("shadow_recovery_probe_success_keys") or [])[:5],
-            "shadow_recovery_probe_success_count": _safe_int(report.get("shadow_recovery_probe_success_count"), 0),
-            "shadow_recovery_probe_candidate_keys": list(report.get("shadow_recovery_probe_candidate_keys") or [])[:5],
-            "shadow_recovery_probe_candidate_count": _safe_int(report.get("shadow_recovery_probe_candidate_count"), 0),
-            "shadow_recovery_probe_candidate_min_intervals": _safe_int(report.get("shadow_recovery_probe_candidate_min_intervals"), 6),
-            "shadow_recovery_probe_failed_keys": list(report.get("shadow_recovery_probe_failed_keys") or [])[:5],
-            "shadow_recovery_probe_failed_count": _safe_int(report.get("shadow_recovery_probe_failed_count"), 0),
-            "shadow_legacy_recovery_probe_failed_keys": list(report.get("shadow_legacy_recovery_probe_failed_keys") or [])[:5],
-            "shadow_legacy_recovery_probe_failed_count": _safe_int(report.get("shadow_legacy_recovery_probe_failed_count"), 0),
-            "shadow_legacy_recovery_probe_grouped_paper_returns": list(
-                report.get("shadow_legacy_recovery_probe_grouped_paper_returns") or []
-            )[:5],
-            "shadow_recovery_probe_grouped_paper_returns": list(report.get("shadow_recovery_probe_grouped_paper_returns") or [])[:5],
-            "shadow_recovery_probe_min_intervals": _safe_int(report.get("shadow_recovery_probe_min_intervals"), 6),
-            "shadow_recovery_probe_observed_intervals": _safe_int(report.get("shadow_recovery_probe_observed_intervals"), 0),
-            "shadow_recovery_probe_remaining_intervals": _safe_int(report.get("shadow_recovery_probe_remaining_intervals"), 0),
-            "shadow_recovery_probe_progress_pct": round(_safe_float(report.get("shadow_recovery_probe_progress_pct"), 0.0), 4),
-            "shadow_recovery_probe_state": str(report.get("shadow_recovery_probe_state") or "idle"),
-            "shadow_group_min_intervals": _safe_int(report.get("shadow_group_min_intervals"), 12),
-            "min_records": _safe_int(report.get("min_records"), 48),
-            "min_span_hours": round(_safe_float(report.get("min_span_hours"), monthly5_shadow.READINESS_MIN_SPAN_HOURS), 4),
-            "max_flat_time_pct": round(_safe_float(report.get("max_flat_time_pct"), 41.65), 4),
-            "selected_plan_counts": dict(report.get("selected_plan_counts") or {}),
-            "shadow_action_counts": dict(report.get("shadow_action_counts") or {}),
-            "mode_counts": dict(report.get("mode_counts") or {}),
-            "market_bias_counts": dict(report.get("market_bias_counts") or {}),
-            "warnings": list(report.get("warnings") or [])[:5],
-            "failures": list(report.get("failures") or [])[:5],
-            "history_path": str(MONTHLY5_SHADOW_HISTORY_PATH),
-            "updated_ts": int(time.time()),
-        }
-    except Exception as exc:
-        return {
-            "schema_version": 1,
-            "status": "invalid",
-            "ready": False,
-            "rows": 0,
-            "warnings": [],
-            "failures": [str(exc)],
-            "updated_ts": int(time.time()),
-        }
-
-
 def sync_position_panel(current_price=None):
     # Normalize historical partial-fill/retry duplicates before persisting or
     # calculating the live recent TP/SL record.
@@ -6694,7 +5983,6 @@ def sync_position_panel(current_price=None):
             "scale_add_paused": bool(active_trade.get("scale_add_paused", False)),
             "scale_add_pause_reason": str(active_trade.get("scale_add_pause_reason") or ""),
             "scale_add_pause_ts": _safe_int(active_trade.get("scale_add_pause_ts"), 0),
-            "monthly5_entry_selection": dict(active_trade.get("monthly5_entry_selection") or {}),
             "tp_sl_adjusted_4h": bool(active_trade.get("tp_sl_adjusted_4h", False)),
             "last_close_reason": POSITION_PANEL_STATE.get("last_close_reason", ""),
             "last_close_price": round(_safe_float(POSITION_PANEL_STATE.get("last_close_price"), 0.0), 4),
@@ -6803,28 +6091,6 @@ def sync_position_panel(current_price=None):
             "ts": int(time.time()),
         }
 
-    monthly5_shadow_state = _update_monthly5_shadow_panel_state(
-        _safe_float(payload.get("binance_mark_price"), last_price)
-    )
-    monthly5_readiness_state = _build_monthly5_readiness_panel_state()
-    monthly5_research_selector_state = monthly5_research_selector.build_research_selector_probe()
-    monthly5_live_selector_input_state = (
-        monthly5_shadow_state.get("live_selector_input")
-        if isinstance(monthly5_shadow_state.get("live_selector_input"), dict)
-        else dict(POSITION_PANEL_STATE.get("monthly5_live_selector_input") or {})
-    )
-    monthly5_live_selector_decision_state = (
-        monthly5_shadow_state.get("live_selector_decision")
-        if isinstance(monthly5_shadow_state.get("live_selector_decision"), dict)
-        else dict(POSITION_PANEL_STATE.get("monthly5_live_selector_decision") or {})
-    )
-    monthly5_position_guard_state = dict(POSITION_PANEL_STATE.get("monthly5_position_guard") or {})
-    if not active_trade.get("open"):
-        monthly5_position_guard_state = monthly5_shadow.build_position_guard(
-            monthly5_shadow_state,
-            current_size=0.0,
-        )
-        POSITION_PANEL_STATE["monthly5_position_guard"] = monthly5_position_guard_state
     payload.update(
         {
             "execution_priority": "real_order" if _real_order_priority_enabled() else "strategy_signal",
@@ -6864,17 +6130,6 @@ def sync_position_panel(current_price=None):
             "strategy_macro_alignment": dict(POSITION_PANEL_STATE.get("strategy_macro_alignment") or {}),
             "strategy_context": dict(POSITION_PANEL_STATE.get("strategy_context") or {}),
             "strategy_wait_conditions": list(POSITION_PANEL_STATE.get("strategy_wait_conditions") or [])[:3],
-            "monthly5_shadow": dict(monthly5_shadow_state or {}),
-            "monthly5_volume_forward_shadow": dict(
-                POSITION_PANEL_STATE.get("monthly5_volume_forward_shadow") or {}
-            ),
-            "monthly5_execution_guard": dict(POSITION_PANEL_STATE.get("monthly5_execution_guard") or {}),
-            "monthly5_position_guard": dict(monthly5_position_guard_state or {}),
-            "monthly5_signal_override": dict(POSITION_PANEL_STATE.get("monthly5_signal_override") or {}),
-            "monthly5_readiness": dict(monthly5_readiness_state or {}),
-            "monthly5_research_selector": dict(monthly5_research_selector_state or {}),
-            "monthly5_live_selector_input": dict(monthly5_live_selector_input_state or {}),
-            "monthly5_live_selector_decision": dict(monthly5_live_selector_decision_state or {}),
             "liquidation_pressure": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_pressure"), 0.0), 4),
             "liquidation_event_count": _safe_int(POSITION_PANEL_STATE.get("liquidation_event_count"), 0),
             "liquidation_cluster_risk": round(_safe_float(POSITION_PANEL_STATE.get("liquidation_cluster_risk"), 0.0), 4),
@@ -7095,208 +6350,6 @@ def _enforce_daily_min_trade_size(planned_size, current_price):
     )
     send_telegram(notice, priority=True)
     return notice
-
-
-def _close_trade_for_monthly5_guard(current_price, reason):
-    current_price = _safe_float(current_price, _safe_float(active_trade.get("entry"), 0.0))
-    direction = str(active_trade.get("direction") or "long").lower()
-    close_msg = ""
-    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
-        try:
-            qty = _get_active_trade_position_qty()
-            if qty <= 0:
-                return False, "⚠️ 月報酬5%風控要求平倉，但無法取得 Binance 持倉數量，保留本地持倉"
-            dual_side = _is_binance_dual_side_mode()
-            position_side = "LONG" if direction == "long" else "SHORT"
-            close_side = "SELL" if direction == "long" else "BUY"
-            _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
-            params = {
-                "symbol": COPY_TRADE_SYMBOL,
-                "side": close_side,
-                "type": "MARKET",
-                "quantity": round(qty, 3),
-            }
-            if dual_side:
-                params["positionSide"] = position_side
-            else:
-                params["reduceOnly"] = "true"
-            _binance_futures_signed_request("POST", "/fapi/v1/order", params)
-            close_msg = f"✅ Binance 月報酬5%風控市價平倉已送出 qty={qty:.3f}"
-        except Exception as exc:
-            return False, f"⚠️ Binance 月報酬5%風控平倉失敗: {exc}"
-
-    record_position_close("MONTHLY5_GUARD", current_price, current_price, current_price)
-    _reset_active_trade_state()
-    sync_position_panel(current_price)
-    return True, close_msg or "✅ 月報酬5%風控已結束本地持倉"
-
-
-def manage_monthly5_position_guard(current_price, decision=None):
-    if not _is_truthy(os.getenv("MONTHLY5_POSITION_GUARD_ENABLED", "1")):
-        return False
-    if not active_trade.get("open"):
-        shadow_state = (
-            POSITION_PANEL_STATE.get("monthly5_shadow")
-            if isinstance(POSITION_PANEL_STATE.get("monthly5_shadow"), dict)
-            else {}
-        )
-        flat_guard = monthly5_shadow.build_position_guard(
-            shadow_state,
-            current_size=0.0,
-        )
-        existing_guard = (
-            POSITION_PANEL_STATE.get("monthly5_position_guard")
-            if isinstance(POSITION_PANEL_STATE.get("monthly5_position_guard"), dict)
-            else {}
-        )
-        if existing_guard != flat_guard:
-            POSITION_PANEL_STATE["monthly5_position_guard"] = flat_guard
-            active_trade["monthly5_position_guard_ts"] = 0.0
-            sync_position_panel(current_price)
-        return False
-
-    # This guard exists to enforce monthly5's own shadow-candidate exposure
-    # caps (lock/recovery/floor-guard) on positions that were actually
-    # opened per monthly5's own signal. It must not act on a position opened
-    # by the regular strategy - monthly5's current exposure_cap reflects its
-    # own unrelated directional opinion, not a judgment on that trade, and
-    # applying it there force-closes/reduces a position for no real reason
-    # (observed live: a real short opened at 00:25:11 got force-closed via
-    # this path 9 seconds later, entirely by monthly5's own "wait" state).
-    entry_selection = (
-        active_trade.get("monthly5_entry_selection")
-        if isinstance(active_trade.get("monthly5_entry_selection"), dict)
-        else {}
-    )
-    if str(entry_selection.get("shadow_action") or "") not in {
-        "evaluate_long",
-        "evaluate_short",
-        "reduced_exposure",
-    }:
-        return False
-
-    now_ts = time.time()
-    cooldown = max(20.0, _safe_float(os.getenv("MONTHLY5_POSITION_GUARD_COOLDOWN_SEC", 60), 60))
-    last_ts = _safe_float(active_trade.get("monthly5_position_guard_ts"), 0.0)
-    if now_ts - last_ts < cooldown:
-        return False
-
-    direction = str(active_trade.get("direction") or "")
-    current_size = max(0.0, _safe_float(active_trade.get("size"), 0.0))
-    shadow_state = _update_monthly5_shadow_panel_state(
-        current_price,
-        decision=decision,
-        strategy_signal=direction,
-        strategy_execution_reason="持倉中月報酬5%風控",
-    )
-    guard = monthly5_shadow.build_position_guard(
-        shadow_state,
-        current_size=current_size,
-    )
-    POSITION_PANEL_STATE["monthly5_position_guard"] = guard
-    active_trade["monthly5_position_guard_ts"] = now_ts
-
-    action = str(guard.get("action") or "hold")
-    if action == "hold":
-        sync_position_panel(current_price)
-        return False
-
-    if action == "close_all":
-        ok, msg = _close_trade_for_monthly5_guard(current_price, str(guard.get("reason") or ""))
-        if ok:
-            send_telegram(
-                f"🧯 月報酬5%持倉風控：全平\n"
-                f"方向: {direction} | 現價: {current_price:.2f}\n"
-                f"原因: {guard.get('reason')}\n"
-                f"{msg}",
-                priority=True,
-            )
-            return True
-        _notify_scale_skip(
-            f"⚠️ 月報酬5%持倉風控全平失敗：{msg}",
-            private=True,
-            key=f"monthly5_close:{msg}",
-            now_ts=now_ts,
-        )
-        sync_position_panel(current_price)
-        return False
-
-    if action == "reduce_to_cap":
-        delta = max(0.0, _safe_float(guard.get("reduce_delta"), 0.0))
-        target_size = max(0.0, _safe_float(guard.get("target_size"), 0.0))
-        if delta <= 1e-9:
-            sync_position_panel(current_price)
-            return False
-        if target_size <= 1e-9:
-            ok, msg = _close_trade_for_monthly5_guard(current_price, str(guard.get("reason") or ""))
-            if ok:
-                send_telegram(
-                    f"🧯 月報酬5%持倉風控：降倉至 0%\n"
-                    f"方向: {direction} | 現價: {current_price:.2f}\n"
-                    f"原因: {guard.get('reason')}\n"
-                    f"{msg}",
-                    priority=True,
-                )
-                return True
-            _notify_scale_skip(
-                f"⚠️ 月報酬5%持倉風控降倉失敗：{msg}",
-                private=True,
-                key=f"monthly5_reduce_close:{msg}",
-                now_ts=now_ts,
-            )
-            sync_position_panel(current_price)
-            return False
-
-        if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
-            ok, msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
-            if not ok:
-                if _is_min_position_no_reduce_message(msg):
-                    sync_position_panel(current_price)
-                    print(f"🔕 月報酬5%持倉風控最小倉位不減倉: {msg}")
-                    return False
-                _notify_scale_skip(
-                    f"⚠️ 月報酬5%持倉風控降倉失敗：{msg}",
-                    private=True,
-                    key=f"monthly5_reduce:{msg}",
-                    now_ts=now_ts,
-                )
-                sync_position_panel(current_price)
-                return False
-            sync_active_trade_from_binance(send_notice=False)
-            sync_position_panel(current_price)
-            synced_size = _safe_float(active_trade.get("size"), target_size)
-            send_telegram(
-                f"🧯 月報酬5%持倉風控：降倉\n"
-                f"方向: {direction} | 現價: {current_price:.2f}\n"
-                f"倉位: {current_size*100:.1f}% → {synced_size*100:.1f}% | 上限: {target_size*100:.1f}%\n"
-                f"原因: {guard.get('reason')}\n"
-                f"{msg}",
-                priority=True,
-            )
-            return True
-
-        active_trade["size"] = float(target_size)
-        active_trade["max_size"] = min(
-            _safe_float(active_trade.get("max_size"), target_size),
-            target_size,
-        )
-        active_trade["min_size"] = min(
-            _safe_float(active_trade.get("min_size"), target_size),
-            target_size,
-        )
-        active_trade["last_adjust_ts"] = now_ts
-        sync_position_panel(current_price)
-        send_telegram(
-            f"🧯 月報酬5%持倉風控：本地降倉\n"
-            f"方向: {direction} | 現價: {current_price:.2f}\n"
-            f"倉位: {current_size*100:.1f}% → {target_size*100:.1f}%\n"
-            f"原因: {guard.get('reason')}",
-            priority=True,
-        )
-        return True
-
-    sync_position_panel(current_price)
-    return False
 
 
 def _estimate_trade_cost_rate_est(hold_hours=None) -> float:
@@ -8945,12 +7998,6 @@ def _entry_confirmation_requires_pullback(direction, decision):
     """Require a retest for breakout/reclaim entries, not every signal."""
     payload = decision if isinstance(decision, dict) else {}
     final = str(payload.get("final") or "")
-    host_logic = payload.get("host_opening_logic") if isinstance(payload.get("host_opening_logic"), dict) else {}
-    if (
-        str(host_logic.get("mode") or "") == "monthly5_market_selection"
-        and _is_truthy(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_SKIP_RETEST", "1"))
-    ):
-        return False
     reclaim = (
         payload.get("multitimeframe_bull_reclaim")
         if isinstance(payload.get("multitimeframe_bull_reclaim"), dict)
@@ -9426,8 +8473,6 @@ active_trade = {
     "scale_add_pause_ts": 0.0,
     "last_scale_skip_notify_key": "",
     "last_scale_skip_notify_ts": 0.0,
-    "monthly5_position_guard_ts": 0.0,
-    "monthly5_entry_selection": {},
     "open_time": None,
     "tp_sl_adjusted_4h": False,
     "time_horizon": "short",
@@ -9472,8 +8517,6 @@ def _reset_active_trade_state():
     active_trade["scale_add_pause_ts"] = 0.0
     active_trade["last_scale_skip_notify_key"] = ""
     active_trade["last_scale_skip_notify_ts"] = 0.0
-    active_trade["monthly5_position_guard_ts"] = 0.0
-    active_trade["monthly5_entry_selection"] = {}
     active_trade["open_time"] = None
     active_trade["tp_sl_adjusted_4h"] = False
     active_trade["time_horizon"] = "short"
@@ -9539,49 +8582,6 @@ def restore_active_trade_from_panel():
     active_trade["scale_add_paused"] = bool(raw.get("scale_add_paused", False))
     active_trade["scale_add_pause_reason"] = str(raw.get("scale_add_pause_reason") or "")
     active_trade["scale_add_pause_ts"] = _safe_float(raw.get("scale_add_pause_ts"), 0.0)
-    monthly5_entry_selection = (
-        raw.get("monthly5_entry_selection")
-        if isinstance(raw.get("monthly5_entry_selection"), dict)
-        else {}
-    )
-    if not monthly5_entry_selection:
-        monthly5_guard = raw.get("monthly5_position_guard") if isinstance(raw.get("monthly5_position_guard"), dict) else {}
-        selected_plan = str(monthly5_guard.get("selected_plan") or "")
-        shadow_action = str(monthly5_guard.get("shadow_action") or "")
-        if selected_plan and shadow_action in {"evaluate_long", "evaluate_short", "reduced_exposure"}:
-            monthly5_entry_selection = {
-                "selected_plan": selected_plan,
-                "shadow_action": shadow_action,
-                "exposure_cap": _safe_float(monthly5_guard.get("exposure_cap"), 0.0),
-                "max_leverage": _safe_int(monthly5_guard.get("max_leverage"), 5),
-                "reason_codes": ["restored_from_position_guard"],
-                "rationale": "從持倉風控狀態還原月報酬5%入場選擇",
-            }
-    if not monthly5_entry_selection:
-        readiness = raw.get("monthly5_readiness") if isinstance(raw.get("monthly5_readiness"), dict) else {}
-        success_keys = [str(key) for key in readiness.get("shadow_recovery_probe_success_keys") or []]
-        expected_action = "evaluate_long" if direction == "long" else "evaluate_short"
-        restored_key = next(
-            (
-                key
-                for key in success_keys
-                if len(key.split("|")) >= 2 and key.split("|")[1] == expected_action
-            ),
-            "",
-        )
-        if restored_key:
-            parts = restored_key.split("|")
-            monthly5_entry_selection = {
-                "selected_plan": parts[0],
-                "shadow_action": parts[1],
-                "market_bias": parts[2] if len(parts) > 2 else "",
-                "market_state": parts[3] if len(parts) > 3 else "",
-                "exposure_cap": 0.35,
-                "max_leverage": 5,
-                "reason_codes": ["restored_from_probe_success"],
-                "rationale": "從月報酬5%恢復探測成功狀態還原入場選擇",
-            }
-    active_trade["monthly5_entry_selection"] = dict(monthly5_entry_selection)
     active_trade["open_time"] = _safe_float(raw.get("open_since_ts"), state_ts or time.time())
     active_trade["tp_sl_adjusted_4h"] = bool(raw.get("tp_sl_adjusted_4h", False))
     active_trade["time_horizon"] = restored_horizon
@@ -9993,67 +8993,6 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
             }
         )
 
-    def add_monthly5_override_gate(override):
-        override = override if isinstance(override, dict) else {}
-        if not override:
-            return
-        if any(str(item.get("key") or "") in {"monthly5_override_gate", "monthly5_profile_quality"} for item in conditions):
-            return
-        override_reason = str(override.get("reason") or "monthly5_not_ready")
-        current = override_reason
-        target = "月報酬5%接管安全門檻通過"
-        if override_reason == "mark_price_stale":
-            price_age = _safe_float(override.get("price_age"), 0.0)
-            max_age = max(
-                3.0,
-                _safe_float(os.getenv("MONTHLY5_SIGNAL_OVERRIDE_MAX_PRICE_AGE_SEC", 10.0), 10.0),
-            )
-            current = f"Mark Price {price_age:.1f}s"
-            target = f"低於 {max_age:.1f}s"
-        elif override_reason == "monthly5_wait_override_sl_cooldown":
-            remaining = _safe_float(override.get("cooldown_remaining_sec"), 0.0)
-            current = f"SL冷卻剩 {remaining:.0f}s"
-            target = "冷卻結束後重新評估"
-        elif override_reason == "event_risk":
-            current = f"事件風險 {override.get('event_risk')}"
-            target = "事件風險回到允許範圍"
-        elif override_reason == "monthly5_plan_blocked":
-            current = str(override.get("selected_plan") or override_reason)
-            target = "月報酬5%市場選擇解除阻擋"
-        elif override_reason == "monthly5_promotion_not_ready":
-            details = [
-                item
-                for item in (override.get("promotion_blocker_details") or [])
-                if isinstance(item, dict)
-            ]
-            labels = [
-                str(item.get("label") or item.get("code") or "")
-                for item in details
-                if str(item.get("label") or item.get("code") or "")
-            ]
-            gap_items = [
-                item
-                for item in details
-                if "observed_target_gap_pct" in item
-            ]
-            current = "、".join(labels[:2]) if labels else "promotion_ready=false"
-            if gap_items:
-                current = f"{current}；缺口 {gap_items[0].get('observed_target_gap_pct')}%"
-            target = "promotion_ready=true"
-        add_condition(
-            "monthly5_override_gate",
-            "月報酬5%接管安全",
-            current,
-            target,
-            "月報酬5%策略接管前仍需通過 Mark Price、事件風險、SL冷卻與計畫狀態檢查",
-        )
-
-    monthly5_override = (
-        decision.get("monthly5_signal_override")
-        if isinstance(decision.get("monthly5_signal_override"), dict)
-        else {}
-    )
-
     breakout_attempt = _safe_int(decision.get("breakout_attempt"), 0)
     breakout_quality_score = _safe_float(decision.get("breakout_quality_score"), 0.0)
     breakout_quality_required = _safe_float(decision.get("breakout_quality_required"), 3.0)
@@ -10113,60 +9052,19 @@ def _build_strategy_wait_conditions(decision, current_price, status, reason=""):
         min_edge = max(0.0005, _safe_float(os.getenv("TRADE_MIN_EXPECTED_EDGE_RATE", 0.0012), 0.0012))
         add_condition("expected_edge", "扣除成本後期望值", f"{current_edge * 100:+.3f}%", f"至少 +{min_edge * 100:.3f}%", "等待預期報酬足以覆蓋手續費、滑價與資金費")
     elif "MLX回測輪廓不佳" in reason_text:
-        override = monthly5_override
-        if override.get("reason") == "monthly5_profile_wait_quality_block":
-            missing = []
-            direction = str(override.get("direction") or "")
-            market_bias = str(override.get("market_bias") or "")
-            bull_score = _safe_float(override.get("bull_score"), 0.0)
-            bear_score = _safe_float(override.get("bear_score"), 0.0)
-            score_gap = abs(bull_score - bear_score)
-            min_score_gap = _safe_float(override.get("min_score_gap"), 0.0)
-            bias_matches = (
-                (direction == "long" and market_bias == "bullish" and bull_score > bear_score)
-                or (direction == "short" and market_bias == "bearish" and bear_score > bull_score)
-            )
-            if not bias_matches:
-                missing.append(f"bias={market_bias or 'none'}")
-            if score_gap < min_score_gap:
-                missing.append(f"bias差 {score_gap:.1f}<{min_score_gap:.1f}")
-            net_edge = _safe_float(override.get("net_edge_rate_est"), 0.0)
-            min_edge = _safe_float(override.get("min_net_edge_rate_est"), 0.0)
-            if net_edge < min_edge:
-                missing.append(f"期望值 {net_edge * 100:+.3f}%<{min_edge * 100:+.3f}%")
-            breakout_quality = _safe_float(override.get("breakout_quality_score"), 0.0)
-            breakout_required = _safe_float(override.get("breakout_quality_required"), 0.0)
-            if not bool(override.get("breakout_confirmed", False)) and breakout_quality < breakout_required:
-                missing.append(f"突破 {breakout_quality:.1f}/{breakout_required:.1f}")
-            direction_prob = _safe_float(override.get("direction_prob"), 0.0)
-            min_direction_prob = _safe_float(override.get("min_direction_prob"), 0.0)
-            if direction_prob < min_direction_prob:
-                missing.append(f"方向機率 {direction_prob:.2f}<{min_direction_prob:.2f}")
-            add_condition(
-                "monthly5_profile_quality",
-                "月報酬5%接管品質",
-                "、".join(missing[:3]) if missing else "等待品質重算",
-                "bias、期望值、突破品質與方向機率達標",
-                "月報酬5%策略只能接管普通觀望；MLX輪廓不佳時仍需額外品質確認",
-            )
-        elif override:
-            add_monthly5_override_gate(override)
-        else:
-            add_condition(
-                "strategy_gate",
-                "策略條件",
-                reason_text.replace("觀望（", "").rstrip("）"),
-                "下一輪策略評估通過",
-                "等待新的已驗證行情快照",
-            )
+        add_condition(
+            "strategy_gate",
+            "策略條件",
+            reason_text.replace("觀望（", "").rstrip("）"),
+            "下一輪策略評估通過",
+            "等待新的已驗證行情快照",
+        )
     elif "等待共振" in reason_text or "等支撐" in reason_text or "等壓力" in reason_text:
         add_condition("signal_confluence", "方向共振", reason_text.replace("觀望（", "").rstrip("）"), "趨勢、動能與結構同向", "條件形成後才會建立待確認訊號")
     elif "每日單錨定" in reason_text:
         add_condition("daily_anchor", "每日單錨定", "一般訊號品質未達標", "品質訊號通過或 22:30 保底流程", "台北時間 22:30 前保留每日保底額度")
     else:
         add_condition("strategy_gate", "策略條件", reason_text.replace("觀望（", "").rstrip("）"), "下一輪策略評估通過", "等待新的已驗證行情快照")
-
-    add_monthly5_override_gate(monthly5_override)
 
     sl_review = POSITION_PANEL_STATE.get("last_sl_review")
     opposite_review = (
@@ -10309,7 +9207,6 @@ def _update_panel_execution_snapshot(decision, current_price, status, reason="",
                 "max_position_size": _safe_float(decision.get("breakout_max_position_size"), 0.0),
             },
             "strategy_wait_conditions": wait_conditions,
-            "monthly5_signal_override": dict(decision.get("monthly5_signal_override") or {}),
         }
     )
     _refresh_recent_sl_opposite_review_from_panel()
@@ -12769,79 +11666,6 @@ def _build_actual_trade_mlx_market(decision, direction, source, daily_min_trade=
     market["daily_min_trade"] = bool(daily_min_trade)
     market["primary_reason"] = "每日最低一單" if daily_min_trade else "實單策略觸發"
     market["strategy_version"] = STRATEGY_VERSION
-    monthly5_override = (
-        decision.get("monthly5_signal_override")
-        if isinstance(decision.get("monthly5_signal_override"), dict)
-        else {}
-    )
-    monthly5_entry_selection = (
-        active_trade.get("monthly5_entry_selection")
-        if isinstance(active_trade.get("monthly5_entry_selection"), dict)
-        else {}
-    )
-    monthly5_selector_decision = (
-        decision.get("monthly5_live_selector_decision")
-        if isinstance(decision.get("monthly5_live_selector_decision"), dict)
-        else {}
-    )
-    is_monthly5 = (
-        str(decision.get("primary_indicator") or "") == "monthly5_market_selection"
-        or str(active_trade.get("trade_source") or "") == "monthly5_market_selection"
-        or bool(monthly5_override.get("applied"))
-        or bool(monthly5_entry_selection)
-    )
-    if is_monthly5:
-        selected_plan = str(
-            monthly5_override.get("selected_plan")
-            or monthly5_entry_selection.get("selected_plan")
-            or ""
-        )
-        shadow_action = str(
-            monthly5_override.get("shadow_action")
-            or monthly5_entry_selection.get("shadow_action")
-            or ""
-        )
-        selector_key = str(
-            monthly5_entry_selection.get("selector_key")
-            or monthly5_selector_decision.get("selected_key")
-            or ""
-        )
-        monthly5_meta = {
-            "trade_source": "monthly5_market_selection",
-            "selected_plan": selected_plan,
-            "shadow_action": shadow_action,
-            "selector_source": str(monthly5_entry_selection.get("selector_source") or monthly5_selector_decision.get("selector_source") or ""),
-            "selector_key": selector_key,
-            "selector_primary_direction": str(
-                monthly5_entry_selection.get("selector_primary_direction")
-                or monthly5_selector_decision.get("primary_direction")
-                or ""
-            ),
-            "exposure_cap": round(
-                _safe_float(
-                    monthly5_override.get("exposure_cap"),
-                    _safe_float(monthly5_entry_selection.get("exposure_cap"), 0.0),
-                ),
-                4,
-            ),
-            "max_leverage": min(
-                5,
-                max(
-                    1,
-                    _safe_int(
-                        monthly5_override.get("max_leverage"),
-                        _safe_int(monthly5_entry_selection.get("max_leverage"), 5),
-                    ),
-                ),
-            ),
-            "reason_codes": list(monthly5_override.get("reason_codes") or monthly5_entry_selection.get("reason_codes") or []),
-        }
-        market["monthly5"] = monthly5_meta
-        market["monthly5_trade_source"] = monthly5_meta["trade_source"]
-        market["monthly5_selected_plan"] = selected_plan
-        market["monthly5_shadow_action"] = shadow_action
-        market["monthly5_selector_key"] = selector_key
-        market["monthly5_max_leverage"] = monthly5_meta["max_leverage"]
     features = decision.get("features")
     if isinstance(features, dict):
         market["features"] = dict(features)
@@ -15112,16 +13936,8 @@ def build_trade_signal_snapshot(
         breakout=breakout,
         volume_spike=volume_spike,
     )
-    monthly5_selector_decision = _build_monthly5_live_selector_decision(df_1d, df_4h=df_4h)
-    monthly5_volume_forward_probe = monthly5_volume_forward_shadow.build_live_probe(
-        df_4h,
-        df_5m,
-    )
     return {
         "features": features,
-        "monthly5_live_selector_input": dict(monthly5_selector_decision.get("input_probe") or {}),
-        "monthly5_live_selector_decision": monthly5_selector_decision,
-        "monthly5_volume_forward_probe": monthly5_volume_forward_probe,
         "score": score,
         "auxiliary_score": auxiliary_score,
         "primary_indicator": primary_indicator,
@@ -17323,66 +16139,6 @@ def get_kline(interval, limit=100):
     return df
 
 
-_MONTHLY5_DAILY_FRAME_CACHE = {}
-_MONTHLY5_DAILY_FRAME_TTL_SEC = 60 * 60  # daily candles; no need to refetch every cycle
-
-
-def _monthly5_live_daily_frame(fallback_df=None):
-    limit = max(420, monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS + 20)
-
-    cached = _MONTHLY5_DAILY_FRAME_CACHE.get(DEFAULT_PAIR)
-    if cached is not None:
-        cached_frame, cached_source, cached_ts, cached_limit = cached
-        if time.time() - cached_ts < _MONTHLY5_DAILY_FRAME_TTL_SEC and cached_limit >= limit:
-            return cached_frame, cached_source
-
-    errors = []
-    try:
-        rows, source = _fetch_binance_kline_rows(
-            DEFAULT_PAIR,
-            "1d",
-            limit=limit,
-            timeout=10,
-            prefix="monthly5 live daily selector",
-        )
-        frame = _kline_rows_to_indicator_frame(rows)
-        if len(frame) >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS:
-            _MONTHLY5_DAILY_FRAME_CACHE[DEFAULT_PAIR] = (frame, f"binance_{source}", time.time(), limit)
-            return frame, f"binance_{source}"
-        errors.append(f"binance_{source}: rows={len(frame)}")
-    except Exception as exc:
-        errors.append(f"binance: {exc}")
-
-    # 這裡在即時下單決策路徑上，Twelve Data 若需要等待限流間隔才能打，
-    # 寧可直接放棄改用 fallback_df，也不要同步 sleep 卡住這輪決策。
-    min_gap = max(0.25, _safe_float(os.getenv("TWELVE_DATA_REQUEST_MIN_GAP_SEC", 8.0), 8.0))
-    would_block = (time.time() - TWELVE_DATA_USAGE_STATE["last_request_ts"]) < min_gap
-    if not would_block:
-        try:
-            rows = _fetch_twelve_data_kline_rows(DEFAULT_PAIR, "1d", limit=limit, timeout=10)
-            frame = _kline_rows_to_indicator_frame(rows)
-            if len(frame) >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS:
-                _MONTHLY5_DAILY_FRAME_CACHE[DEFAULT_PAIR] = (frame, "twelve_data", time.time(), limit)
-                return frame, "twelve_data"
-            errors.append(f"twelve_data: rows={len(frame)}")
-        except Exception as exc:
-            errors.append(f"twelve_data: {exc}")
-    else:
-        errors.append("twelve_data: skipped (would block on rate-limit gap)")
-    if fallback_df is not None:
-        return fallback_df, "runtime_fallback:" + "; ".join(errors[:3])
-    raise RuntimeError("; ".join(errors) or "monthly5 live daily selector data unavailable")
-
-
-def _build_monthly5_live_selector_decision(df_1d=None, df_4h=None):
-    frame, source = _monthly5_live_daily_frame(df_1d)
-    decision = monthly5_research_selector.build_live_selector_decision(frame, df_4h=df_4h)
-    input_probe = decision.get("input_probe") if isinstance(decision.get("input_probe"), dict) else {}
-    input_probe["input_source"] = source
-    decision["input_source"] = source
-    decision["input_probe"] = input_probe
-    return decision
-
 # =============================
 # 主邏輯（AI接管）
 # =============================
@@ -17988,7 +16744,6 @@ def run_bot():
                         active_trade["quick_reduce_count"] = 0
                         active_trade["quick_reduce_ts"] = 0.0
                         active_trade["daily_min_size_enforce_ts"] = 0.0
-                        active_trade["monthly5_position_guard_ts"] = 0.0
                         active_trade["open_time"] = None
                         active_trade["tp_sl_adjusted_4h"] = False
                         active_trade["time_horizon"] = "short"
@@ -18139,11 +16894,7 @@ def run_bot():
                         _safe_float(os.getenv("DAILY_MIN_TRADE_SIZE_RATIO", 0.05), 0.05),
                         current,
                     )
-                monthly5_adjusted = manage_monthly5_position_guard(
-                    current,
-                    decision=locals().get("decision"),
-                )
-                if not monthly5_adjusted and active_trade["open"]:
+                if active_trade["open"]:
                     quick_reduced = maybe_take_quick_profit_reduce(current, atr=atr)
                     profit_locked = maybe_lock_profit_after_reversal(current, favorable_price=current, atr=atr)
                     be_triggered = False if profit_locked else maybe_activate_auto_break_even(current, atr=atr)
@@ -18331,106 +17082,6 @@ def run_bot():
                 if sl_review_guard_reason:
                     final = sl_review_guard_reason
 
-            monthly5_signal_override = {}
-            if final.startswith("觀望"):
-                decision["final"] = final
-                monthly5_shadow_state = _update_monthly5_shadow_panel_state(
-                    price,
-                    decision=decision,
-                    strategy_signal="wait",
-                    strategy_execution_reason=final,
-                )
-                monthly5_signal_override = _build_monthly5_signal_override(
-                    decision,
-                    monthly5_shadow_state,
-                    price,
-                )
-                decision["monthly5_signal_override"] = dict(monthly5_signal_override)
-                if monthly5_signal_override.get("applied"):
-                    final = str(monthly5_signal_override.get("final") or final)
-                    sl = _safe_float(monthly5_signal_override.get("sl"), sl)
-                    tp = _safe_float(monthly5_signal_override.get("tp"), tp)
-                    position_size = _safe_float(
-                        monthly5_signal_override.get("position_size"),
-                        position_size,
-                    )
-                    score = _safe_float(monthly5_signal_override.get("score"), score)
-                    ai_prob = _safe_float(monthly5_signal_override.get("ai_prob"), ai_prob)
-                    ai_long_prob = _safe_float(monthly5_signal_override.get("ai_long_prob"), ai_long_prob)
-                    ai_short_prob = _safe_float(monthly5_signal_override.get("ai_short_prob"), ai_short_prob)
-                    decision.update(
-                        {
-                            "final": final,
-                            "sl": sl,
-                            "tp": tp,
-                            "position_size": position_size,
-                            "max_position_size": min(
-                                position_size,
-                                _safe_float(decision.get("max_position_size"), position_size)
-                                if _safe_float(decision.get("max_position_size"), 0.0) > 0
-                                else position_size,
-                            ),
-                            "score": score,
-                            "ai_prob": ai_prob,
-                            "ai_long_prob": ai_long_prob,
-                            "ai_short_prob": ai_short_prob,
-                            "max_leverage": min(
-                                5,
-                                max(
-                                    1,
-                                    _safe_int(
-                                        monthly5_signal_override.get("max_leverage"),
-                                        _safe_int(decision.get("max_leverage"), 5),
-                                    ),
-                                ),
-                            ),
-                            "primary_indicator": "monthly5_market_selection",
-                            "host_logic_applied": True,
-                            "host_opening_logic": {
-                                "direction": str(monthly5_signal_override.get("direction") or "neutral"),
-                                "mode": "monthly5_market_selection",
-                                "confidence": max(0.0, min(1.0, abs(score - 0.5) * 2.0)),
-                                "edge": round(_safe_float(net_edge_rate_est, 0.0), 6),
-                                "range_pos": _safe_float(
-                                    (host_opening_logic or {}).get("range_pos"),
-                                    0.5,
-                                ),
-                                "reasons": [
-                                    "月報酬5%市場選擇接管普通觀望",
-                                    f"plan={monthly5_signal_override.get('selected_plan')}",
-                                    f"cap={_safe_float(monthly5_signal_override.get('exposure_cap'), 0.0):.2f}",
-                                ],
-                            },
-                        }
-                    )
-                    host_opening_logic = decision.get("host_opening_logic") if isinstance(decision.get("host_opening_logic"), dict) else {}
-                    host_logic_applied = True
-                    if not daily_min_trade and not bool(monthly5_signal_override.get("direct_takeover")):
-                        override_risk_rate = (
-                            abs(_safe_float(price, 0.0) - _safe_float(sl, price))
-                            / max(_safe_float(price, 0.0), 1e-9)
-                        )
-                        sl_guard_reason = _recent_sl_guard_reason(
-                            final,
-                            score,
-                            net_edge_rate_est,
-                            override_risk_rate,
-                            macro_bias,
-                            mid_trend,
-                            _safe_float(sr_analysis.get("bias"), 0.0),
-                        )
-                        if sl_guard_reason:
-                            final = sl_guard_reason
-                            position_size = 0.0
-                            decision["final"] = final
-                            decision["position_size"] = 0.0
-                        sl_review_guard_reason = _recent_sl_review_guard_reason(final)
-                        if sl_review_guard_reason:
-                            final = sl_review_guard_reason
-                            position_size = 0.0
-                            decision["final"] = final
-                            decision["position_size"] = 0.0
-
             # ===== 中文時事解讀 =====
             macro_text = "中性"
             if event_risk >= 2:
@@ -18610,36 +17261,6 @@ def run_bot():
                 reason.append(f"15m上漲九轉 Setup {td_setup_15m['up_count']}（封鎖新多單）")
             elif td_setup_15m["down_9"]:
                 reason.append(f"15m下跌九轉 Setup {td_setup_15m['down_count']}（封鎖新空單）")
-
-            if not final.startswith("觀望"):
-                monthly5_direction = "long" if "做多" in final else "short"
-                monthly5_guard = _apply_monthly5_execution_guard(
-                    dict(decision, daily_min_trade=bool(daily_min_trade)),
-                    monthly5_direction,
-                    position_size,
-                    mark_price=price,
-                )
-                decision["monthly5_execution_guard"] = dict(monthly5_guard)
-                if not monthly5_guard.get("allowed", True):
-                    final = f"觀望（月報酬5%風控-{monthly5_guard.get('reason', '禁止新倉')}）"
-                    position_size = 0.0
-                    reason.append(str(monthly5_guard.get("reason") or "月報酬5%風控禁止新倉"))
-                else:
-                    adjusted_size = max(0.0, _safe_float(monthly5_guard.get("adjusted_size"), position_size))
-                    if adjusted_size < max(0.0, _safe_float(position_size, 0.0)) - 1e-9:
-                        reason.append(
-                            f"月報酬5%風控降倉（{position_size*100:.1f}% → {adjusted_size*100:.1f}%）"
-                        )
-                    position_size = adjusted_size
-                    decision["position_size"] = min(
-                        max(0.0, _safe_float(decision.get("position_size"), position_size)),
-                        position_size,
-                    )
-                    if _safe_float(decision.get("max_position_size"), 0.0) > 0:
-                        decision["max_position_size"] = min(
-                            _safe_float(decision.get("max_position_size"), position_size),
-                            position_size,
-                        )
 
             reason_text = " | ".join(reason)
 
@@ -18863,15 +17484,7 @@ def run_bot():
                 active_trade["avg_entry"] = float(entry)
                 active_trade["tp"] = tp
                 active_trade["sl"] = sl
-                active_trade["trade_source"] = (
-                    "daily_minimum"
-                    if daily_min_trade
-                    else (
-                        "monthly5_market_selection"
-                        if str(decision.get("primary_indicator") or "") == "monthly5_market_selection"
-                        else "signal"
-                    )
-                )
+                active_trade["trade_source"] = "daily_minimum" if daily_min_trade else "signal"
                 active_trade["candlestick_turn_direction"] = str(
                     (decision.get("candlestick_turning") or {}).get("direction") or "neutral"
                 )
@@ -18934,21 +17547,6 @@ def run_bot():
                 active_trade["scale_add_pause_ts"] = 0.0
                 active_trade["last_scale_skip_notify_key"] = ""
                 active_trade["last_scale_skip_notify_ts"] = 0.0
-                # 0.0 here means "epoch", so now_ts - 0.0 always exceeds the
-                # cooldown and the guard fires on its very first evaluation
-                # right after open. Seed it with now so the intended
-                # cooldown actually delays that first check.
-                active_trade["monthly5_position_guard_ts"] = time.time()
-                active_trade["monthly5_entry_selection"] = dict(
-                    (
-                        (
-                            POSITION_PANEL_STATE.get("monthly5_shadow")
-                            if isinstance(POSITION_PANEL_STATE.get("monthly5_shadow"), dict)
-                            else {}
-                        ).get("market_selection")
-                    )
-                    or {}
-                )
                 active_trade["open_time"] = time.time()
                 active_trade["tp_sl_adjusted_4h"] = False
                 active_trade["time_horizon"] = _infer_trade_time_horizon(
@@ -18980,11 +17578,7 @@ def run_bot():
                         size_ratio=active_trade.get("size", 0.0),
                         tp=active_trade.get("tp"),
                         sl=active_trade.get("sl"),
-                        leverage=(
-                            _safe_int(decision.get("max_leverage"), 0)
-                            if str(decision.get("primary_indicator") or "") == "monthly5_market_selection"
-                            else None
-                        ),
+                        leverage=None,
                     )
                     if copy_ok:
                         # Commit dedupe/cooldown state only after Binance has

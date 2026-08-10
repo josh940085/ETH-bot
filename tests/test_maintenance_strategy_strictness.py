@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,120 +36,7 @@ class StrategyStrictnessCheckTests(unittest.TestCase):
         self.assertEqual(result["required_general_trades"], 2)
 
     def test_flags_strategy_that_only_trades_from_daily_minimum(self):
-        with (
-            patch.object(
-                maintenance,
-                "_check_monthly5_strictness_cover",
-                return_value={"covered": False, "reason": "runtime_failed"},
-            ),
-            self.assertRaisesRegex(RuntimeError, "策略可能過嚴.*一般策略單"),
-        ):
-            self._run_check(
-                {
-                    "trades": 7,
-                    "trade_day_coverage": {
-                        "calendar_days": 7,
-                        "trade_days": 7,
-                        "daily_min_trades": 7,
-                    },
-                }
-            )
-
-    def test_monthly5_cover_allows_low_general_trade_count(self):
-        with patch.object(
-            maintenance,
-            "_check_monthly5_strictness_cover",
-            return_value={
-                "covered": True,
-                "candidate_detail": "PASS monthly5_candidate",
-                "runtime_detail": "PASS monthly5_runtime promotion_ready=true",
-            },
-        ):
-            result = self._run_check(
-                {
-                    "trades": 7,
-                    "trade_day_coverage": {
-                        "calendar_days": 7,
-                        "trade_days": 7,
-                        "daily_min_trades": 7,
-                    },
-                },
-                env={"MAINTENANCE_STRICTNESS_MONTHLY5_COVER": "1"},
-            )
-
-        self.assertEqual(result["status"], "ok")
-        self.assertTrue(result["monthly5_cover"])
-        self.assertEqual(result["general_trades"], 0)
-        self.assertIn("一般策略偏少", result["detail"])
-
-    def test_monthly5_cover_requires_candidate_and_runtime_health(self):
-        completed = subprocess.CompletedProcess(
-            args=["verify"],
-            returncode=1,
-            stdout="FAIL monthly5_runtime stale",
-        )
-        with patch.object(maintenance, "_run_command", return_value=completed):
-            cover = maintenance._check_monthly5_strictness_cover()
-
-        self.assertFalse(cover["covered"])
-        self.assertEqual(cover["reason"], "candidate_failed")
-
-    def test_monthly5_cover_fails_when_runtime_is_unhealthy(self):
-        candidate_ok = subprocess.CompletedProcess(
-            args=["verify_monthly5_candidate.py"],
-            returncode=0,
-            stdout="PASS monthly5_candidate",
-        )
-        runtime_failed = subprocess.CompletedProcess(
-            args=["verify_monthly5_runtime.py"],
-            returncode=1,
-            stdout="FAIL monthly5_runtime stale",
-        )
-        with patch.object(maintenance, "_run_command", side_effect=[candidate_ok, runtime_failed]):
-            cover = maintenance._check_monthly5_strictness_cover()
-
-        self.assertFalse(cover["covered"])
-        self.assertEqual(cover["reason"], "runtime_failed")
-
-    def test_monthly5_cover_requires_promotion_ready(self):
-        candidate_ok = subprocess.CompletedProcess(
-            args=["verify_monthly5_candidate.py"],
-            returncode=0,
-            stdout="PASS monthly5_candidate",
-        )
-        runtime_collecting = subprocess.CompletedProcess(
-            args=["verify_monthly5_runtime.py"],
-            returncode=0,
-            stdout=(
-                "PASS monthly5_runtime promotion_ready=false "
-                "promotion_blockers=sample_span,shadow_projection_not_valid"
-            ),
-        )
-        with patch.object(maintenance, "_run_command", side_effect=[candidate_ok, runtime_collecting]):
-            cover = maintenance._check_monthly5_strictness_cover()
-
-        self.assertFalse(cover["covered"])
-        self.assertEqual(cover["reason"], "promotion_not_ready")
-        self.assertIn("promotion_ready=false", cover["runtime_detail"])
-
-    def test_strategy_strictness_error_includes_monthly5_promotion_eta(self):
-        with (
-            patch.object(
-                maintenance,
-                "_check_monthly5_strictness_cover",
-                return_value={
-                    "covered": False,
-                    "reason": "promotion_not_ready",
-                    "runtime_detail": (
-                        "PASS monthly5_runtime promotion_ready=false "
-                        "promotion_blockers=sample_span,shadow_projection_not_valid "
-                        "promotion_eta_remaining_hours=6.3 "
-                        "promotion_eta_local=2026-08-07T23:03:34+08:00"
-                    ),
-                },
-            ),
-            self.assertRaisesRegex(RuntimeError, "月報酬5%接管未完成.*2026-08-07T23:03:34"),
-        ):
+        with self.assertRaisesRegex(RuntimeError, "策略可能過嚴.*一般策略單"):
             self._run_check(
                 {
                     "trades": 7,
@@ -163,14 +49,7 @@ class StrategyStrictnessCheckTests(unittest.TestCase):
             )
 
     def test_flags_low_trade_day_coverage(self):
-        with (
-            patch.object(
-                maintenance,
-                "_check_monthly5_strictness_cover",
-                return_value={"covered": False, "reason": "runtime_failed"},
-            ),
-            self.assertRaisesRegex(RuntimeError, "策略可能過嚴.*交易日覆蓋率"),
-        ):
+        with self.assertRaisesRegex(RuntimeError, "策略可能過嚴.*交易日覆蓋率"):
             self._run_check(
                 {
                     "trades": 4,

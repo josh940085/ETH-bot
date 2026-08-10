@@ -78,7 +78,7 @@ def build_status(root=Path(".")):
         "mode": "official_archive_checksum_and_tick_replay",
     }
     tools["freqtrade_validation"] = {
-        "installed": (root / "monthly5_bias_audit.py").exists(),
+        "installed": (root / "archive" / "monthly5" / "monthly5_bias_audit.py").exists(),
         "mode": "local_lookahead_and_recursive_gate",
         "full_freqtrade_runtime_installed": tools["freqtrade"]["installed"],
     }
