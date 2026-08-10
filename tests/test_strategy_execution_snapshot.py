@@ -977,6 +977,9 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 "max_size": 0.8,
                 "min_size": 0.1,
                 "monthly5_position_guard_ts": 0.0,
+                # Guard only acts on positions actually entered per monthly5's
+                # own active signal - mark this one as such.
+                "monthly5_entry_selection": {"shadow_action": "reduced_exposure"},
             }
         )
         shadow_state = {
@@ -1002,6 +1005,56 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertEqual(eth.active_trade["size"], 0.15)
         self.assertEqual(eth.POSITION_PANEL_STATE["monthly5_position_guard"]["action"], "reduce_to_cap")
 
+    def test_monthly5_position_guard_ignores_position_not_entered_via_monthly5_signal(self):
+        # Regression test for a live incident: a real short opened by the
+        # regular strategy (unrelated to monthly5) was force-closed 9
+        # seconds later because monthly5's own shadow candidate happened to
+        # be in "wait" (exposure_cap 0.0) at that moment. The guard must
+        # never touch a position whose monthly5_entry_selection isn't an
+        # active monthly5 signal, no matter what monthly5's current state is.
+        eth.active_trade.update(
+            {
+                "open": True,
+                "direction": "short",
+                "entry": 64097.3,
+                "avg_entry": 64097.3,
+                "tp": 62164.01,
+                "sl": 64841.01,
+                "size": 0.136,
+                "position_qty": 0.001,
+                "monthly5_position_guard_ts": 0.0,
+                "monthly5_entry_selection": {"shadow_action": "wait"},
+            }
+        )
+        shadow_state = {
+            "mode": "normal",
+            "market_selection": {
+                "selected_plan": "underperforming_wait",
+                "shadow_action": "wait",
+                "exposure_cap": 0.0,
+            },
+        }
+
+        with (
+            patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "_is_real_copy_enabled", return_value=True),
+            patch.object(eth, "_binance_futures_signed_request") as signed_request,
+            patch.object(eth, "record_position_close") as record_close,
+            patch.object(eth, "sync_position_panel") as sync_panel,
+            patch.object(eth, "send_telegram") as send_telegram,
+            patch.object(eth.time, "time", return_value=2000.0),
+        ):
+            adjusted = eth.manage_monthly5_position_guard(64100.0)
+
+        self.assertFalse(adjusted)
+        self.assertTrue(eth.active_trade["open"])
+        self.assertEqual(eth.active_trade["size"], 0.136)
+        signed_request.assert_not_called()
+        record_close.assert_not_called()
+        sync_panel.assert_not_called()
+        send_telegram.assert_not_called()
+
     def test_monthly5_position_guard_does_not_full_close_min_real_position_on_reduce(self):
         eth.active_trade.update(
             {
@@ -1014,6 +1067,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 "size": 0.13,
                 "position_qty": 0.001,
                 "monthly5_position_guard_ts": 0.0,
+                "monthly5_entry_selection": {"shadow_action": "evaluate_long"},
             }
         )
         shadow_state = {
@@ -1212,6 +1266,9 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
                 "size": 0.5,
                 "position_qty": 0.01,
                 "monthly5_position_guard_ts": 0.0,
+                # Position was opened while monthly5 was actively short;
+                # mode has since flipped to risk-off.
+                "monthly5_entry_selection": {"shadow_action": "evaluate_short"},
             }
         )
         shadow_state = {
