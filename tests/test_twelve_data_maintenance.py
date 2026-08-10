@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 import eth
+import market_data_sources
 
 
 def _row(open_ms, close="100"):
@@ -21,7 +22,7 @@ class TwelveDataMaintenanceTests(unittest.TestCase):
         self.assertEqual(ranges, [(step * 3, step * 4), (step * 6, step * 7)])
 
     def test_daily_interval_is_supported_by_history_path(self):
-        self.assertEqual(eth.TWELVE_DATA_INTERVAL_MAP["1d"], "1day")
+        self.assertEqual(market_data_sources.TWELVE_DATA_INTERVAL_MAP["1d"], "1day")
         self.assertTrue(str(eth._twelve_history_path("ETHUSDT", "1d")).endswith("ETHUSDT_1d.csv"))
 
     def test_quality_check_compares_matching_closed_candle(self):
