@@ -463,19 +463,36 @@ def fetch_kraken_klines(symbol, interval, limit=100, start_time_ms=None, end_tim
 # ===== Coinbase =====
 
 COINBASE_GRANULARITY_MAP = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+COINBASE_REQUEST_LOCK = threading.Lock()
+_COINBASE_LAST_REQUEST_TS = {"ts": 0.0}
 
 
-def fetch_coinbase_klines(symbol, interval, limit=100, timeout=10):
+def fetch_coinbase_klines(symbol, interval, limit=100, start_time_ms=None, end_time_ms=None, timeout=10):
     granularity = COINBASE_GRANULARITY_MAP.get(str(interval))
     if granularity is None:
         raise RuntimeError(f"Coinbase不支援週期 {interval}")
     product = "BTC-USD" if str(symbol or "").upper().startswith("BTC") else "ETH-USD"
-    response = requests.get(
-        f"https://api.exchange.coinbase.com/products/{product}/candles",
-        params={"granularity": granularity},
-        headers={"User-Agent": "ETH-bot/1.0"},
-        timeout=timeout,
-    )
+    params = {"granularity": granularity}
+    if start_time_ms is not None:
+        params["start"] = datetime.datetime.fromtimestamp(
+            _safe_float(start_time_ms, 0.0) / 1000, tz=datetime.timezone.utc
+        ).isoformat()
+    if end_time_ms is not None:
+        params["end"] = datetime.datetime.fromtimestamp(
+            _safe_float(end_time_ms, 0.0) / 1000, tz=datetime.timezone.utc
+        ).isoformat()
+    with COINBASE_REQUEST_LOCK:
+        min_gap = max(0.25, _safe_float(os.getenv("COINBASE_REQUEST_MIN_GAP_SEC", 0.5), 0.5))
+        wait_sec = min_gap - (time.time() - _COINBASE_LAST_REQUEST_TS["ts"])
+        if wait_sec > 0:
+            time.sleep(wait_sec)
+        response = requests.get(
+            f"https://api.exchange.coinbase.com/products/{product}/candles",
+            params=params,
+            headers={"User-Agent": "ETH-bot/1.0"},
+            timeout=timeout,
+        )
+        _COINBASE_LAST_REQUEST_TS["ts"] = time.time()
     response.raise_for_status()
     payload = response.json()
     rows = []
@@ -486,6 +503,8 @@ def fetch_coinbase_klines(symbol, interval, limit=100, timeout=10):
         rows.append([open_ms, item[3], item[2], item[1], item[4], item[5], open_ms + granularity * 1000 - 1, "0", 0, "0", "0", "0"])
     if not rows:
         raise RuntimeError("Coinbase candles empty")
+    if start_time_ms is not None or end_time_ms is not None:
+        return rows[: max(1, min(300, _safe_int(limit, len(rows))))]
     return rows[-max(1, min(300, _safe_int(limit, 100))) :]
 
 
