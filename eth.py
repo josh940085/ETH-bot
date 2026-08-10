@@ -17371,6 +17371,21 @@ def _build_monthly5_live_selector_decision(df_1d=None, df_4h=None):
     decision["input_probe"] = input_probe
     return decision
 
+def _trim_recent_news_keys(seen, max_keep=200):
+    """Keep only the most-recently-inserted `max_keep` keys.
+
+    `seen` must be an insertion-ordered mapping (a plain dict). A set was
+    used here previously; set iteration order is not insertion order, so
+    trimming via set(list(some_set)[-n:]) silently dropped an arbitrary
+    selection of keys instead of the oldest ones, letting already-pushed
+    headlines fall out of memory early and get reprocessed as "new".
+    """
+    if max_keep <= 0:
+        return {}
+    items = list(seen.items())
+    return dict(items[-max_keep:])
+
+
 # =============================
 # 主邏輯（AI接管）
 # =============================
@@ -17782,7 +17797,11 @@ def run_bot():
 
             # ===== 🔥 即時新聞推送（任何時候都推送，不依賴是否持倉）=====
             if not hasattr(run_bot, "last_news_set"):
-                run_bot.last_news_set = set()
+                # Insertion-ordered (plain dict, Python 3.7+) rather than a
+                # set: the trim below keeps the most-recently-seen keys, and
+                # a set's iteration order is not insertion order, so it was
+                # evicting arbitrary keys instead of the oldest ones.
+                run_bot.last_news_set = {}
 
             if not hasattr(run_bot, "startup_news_snapshot_sent"):
                 run_bot.startup_news_snapshot_sent = False
@@ -17810,7 +17829,7 @@ def run_bot():
                     for startup_news in news_list:
                         startup_key = _news_dedupe_key(startup_news)
                         if startup_key:
-                            run_bot.last_news_set.add(startup_key)
+                            run_bot.last_news_set[startup_key] = True
                         startup_raw = re.sub(r"^\[[^\]]+\]\s*", "", str(startup_news)).strip()
                         if startup_raw:
                             urgent_bias, _ = _major_equity_market_move_override(startup_raw)
@@ -17834,7 +17853,7 @@ def run_bot():
                         # titles were retried every loop and polluted the learning log.
                         news_key = _news_dedupe_key(n)
                         if news_key:
-                            run_bot.last_news_set.add(news_key)
+                            run_bot.last_news_set[news_key] = True
                         raw_news = re.sub(r"^\[[^\]]+\]\s*", "", str(n)).strip()
                         if not _is_market_relevant_news(raw_news):
                             continue
@@ -17867,7 +17886,7 @@ def run_bot():
                             except Exception as _e:
                                 print("Discord news error:", _e)
                     if len(run_bot.last_news_set) > 500:
-                        run_bot.last_news_set = set(list(run_bot.last_news_set)[-200:])
+                        run_bot.last_news_set = _trim_recent_news_keys(run_bot.last_news_set, max_keep=200)
 
             # ===== 即時新聞摘要（顯示在主訊號內）=====
             news_text = ""
