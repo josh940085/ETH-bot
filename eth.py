@@ -3689,12 +3689,33 @@ def _query_binance_order_by_client_id(symbol, client_order_id):
         return None
 
 
-def _binance_futures_signed_request(method, path, params=None):
+def _binance_sign_query(params):
+    """驗證金鑰、補上 timestamp/recvWindow 並簽名。futures/spot 簽名請求共用。"""
     api_key = str(os.getenv("BINANCE_API_KEY", "")).strip()
     api_secret = str(os.getenv("BINANCE_API_SECRET", "")).strip()
     if not api_key or not api_secret:
         raise RuntimeError("未設定 Binance API 金鑰")
 
+    query = dict(params or {})
+    query["timestamp"] = int(time.time() * 1000)
+    query["recvWindow"] = 5000
+    query_string = urlencode(query)
+    signature = hmac.new(api_secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    return api_key, query, signature
+
+
+def _binance_request_func_for_method(method):
+    method_upper = str(method).upper()
+    if method_upper == "GET":
+        return _binance_request_get
+    if method_upper == "POST":
+        return _binance_request_post
+    if method_upper == "DELETE":
+        return _binance_request_delete
+    raise ValueError(f"Unsupported method: {method}")
+
+
+def _binance_futures_signed_request(method, path, params=None):
     query = dict(params or {})
     method_upper = str(method).upper()
     is_standard_order = method_upper == "POST" and path == "/fapi/v1/order"
@@ -3704,19 +3725,9 @@ def _binance_futures_signed_request(method, path, params=None):
     }
     if is_standard_order:
         query.setdefault("newClientOrderId", _new_binance_client_order_id("order"))
-    query["timestamp"] = int(time.time() * 1000)
-    query["recvWindow"] = 5000
-    query_string = urlencode(query)
-    signature = hmac.new(api_secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    if method_upper == "GET":
-        request_func = _binance_request_get
-    elif method_upper == "POST":
-        request_func = _binance_request_post
-    elif method_upper == "DELETE":
-        request_func = _binance_request_delete
-    else:
-        raise ValueError(f"Unsupported method: {method}")
+    api_key, query, signature = _binance_sign_query(query)
+    request_func = _binance_request_func_for_method(method_upper)
     prefix = "Binance futures order signed" if is_order_request else "Binance futures account signed"
     try:
         res = request_func(
@@ -3744,27 +3755,8 @@ def _binance_futures_signed_get(path, params=None):
 
 
 def _binance_spot_signed_request(method, path, params=None):
-    api_key = str(os.getenv("BINANCE_API_KEY", "")).strip()
-    api_secret = str(os.getenv("BINANCE_API_SECRET", "")).strip()
-    if not api_key or not api_secret:
-        raise RuntimeError("未設定 Binance API 金鑰")
-
-    query = dict(params or {})
-    query["timestamp"] = int(time.time() * 1000)
-    query["recvWindow"] = 5000
-    query_string = urlencode(query)
-    signature = hmac.new(api_secret.encode("utf-8"), query_string.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    method_upper = str(method).upper()
-    if method_upper == "GET":
-        request_func = _binance_request_get
-    elif method_upper == "POST":
-        request_func = _binance_request_post
-    elif method_upper == "DELETE":
-        request_func = _binance_request_delete
-    else:
-        raise ValueError(f"Unsupported method: {method}")
-
+    api_key, query, signature = _binance_sign_query(params)
+    request_func = _binance_request_func_for_method(method)
     res = request_func(
         f"https://api.binance.com{path}",
         params={**query, "signature": signature},
@@ -13823,6 +13815,11 @@ def build_trade_signal_snapshot(
     df_1d=None,
     df_1w=None,
     df_1mth=None,
+    regime=None,
+    htf=None,
+    htf_strength=None,
+    mid_trend=None,
+    atr=None,
 ):
     sr_analysis = sr_analysis if isinstance(sr_analysis, dict) else {"bias": 0.0, "support_hits": 0, "resistance_hits": 0, "lines": []}
 
@@ -13917,16 +13914,24 @@ def build_trade_signal_snapshot(
     candlestick_turn_confidence = _safe_float(candlestick_turning.get("confidence"), 0.0)
     candlestick_turn_count = _safe_int(candlestick_turning.get("simultaneous_count"), 0)
     candlestick_turn_direction = str(candlestick_turning.get("direction") or "neutral")
-    regime = detect_market_regime(df_1h, df_4h)
+    # regime/htf/htf_strength/mid_trend/atr 若呼叫端已經算過（例如主迴圈），
+    # 直接沿用即可，避免同一輪重算一次一模一樣的結果。
+    if regime is None:
+        regime = detect_market_regime(df_1h, df_4h)
 
-    trend_4h = df_4h["close"].iloc[-1] - df_4h["ma25"].iloc[-1]
-    strength_4h = df_4h["ma25"].iloc[-1] - df_4h["ma25"].iloc[-5]
-    htf = 1 if trend_4h > 0 else -1
-    htf_strength = abs(strength_4h)
+    if htf is None or htf_strength is None:
+        trend_4h = df_4h["close"].iloc[-1] - df_4h["ma25"].iloc[-1]
+        strength_4h = df_4h["ma25"].iloc[-1] - df_4h["ma25"].iloc[-5]
+        if htf is None:
+            htf = 1 if trend_4h > 0 else -1
+        if htf_strength is None:
+            htf_strength = abs(strength_4h)
 
-    mid_trend = 1 if df_30m["macd"].iloc[-1] > df_30m["signal"].iloc[-1] else -1
+    if mid_trend is None:
+        mid_trend = 1 if df_30m["macd"].iloc[-1] > df_30m["signal"].iloc[-1] else -1
     fvg_low, fvg_high = calc_fvg(df_15m)
-    atr = float(df_15m["high"].iloc[-1] - df_15m["low"].iloc[-1]) if len(df_15m) > 0 else 0.0
+    if atr is None:
+        atr = float(df_15m["high"].iloc[-1] - df_15m["low"].iloc[-1]) if len(df_15m) > 0 else 0.0
 
     macro_bias = _compute_macro_bias(sp_change, nq_change, btc_change, dxy_change, news_bias, event_risk)
 
@@ -17599,8 +17604,19 @@ def get_kline(interval, limit=100):
     return df
 
 
+_MONTHLY5_DAILY_FRAME_CACHE = {}
+_MONTHLY5_DAILY_FRAME_TTL_SEC = 60 * 60  # daily candles; no need to refetch every cycle
+
+
 def _monthly5_live_daily_frame(fallback_df=None):
     limit = max(420, monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS + 20)
+
+    cached = _MONTHLY5_DAILY_FRAME_CACHE.get(DEFAULT_PAIR)
+    if cached is not None:
+        cached_frame, cached_source, cached_ts, cached_limit = cached
+        if time.time() - cached_ts < _MONTHLY5_DAILY_FRAME_TTL_SEC and cached_limit >= limit:
+            return cached_frame, cached_source
+
     errors = []
     try:
         rows, source = _fetch_binance_kline_rows(
@@ -17612,28 +17628,31 @@ def _monthly5_live_daily_frame(fallback_df=None):
         )
         frame = _kline_rows_to_indicator_frame(rows)
         if len(frame) >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS:
+            _MONTHLY5_DAILY_FRAME_CACHE[DEFAULT_PAIR] = (frame, f"binance_{source}", time.time(), limit)
             return frame, f"binance_{source}"
         errors.append(f"binance_{source}: rows={len(frame)}")
     except Exception as exc:
         errors.append(f"binance: {exc}")
-    try:
-        rows = _fetch_twelve_data_kline_rows(DEFAULT_PAIR, "1d", limit=limit, timeout=10)
-        frame = _kline_rows_to_indicator_frame(rows)
-        if len(frame) >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS:
-            return frame, "twelve_data"
-        errors.append(f"twelve_data: rows={len(frame)}")
-    except Exception as exc:
-        errors.append(f"twelve_data: {exc}")
+
+    # 這裡在即時下單決策路徑上，Twelve Data 若需要等待限流間隔才能打，
+    # 寧可直接放棄改用 fallback_df，也不要同步 sleep 卡住這輪決策。
+    min_gap = max(0.25, _safe_float(os.getenv("TWELVE_DATA_REQUEST_MIN_GAP_SEC", 8.0), 8.0))
+    would_block = (time.time() - TWELVE_DATA_USAGE_STATE["last_request_ts"]) < min_gap
+    if not would_block:
+        try:
+            rows = _fetch_twelve_data_kline_rows(DEFAULT_PAIR, "1d", limit=limit, timeout=10)
+            frame = _kline_rows_to_indicator_frame(rows)
+            if len(frame) >= monthly5_research_selector.REQUIRED_LIVE_DAILY_ROWS:
+                _MONTHLY5_DAILY_FRAME_CACHE[DEFAULT_PAIR] = (frame, "twelve_data", time.time(), limit)
+                return frame, "twelve_data"
+            errors.append(f"twelve_data: rows={len(frame)}")
+        except Exception as exc:
+            errors.append(f"twelve_data: {exc}")
+    else:
+        errors.append("twelve_data: skipped (would block on rate-limit gap)")
     if fallback_df is not None:
         return fallback_df, "runtime_fallback:" + "; ".join(errors[:3])
     raise RuntimeError("; ".join(errors) or "monthly5 live daily selector data unavailable")
-
-
-def _build_monthly5_live_selector_input_probe(df_1d=None):
-    frame, source = _monthly5_live_daily_frame(df_1d)
-    probe = monthly5_research_selector.build_live_selector_input_probe(frame)
-    probe["input_source"] = source
-    return probe
 
 
 def _build_monthly5_live_selector_decision(df_1d=None, df_4h=None):
@@ -17769,8 +17788,8 @@ def run_bot():
 
                     if reply:
                         _send_telegram_message(chat_id, reply, include_control_panel=True)
-                except:
-                    pass
+                except Exception as exc:
+                    print(f"⚠️ AI/新聞指令處理失敗: {exc}")
             # ===== HTF（方向）=====
             df_1mth = get_kline("1M", max(60, _safe_int(os.getenv("MONTHLY_KLINE_LIMIT", 120), 120)))
             df_1w = get_kline("1w", 110)
@@ -18555,6 +18574,11 @@ def run_bot():
                 df_1d=df_1d,
                 df_1w=df_1w,
                 df_1mth=df_1mth,
+                regime=regime,
+                htf=htf,
+                htf_strength=htf_strength,
+                mid_trend=mid_trend,
+                atr=atr,
             )
 
             features = decision["features"]
