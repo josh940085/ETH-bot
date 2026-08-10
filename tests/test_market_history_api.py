@@ -1,10 +1,6 @@
 import unittest
-from unittest import mock
-
-import pandas as pd
 
 import market_history
-import monthly5_selector_cache
 
 
 class _Response:
@@ -51,38 +47,6 @@ class MarketHistoryApiTests(unittest.TestCase):
         self.assertEqual(len(session.calls), 2)
         self.assertEqual(session.calls[1][1]["params"]["startTime"], page[-1][6] + 1)
         self.assertEqual(frame.attrs["kline_source"], "binance_futures_api")
-
-    def test_selector_history_fills_missing_archive_prefix(self):
-        columns = {
-            "open": [100.0], "high": [101.0], "low": [99.0],
-            "close": [100.5], "volume": [10.0],
-        }
-        archive = pd.DataFrame(
-            columns,
-            index=pd.DatetimeIndex(["2020-01-02T00:04:59.999Z"]),
-        )
-        archive.attrs["kline_source"] = "binance_history_um:1d"
-        prefix = pd.DataFrame(
-            columns,
-            index=pd.DatetimeIndex(["2019-12-28T00:04:59.999Z"]),
-        )
-        prefix.attrs["kline_source"] = "binance_futures_api"
-        with (
-            mock.patch.object(
-                market_history, "fetch_klines_from_binance_history", return_value=archive
-            ),
-            mock.patch.object(
-                market_history, "fetch_klines_from_binance_api", return_value=prefix
-            ) as api,
-        ):
-            frame = monthly5_selector_cache.load_history("2020-01-01", "2020-01-02")
-        self.assertEqual(len(frame), 2)
-        self.assertTrue(frame.index.is_monotonic_increasing)
-        self.assertEqual(
-            frame.attrs["kline_source"],
-            "binance_futures_api+binance_history_um:1d",
-        )
-        api.assert_called_once()
 
 
 if __name__ == "__main__":

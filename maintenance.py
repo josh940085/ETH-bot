@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-import monthly5_shadow
 from package_updates import check_and_update_packages
 from runtime_config import load_local_env
 from runtime_paths import REPO_DIR, data_path
@@ -57,11 +56,6 @@ CHECK_NAME_ZH = {
     "telegram_watch_risk": "Telegram 發送風險",
     "model_health": "交易模型健康狀態",
     "strategy_strictness": "策略嚴苛度",
-    "monthly5_candidate": "月報酬5%歷史候選審核",
-    "monthly5_runtime": "月報酬5%策略一致性",
-    "monthly5_account": "月報酬5%實倉安全",
-    "monthly5_readiness": "月報酬5%實盤樣本準備度",
-    "monthly5_activation": "月報酬5%實單接管條件",
     "smoke_backtest": "策略快速回測",
 }
 STATUS_ZH = {
@@ -996,121 +990,6 @@ def _check_python_runtime():
     }
 
 
-def _check_monthly5_candidate():
-    result = _run_command(
-        [sys.executable, "verify_monthly5_candidate.py"],
-        timeout=60,
-    )
-    output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        raise RuntimeError(output or "monthly5 candidate verifier failed")
-    detail = output.splitlines()[-1] if output else "monthly5 candidate verifier passed"
-    return {
-        "status": "ok",
-        "detail": detail,
-    }
-
-
-def _check_monthly5_runtime():
-    max_age_sec = max(
-        60,
-        int(float(os.getenv("MONTHLY5_RUNTIME_MAX_AGE_SEC", "600") or "600")),
-    )
-    command = [sys.executable, "verify_monthly5_runtime.py", "--max-age-sec", str(max_age_sec)]
-    if os.getenv("MONTHLY5_REQUIRE_HISTORY", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        command.append("--require-history")
-    result = _run_command(
-        command,
-        timeout=60,
-    )
-    output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        raise RuntimeError(output or "monthly5 runtime verifier failed")
-    detail = output.splitlines()[-1] if output else "monthly5 runtime verifier passed"
-    return {
-        "status": "ok",
-        "detail": detail,
-        "max_age_sec": max_age_sec,
-    }
-
-
-def _check_monthly5_account():
-    result = _run_command(
-        [sys.executable, "verify_monthly5_account.py"],
-        timeout=60,
-    )
-    output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        raise RuntimeError(output or "monthly5 account verifier failed")
-    detail = output.splitlines()[-1] if output else "monthly5 account verifier passed"
-    return {
-        "status": "ok",
-        "detail": detail,
-    }
-
-
-def _check_monthly5_readiness():
-    max_age_sec = max(
-        60,
-        int(float(os.getenv("MONTHLY5_READINESS_MAX_AGE_SEC", "900") or "900")),
-    )
-    min_records = max(
-        1,
-        int(float(os.getenv("MONTHLY5_READINESS_MIN_RECORDS", "48") or "48")),
-    )
-    min_span_hours = max(
-        0.0,
-        float(
-            os.getenv(
-                "MONTHLY5_READINESS_MIN_SPAN_HOURS",
-                str(monthly5_shadow.READINESS_MIN_SPAN_HOURS),
-            )
-            or monthly5_shadow.READINESS_MIN_SPAN_HOURS
-        ),
-    )
-    command = [
-        sys.executable,
-        "verify_monthly5_readiness.py",
-        "--max-age-sec",
-        str(max_age_sec),
-        "--min-records",
-        str(min_records),
-        "--min-span-hours",
-        str(min_span_hours),
-    ]
-    if os.getenv("MONTHLY5_REQUIRE_READY", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        command.append("--require-ready")
-    if os.getenv("MONTHLY5_REQUIRE_PROMOTION_READY", "0").strip().lower() in {"1", "true", "yes", "on"}:
-        command.append("--require-promotion-ready")
-    result = _run_command(command, timeout=60)
-    output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        raise RuntimeError(output or "monthly5 readiness verifier failed")
-    detail = output.splitlines()[0] if output else "monthly5 readiness verifier passed"
-    return {
-        "status": "ok",
-        "detail": detail,
-        "max_age_sec": max_age_sec,
-        "min_records": min_records,
-        "min_span_hours": min_span_hours,
-    }
-
-
-def _check_monthly5_activation():
-    result = _run_command(
-        [sys.executable, "verify_monthly5_activation.py"],
-        timeout=60,
-    )
-    output = (result.stdout or "").strip()
-    if result.returncode != 0:
-        raise RuntimeError(output or "monthly5 activation verifier failed")
-    detail = output.splitlines()[-1] if output else "monthly5 activation verifier passed"
-    return {
-        "status": "ok",
-        "detail": detail,
-    }
-
-
 def _check_conflict_markers():
     findings = []
     scan_paths = [REPO_DIR / name for name in TEXT_SCAN_FILES]
@@ -1604,35 +1483,6 @@ def _check_smoke_backtest(days, warmup_bars):
     }
 
 
-def _monthly5_runtime_output_promotion_ready(output):
-    for token in str(output or "").replace("\n", " ").split():
-        if token.startswith("promotion_ready="):
-            return token.split("=", 1)[1].strip().lower() == "true"
-    return False
-
-
-def _monthly5_runtime_pending_detail(output):
-    tokens = {}
-    for token in str(output or "").replace("\n", " ").split():
-        if "=" not in token:
-            continue
-        key, value = token.split("=", 1)
-        if key in {"promotion_ready", "promotion_blockers", "promotion_eta_local", "promotion_eta_remaining_hours"}:
-            tokens[key] = value
-    if not tokens:
-        return ""
-    parts = []
-    if "promotion_ready" in tokens:
-        parts.append(f"promotion_ready={tokens['promotion_ready']}")
-    if tokens.get("promotion_blockers"):
-        parts.append(f"blockers={tokens['promotion_blockers']}")
-    if tokens.get("promotion_eta_local"):
-        parts.append(f"eta={tokens['promotion_eta_local']}")
-    if tokens.get("promotion_eta_remaining_hours"):
-        parts.append(f"remaining_hours={tokens['promotion_eta_remaining_hours']}")
-    return "；".join(parts)
-
-
 def _check_strategy_strictness():
     summary = _read_json(data_path("backtest_latest_summary.json")) or {}
     coverage = summary.get("trade_day_coverage") if isinstance(summary.get("trade_day_coverage"), dict) else {}
@@ -1673,34 +1523,7 @@ def _check_strategy_strictness():
     if general_trades < required_general:
         blockers.append(f"一般策略單 {general_trades}筆 < {required_general}筆/{calendar_days}日")
     if blockers:
-        monthly5_cover = _check_monthly5_strictness_cover()
-        if monthly5_cover.get("covered"):
-            return {
-                "status": "ok",
-                "detail": (
-                    "一般策略偏少，但月報酬5%接管層健康；"
-                    + "；".join(blockers)
-                ),
-                "sample_sufficient": True,
-                "monthly5_cover": True,
-                "strictness_blockers": blockers,
-                "calendar_days": calendar_days,
-                "trade_days": trade_days,
-                "trade_day_coverage": round(coverage_ratio, 4),
-                "trades": trades,
-                "daily_min_trades": daily_min_trades,
-                "general_trades": general_trades,
-                "required_general_trades": required_general,
-                "monthly5_candidate_detail": monthly5_cover.get("candidate_detail", ""),
-                "monthly5_runtime_detail": monthly5_cover.get("runtime_detail", ""),
-            }
-        pending_detail = _monthly5_runtime_pending_detail(monthly5_cover.get("runtime_detail", ""))
-        monthly5_detail = ""
-        if monthly5_cover.get("reason") == "promotion_not_ready":
-            monthly5_detail = "；月報酬5%接管未完成"
-            if pending_detail:
-                monthly5_detail += f"（{pending_detail}）"
-        raise RuntimeError("策略可能過嚴：" + "；".join(blockers) + monthly5_detail)
+        raise RuntimeError("策略可能過嚴：" + "；".join(blockers))
 
     return {
         "status": "ok",
@@ -1716,48 +1539,6 @@ def _check_strategy_strictness():
         "daily_min_trades": daily_min_trades,
         "general_trades": general_trades,
         "required_general_trades": required_general,
-    }
-
-
-def _check_monthly5_strictness_cover():
-    if str(os.getenv("MAINTENANCE_STRICTNESS_MONTHLY5_COVER", "1")).strip().lower() not in {"1", "true", "yes", "on"}:
-        return {"covered": False, "reason": "disabled"}
-    candidate = _run_command([sys.executable, "verify_monthly5_candidate.py"], timeout=60)
-    if candidate.returncode != 0:
-        return {
-            "covered": False,
-            "reason": "candidate_failed",
-            "candidate_detail": (candidate.stdout or "").strip(),
-        }
-    runtime = _run_command(
-        [
-            sys.executable,
-            "verify_monthly5_runtime.py",
-            "--max-age-sec",
-            str(max(60, int(float(os.getenv("MONTHLY5_RUNTIME_MAX_AGE_SEC", "600") or "600")))),
-            "--require-history",
-        ],
-        timeout=60,
-    )
-    if runtime.returncode != 0:
-        return {
-            "covered": False,
-            "reason": "runtime_failed",
-            "candidate_detail": (candidate.stdout or "").strip(),
-            "runtime_detail": (runtime.stdout or "").strip(),
-        }
-    runtime_detail = (runtime.stdout or "").strip()
-    if not _monthly5_runtime_output_promotion_ready(runtime_detail):
-        return {
-            "covered": False,
-            "reason": "promotion_not_ready",
-            "candidate_detail": (candidate.stdout or "").strip(),
-            "runtime_detail": runtime_detail,
-        }
-    return {
-        "covered": True,
-        "candidate_detail": (candidate.stdout or "").strip(),
-        "runtime_detail": runtime_detail,
     }
 
 
@@ -1946,11 +1727,6 @@ def main():
         ("market_kline_source", _check_market_kline_source),
         ("py_compile", _check_py_compile),
         ("import_smoke", _check_import_smoke),
-        ("monthly5_candidate", _check_monthly5_candidate),
-        ("monthly5_runtime", _check_monthly5_runtime),
-        ("monthly5_account", _check_monthly5_account),
-        ("monthly5_readiness", _check_monthly5_readiness),
-        ("monthly5_activation", _check_monthly5_activation),
         ("telegram_policy", _check_telegram_policy_and_repair),
         ("telegram_watch_risk", _check_telegram_watch_risk),
         ("model_health", _check_models_and_repair),
