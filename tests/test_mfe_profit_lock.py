@@ -36,7 +36,7 @@ class MfeProfitLockTests(unittest.TestCase):
         with (
             patch.object(eth, "sync_position_panel"),
             patch.object(eth, "send_telegram"),
-            patch.object(eth, "_get_follow_mode_enabled", return_value=False),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=False),
             patch.object(eth, "_is_daily_min_position", return_value=False),
             patch.object(eth, "_has_scaling_opposing_pressure", return_value=True),
         ):
@@ -55,7 +55,7 @@ class MfeProfitLockTests(unittest.TestCase):
         with (
             patch.object(eth, "sync_position_panel"),
             patch.object(eth, "send_telegram"),
-            patch.object(eth, "_get_follow_mode_enabled", return_value=False),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=False),
             patch.object(eth, "_is_daily_min_position", return_value=False),
             patch.object(eth, "_has_scaling_opposing_pressure", return_value=False),
         ):

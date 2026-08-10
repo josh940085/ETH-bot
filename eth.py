@@ -49,7 +49,6 @@ from local_chat import extract_chat_text as _extract_chat_text
 import monthly5_shadow
 import monthly5_research_selector
 import monthly5_volume_forward_shadow
-from n8n_client import post_n8n_notification
 from runtime_config import (
     env_float as _safe_float_env,
     env_int as _safe_int_env,
@@ -88,7 +87,15 @@ from telegram import (
     resolve_private_chat_id_for_controls as tg_resolve_private_chat_id_for_controls,
     set_notification_opt_out as tg_set_notification_opt_out,
     toggle_follow_mode_enabled as tg_toggle_follow_mode_enabled,
-    wait_for_telegram_send_slot as tg_wait_for_telegram_send_slot,
+    configure_token as tg_configure_token,
+    set_control_panel_builder as tg_set_control_panel_builder,
+    send_telegram,
+    send_private_telegram,
+    _send_trade_notification,
+    _send_telegram_message,
+    _sanitize_telegram_text,
+    DISCORD_WEBHOOK,
+    DISCORD_NEWS,
 )
 
 load_local_env(overwrite=True, names=(".env",))
@@ -179,6 +186,10 @@ ALLOW_BINANCE_DERIVATIVES_MARKET_DATA = str(os.getenv("ALLOW_BINANCE_DERIVATIVES
 }
 TELEGRAM_TOKEN = _get_required_env("TELEGRAM_TOKEN", "", mask=True)
 TELEGRAM_CHAT_ID = _get_required_env("TELEGRAM_CHAT_ID", "", warn_if_missing=False)
+# telegram.py keeps its own module-level TELEGRAM_TOKEN copy (used by
+# send_telegram/send_private_telegram/etc.), which otherwise stays empty in
+# this process since only program.py/maintenance.py used to call this.
+tg_configure_token(TELEGRAM_TOKEN)
 MLX_AGENT_ENABLED = str(os.getenv("MLX_AGENT_ENABLED", "1") or "1").strip().lower() in {
     "1",
     "true",
@@ -192,7 +203,6 @@ MLX_MODEL = (os.getenv("MLX_MODEL", "Qwen/Qwen3-4B-MLX-4bit") or "Qwen/Qwen3-4B-
 BOT_SUPERVISOR = os.getenv("BOT_SUPERVISOR") == "1"
 TELEGRAM_STATE_FILE = data_path(".telegram_state.json")
 # ===== Telegram =====
-LAST_TELEGRAM_TS = 0
 TELEGRAM_POLL_BACKOFF_SEC = 1.0
 TELEGRAM_POLL_LAST_ERROR_KEY = ""
 TELEGRAM_POLL_LAST_LOG_TS = 0.0
@@ -289,14 +299,12 @@ def _safe_float_env_names(names, default: float) -> float:
 
 MINI_APP_URL = _normalize_mini_app_url(os.getenv("TELEGRAM_MINI_APP_URL", DEFAULT_MINI_APP_URL))
 
-# ===== News / Discord service =====
+# ===== News service =====
+from telegram import _post_discord_webhook
 from news import (
-    DISCORD_NEWS,
-    DISCORD_WEBHOOK,
     _is_market_relevant_news,
     _major_equity_market_move_override,
     _news_dedupe_key,
-    _post_discord_webhook,
     _process_pending_news_evaluations,
     _register_news_push_if_new,
     analyze_news_text,
@@ -432,7 +440,7 @@ def _build_position_panel_external_url(chat_id=None) -> str:
     contains crypto trading/account state, so the Telegram chat keeps ordinary
     bot controls while the richer panel opens as a regular external HTTPS page.
     """
-    target = _resolve_private_chat_id_for_controls(chat_id)
+    target = tg_resolve_private_chat_id_for_controls(chat_id)
     if not target:
         return ""
 
@@ -475,67 +483,8 @@ PANEL_REALTIME_WORKER_STARTED = False
 
 
 
-def fetch_telegram_commands(last_update_id=None):
-    return tg_fetch_telegram_commands(
-        last_update_id=last_update_id,
-        bot_supervisor=BOT_SUPERVISOR,
-        telegram_token=TELEGRAM_TOKEN,
-        webapp_command_prefix=WEBAPP_COMMAND_PREFIX,
-    )
-
-
-
-
-def _is_private_chat_id(chat_id) -> bool:
-    return tg_is_private_chat_id(chat_id)
-
-
-def _remove_notification_chat(chat_id):
-    tg_remove_notification_chat(chat_id)
-
-
-
-
-def _note_telegram_delivery_event(chat_id=None, ok=False, status_code=None, body="", error=None, context=""):
-    return tg_note_telegram_delivery_event(
-        chat_id=chat_id,
-        ok=ok,
-        status_code=status_code,
-        body=body,
-        error=error,
-        context=context,
-    )
-
-
-def _is_telegram_chat_not_found(status, body) -> bool:
-    if int(_safe_int(status, 0)) != 400:
-        return False
-
-    text = str(body or "")
-    low = text.lower()
-    return "chat not found" in low or '"description":"bad request: chat not found"' in low
-
-
-def _get_notification_chat_ids():
-    return tg_get_notification_chat_ids()
-
-
-def _get_follow_mode_enabled() -> bool:
-    return tg_get_follow_mode_enabled()
-
-
-
-
-def _toggle_follow_mode_enabled() -> bool:
-    return tg_toggle_follow_mode_enabled()
-
-
-def _resolve_private_chat_id_for_controls(chat_id=None):
-    return tg_resolve_private_chat_id_for_controls(chat_id)
-
-
 def _get_follow_button_text() -> str:
-    return FOLLOW_BUTTON_TEXT_ENABLED if _get_follow_mode_enabled() else FOLLOW_BUTTON_TEXT_DISABLED
+    return FOLLOW_BUTTON_TEXT_ENABLED if tg_get_follow_mode_enabled() else FOLLOW_BUTTON_TEXT_DISABLED
 
 
 def _build_control_panel_keyboard(chat_id=None):
@@ -556,6 +505,9 @@ def _build_control_panel_keyboard(chat_id=None):
     return {
         "inline_keyboard": rows,
     }
+
+
+tg_set_control_panel_builder(_build_control_panel_keyboard)
 
 
 def _format_control_panel_usdt(value):
@@ -615,7 +567,7 @@ def _build_control_panel_text(force_refresh=False, chat_id=None):
 
 
 def send_control_panel(chat_id=None):
-    target = _resolve_private_chat_id_for_controls(chat_id)
+    target = tg_resolve_private_chat_id_for_controls(chat_id)
     if not TELEGRAM_TOKEN or not target:
         return
 
@@ -625,7 +577,7 @@ def send_control_panel(chat_id=None):
             _build_control_panel_text(force_refresh=True, chat_id=target),
             include_control_panel=True,
         )
-        _note_telegram_delivery_event(
+        tg_note_telegram_delivery_event(
             chat_id=target,
             ok=res is not None and res.status_code == 200,
             status_code=getattr(res, "status_code", "no-response"),
@@ -634,7 +586,7 @@ def send_control_panel(chat_id=None):
             context="eth.send_control_panel",
         )
     except Exception as e:
-        _note_telegram_delivery_event(
+        tg_note_telegram_delivery_event(
             chat_id=target,
             ok=False,
             status_code="exception",
@@ -679,7 +631,7 @@ def _perform_manual_close():
 
     # ===== 若實單啟用，向 Binance 送出市價平倉 =====
     binance_close_msg = ""
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             direction = str(active_trade.get("direction", "long")).lower()
             qty = _get_active_trade_position_qty()
@@ -735,7 +687,7 @@ def _close_trade_at_max_hold(current_price, candle_high=0.0, candle_low=0.0, max
     direction = str(active_trade.get("direction") or "long").lower()
     label = str(max_hold_label or "時間上限")
     close_msg = ""
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             qty = _get_active_trade_position_qty()
             if qty <= 0:
@@ -765,7 +717,7 @@ def _handle_control_callback(raw_text, fallback_chat_id=None):
 
     if text.startswith(WEBAPP_COMMAND_PREFIX):
         action = text[len(WEBAPP_COMMAND_PREFIX):].strip()
-        chat_id = _resolve_private_chat_id_for_controls(fallback_chat_id)
+        chat_id = tg_resolve_private_chat_id_for_controls(fallback_chat_id)
 
         if action == "manual_close":
             if not active_trade.get("open"):
@@ -790,10 +742,10 @@ def _handle_control_callback(raw_text, fallback_chat_id=None):
     except ValueError:
         return True
 
-    chat_id = _resolve_private_chat_id_for_controls(fallback_chat_id)
+    chat_id = tg_resolve_private_chat_id_for_controls(fallback_chat_id)
 
     if data == "toggle_follow":
-        enabled = _toggle_follow_mode_enabled()
+        enabled = tg_toggle_follow_mode_enabled()
         _answer_callback_query(callback_id, "✅ 跟單已開啟" if enabled else "⏹️ 跟單已關閉")
         _edit_control_panel_markup(chat_id, message_id)
         return True
@@ -851,7 +803,7 @@ def _get_active_trade_position_qty():
     if qty > 0:
         return qty
 
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             rows = _binance_futures_signed_get("/fapi/v2/positionRisk", {"symbol": COPY_TRADE_SYMBOL})
             for row in rows if isinstance(rows, list) else []:
@@ -3205,7 +3157,7 @@ def _binance_close_confirmation_required() -> bool:
     """Real positions stay open locally until Binance confirms they are closed."""
     return (
         _real_order_priority_enabled()
-        and _get_follow_mode_enabled()
+        and tg_get_follow_mode_enabled()
         and _is_real_copy_enabled()
     )
 
@@ -4124,7 +4076,7 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None, leverage=No
     if direction not in {"long", "short"}:
         return False, "⚠️ 跟單失敗：方向無效"
 
-    if not _get_follow_mode_enabled():
+    if not tg_get_follow_mode_enabled():
         return False, "⏹️ 跟單未開啟，已略過 Binance 自動開單"
 
     if not _is_real_copy_enabled():
@@ -4709,56 +4661,6 @@ def _estimate_panel_financials(entry_price, size_ratio, lev):
         margin = max(margin, notional / lev)
 
     return max(0.0, notional), max(0.0, margin)
-
-
-def _sanitize_telegram_text(msg):
-    raw = str(msg or "")
-    # Telegram sendMessage is sent without parse_mode here. Preserve ampersands
-    # because signed panel URLs rely on query separators such as &state_url=.
-    safe_text = raw.replace("<", "").replace(">", "")
-    fallback_text = raw.replace("<", "").replace(">", "")
-    return safe_text, fallback_text
-
-
-def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
-    if not TELEGRAM_TOKEN or chat_id is None:
-        return None
-
-    payload = {
-        "chat_id": chat_id,
-        "text": text,
-    }
-    if reply_markup is not None:
-        payload["reply_markup"] = reply_markup
-
-    tg_wait_for_telegram_send_slot()
-    n8n_response = post_n8n_notification(
-        "telegram",
-        payload,
-        timeout=timeout,
-        session=HTTP_SESSION,
-    )
-    if n8n_response is not None:
-        return n8n_response
-
-    try:
-        return HTTP_SESSION.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json=payload,
-            timeout=timeout,
-        )
-    except Exception:
-        return None
-
-
-def _send_telegram_message(chat_id, msg, include_control_panel=False, timeout=5):
-    safe_text, fallback_text = _sanitize_telegram_text(msg)
-    reply_markup = _build_control_panel_keyboard(chat_id) if include_control_panel and _is_private_chat_id(chat_id) else None
-
-    res = _post_telegram_message(chat_id, safe_text, reply_markup=reply_markup, timeout=timeout)
-    if res is not None and res.status_code == 400 and fallback_text != safe_text:
-        res = _post_telegram_message(chat_id, fallback_text, reply_markup=reply_markup, timeout=timeout)
-    return res
 
 
 def _start_panel_realtime_publisher():
@@ -6936,14 +6838,14 @@ def sync_position_panel(current_price=None):
             "execution_priority": "real_order" if _real_order_priority_enabled() else "strategy_signal",
             "execution_mode": (
                 "real"
-                if _get_follow_mode_enabled() and _is_real_copy_enabled()
+                if tg_get_follow_mode_enabled() and _is_real_copy_enabled()
                 else "real_required"
                 if _real_order_priority_enabled()
                 else "local_tracking"
             ),
             "position_source": (
                 "binance"
-                if active_trade.get("open") and _get_follow_mode_enabled() and _is_real_copy_enabled()
+                if active_trade.get("open") and tg_get_follow_mode_enabled() and _is_real_copy_enabled()
                 else "none"
                 if not active_trade.get("open")
                 else "local_tracking"
@@ -7012,7 +6914,7 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
     if direction not in {"long", "short"}:
         return False, "方向無效"
 
-    if not _get_follow_mode_enabled() or not _is_real_copy_enabled():
+    if not tg_get_follow_mode_enabled() or not _is_real_copy_enabled():
         return False, "實單未啟用"
 
     try:
@@ -7136,7 +7038,7 @@ def _is_min_position_no_reduce_message(message):
 
 
 def _enforce_daily_min_trade_size(planned_size, current_price):
-    if not (_get_follow_mode_enabled() and _is_real_copy_enabled()):
+    if not (tg_get_follow_mode_enabled() and _is_real_copy_enabled()):
         return ""
     if not active_trade.get("open"):
         return ""
@@ -7207,7 +7109,7 @@ def _close_trade_for_monthly5_guard(current_price, reason):
     current_price = _safe_float(current_price, _safe_float(active_trade.get("entry"), 0.0))
     direction = str(active_trade.get("direction") or "long").lower()
     close_msg = ""
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             qty = _get_active_trade_position_qty()
             if qty <= 0:
@@ -7333,7 +7235,7 @@ def manage_monthly5_position_guard(current_price, decision=None):
             sync_position_panel(current_price)
             return False
 
-        if _get_follow_mode_enabled() and _is_real_copy_enabled():
+        if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
             ok, msg = _execute_copy_trade_scale(direction, delta, reduce=True, mark_price=current_price)
             if not ok:
                 if _is_min_position_no_reduce_message(msg):
@@ -7805,7 +7707,7 @@ def maybe_activate_auto_break_even(current_price, atr=None, now_ts=None):
     sync_position_panel(px)
 
     sync_msg = ""
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             _, binance_msg = update_copy_trade_tp_sl(active_trade.get("tp"), new_sl)
             sync_msg = f"\n{binance_msg}"
@@ -7915,7 +7817,7 @@ def maybe_lock_profit_after_reversal(current_price, favorable_price=None, atr=No
     sync_position_panel(current)
 
     sync_msg = ""
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             _, binance_msg = update_copy_trade_tp_sl(active_trade.get("tp"), new_sl)
             sync_msg = f"\n{binance_msg}"
@@ -7970,7 +7872,7 @@ def maybe_take_quick_profit_reduce(current_price, atr=None, now_ts=None):
     if delta <= 0:
         return False
 
-    real_copy_enabled = _get_follow_mode_enabled() and _is_real_copy_enabled()
+    real_copy_enabled = tg_get_follow_mode_enabled() and _is_real_copy_enabled()
     if real_copy_enabled:
         min_delta_ratio = max(0.01, _safe_float(os.getenv("QUICK_PROFIT_REDUCE_MIN_DELTA_RATIO", 0.02), 0.02))
         if delta < min_delta_ratio:
@@ -8131,7 +8033,7 @@ def _maybe_relax_sl_after_scale_add(direction, current_price, atr=None, initial_
     _sync_break_even_state_from_sl(direction, entry, new_sl, preserve_existing=False)
 
     sync_msg = ""
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             _, binance_msg = update_copy_trade_tp_sl(active_trade.get("tp"), new_sl)
             sync_msg = f"\n{binance_msg}"
@@ -8298,7 +8200,7 @@ def manage_position_scaling(current_price, atr=None, now_ts=None):
     turn_direction = str(active_trade.get("candlestick_turn_direction") or "neutral")
     turn_count = max(0, _safe_int(active_trade.get("candlestick_turn_count"), 0))
     turn_confidence = max(0.0, _safe_float(active_trade.get("candlestick_turn_confidence"), 0.0))
-    real_copy_enabled = _get_follow_mode_enabled() and _is_real_copy_enabled()
+    real_copy_enabled = tg_get_follow_mode_enabled() and _is_real_copy_enabled()
     progress = _calc_scaling_progress(direction, entry, current_price, active_trade.get("tp"), active_trade.get("sl"))
 
     if direction not in {"long", "short"} or not progress:
@@ -8583,7 +8485,7 @@ def maybe_shrink_tp_after_hold(current_price=None, now_ts=None):
     sync_position_panel(current_price or entry_ref)
 
     sync_msg = ""
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             _, binance_msg = update_copy_trade_tp_sl(active_trade.get("tp"), active_trade.get("sl"))
             sync_msg = f"\n{binance_msg}"
@@ -15638,201 +15540,6 @@ def _finalize_pending_training_sample(pending_sample, label, close_reason="", cl
     _clear_pending_training_sample_state()
     return None
 
-def send_telegram(msg, priority=False, include_private=True):
-    global LAST_TELEGRAM_TS
-
-    now = time.time()
-
-    # ===== 只有低優先才限流 =====
-    if not priority and now - LAST_TELEGRAM_TS < 10:
-        return False
-
-    if include_private:
-        targets = _get_notification_chat_ids()
-    else:
-        targets = []  # 群聊推播已停用
-
-    if not targets and _is_truthy(os.getenv("TELEGRAM_FALLBACK_PRIVATE_WHEN_NO_BROADCAST_TARGET", "1")):
-        private_target = _resolve_private_chat_id_for_controls()
-        if private_target:
-            targets = [private_target]
-
-    if not TELEGRAM_TOKEN or not targets:
-        print("⚠️ Telegram 目標未設定，略過發送")
-        return False
-
-    try:
-        sent_count = 0
-        for chat_id in targets:
-            res = _send_telegram_message(chat_id, msg, include_control_panel=True)
-
-            if res is None or res.status_code != 200:
-                status = getattr(res, "status_code", "no-response")
-                body = getattr(res, "text", "")
-                delivery = _note_telegram_delivery_event(
-                    chat_id=chat_id,
-                    ok=False,
-                    status_code=status,
-                    body=body,
-                    error="sendMessage returned no response" if res is None else None,
-                    context="eth.send_telegram.broadcast",
-                )
-                print(f"❌ Telegram 發送失敗 [{chat_id}]:", status, body)
-
-                if delivery.get("remove_chat") or _is_telegram_chat_not_found(status, body):
-                    _remove_notification_chat(chat_id)
-                    continue
-
-                try:
-                    retry_after = max(1, int(delivery.get("retry_after", 0) or 0))
-                    time.sleep(min(30, retry_after))
-                    res2 = _send_telegram_message(chat_id, msg, include_control_panel=True)
-                    retry_status = getattr(res2, "status_code", "no-response")
-                    retry_body = getattr(res2, "text", "")
-                    retry_delivery = _note_telegram_delivery_event(
-                        chat_id=chat_id,
-                        ok=res2 is not None and res2.status_code == 200,
-                        status_code=retry_status,
-                        body=retry_body,
-                        error="retry sendMessage returned no response" if res2 is None else None,
-                        context="eth.send_telegram.broadcast_retry",
-                    )
-                    print(f"🔁 retry [{chat_id}]:", retry_status)
-                    if res2 is not None and res2.status_code == 200:
-                        sent_count += 1
-                    elif retry_delivery.get("remove_chat"):
-                        _remove_notification_chat(chat_id)
-                except Exception as e:
-                    _note_telegram_delivery_event(
-                        chat_id=chat_id,
-                        ok=False,
-                        status_code="exception",
-                        error=e,
-                        context="eth.send_telegram.broadcast_retry",
-                    )
-                    print(f"❌ retry失敗 [{chat_id}]:", e)
-            else:
-                _note_telegram_delivery_event(
-                    chat_id=chat_id,
-                    ok=True,
-                    status_code=res.status_code,
-                    body=getattr(res, "text", ""),
-                    context="eth.send_telegram.broadcast",
-                )
-                sent_count += 1
-
-        if sent_count > 0:
-            print(f"✅ Telegram 已送出 ({sent_count}/{len(targets)})")
-
-        # Discord只發「進場通知」
-        try:
-            if DISCORD_WEBHOOK and "進場" in msg:
-                _post_discord_webhook(DISCORD_WEBHOOK, msg, timeout=5)
-        except Exception as e:
-            print("Discord error:", e)
-
-        LAST_TELEGRAM_TS = now
-
-    except Exception as e:
-        print("❌ Telegram error:", e, "| msg:", msg[:50])
-        return False
-
-    return sent_count > 0
-
-
-def send_private_telegram(msg, priority=False):
-    global LAST_TELEGRAM_TS
-
-    now = time.time()
-    if not priority and now - LAST_TELEGRAM_TS < 10:
-        return False
-
-    dedupe_key = ""
-    dedupe_cache = {}
-    if _is_truthy(os.getenv("TELEGRAM_PRIVATE_DEDUPE_ENABLED", "1")):
-        dedupe_text = str(msg or "").strip()
-        if dedupe_text:
-            dedupe_key = hashlib.sha256(dedupe_text.encode("utf-8", errors="ignore")).hexdigest()
-            dedupe_cache = getattr(send_private_telegram, "_dedupe_cache", {})
-            cooldown = max(
-                30.0,
-                _safe_float(
-                    os.getenv(
-                        "TELEGRAM_PRIVATE_PRIORITY_DEDUPE_SEC" if priority else "TELEGRAM_PRIVATE_DEDUPE_SEC",
-                        180 if priority else 60,
-                    ),
-                    180 if priority else 60,
-                ),
-            )
-            last_sent = _safe_float(dedupe_cache.get(dedupe_key), 0.0)
-            if now - last_sent < cooldown:
-                if now - _safe_float(getattr(send_private_telegram, "_last_dedupe_log_ts", 0.0), 0.0) > 60:
-                    print("🔕 私聊重複通知已略過")
-                    send_private_telegram._last_dedupe_log_ts = now
-                return False
-
-    target = _resolve_private_chat_id_for_controls()
-    if not TELEGRAM_TOKEN or not target:
-        print("⚠️ 私聊目標未設定，略過發送")
-        return False
-
-    try:
-        res = _send_telegram_message(target, msg, include_control_panel=True)
-
-        if res is None or res.status_code != 200:
-            status = getattr(res, "status_code", "no-response")
-            body = getattr(res, "text", "")
-            delivery = _note_telegram_delivery_event(
-                chat_id=target,
-                ok=False,
-                status_code=status,
-                body=body,
-                error="sendMessage returned no response" if res is None else None,
-                context="eth.send_private_telegram",
-            )
-            print(f"❌ 私聊發送失敗 [{target}]", status, body)
-
-            if delivery.get("remove_chat") or _is_telegram_chat_not_found(status, body):
-                _remove_notification_chat(target)
-
-            return False
-
-        _note_telegram_delivery_event(
-            chat_id=target,
-            ok=True,
-            status_code=res.status_code,
-            body=getattr(res, "text", ""),
-            context="eth.send_private_telegram",
-        )
-        LAST_TELEGRAM_TS = now
-        if dedupe_key:
-            dedupe_cache[dedupe_key] = now
-            if len(dedupe_cache) > 300:
-                cutoff = now - 3600.0
-                dedupe_cache = {key: ts for key, ts in dedupe_cache.items() if _safe_float(ts, 0.0) >= cutoff}
-            send_private_telegram._dedupe_cache = dedupe_cache
-        summary = str(msg or "").strip().splitlines()[0][:48]
-        print(f"✅ 私聊通知已送出: {summary}" if summary else "✅ 私聊通知已送出")
-        return True
-    except Exception as e:
-        _note_telegram_delivery_event(
-            chat_id=target,
-            ok=False,
-            status_code="exception",
-            error=e,
-            context="eth.send_private_telegram",
-        )
-        print("❌ 私聊通知錯誤:", e)
-        return False
-
-
-def _send_trade_notification(msg, priority=True):
-    delivered = send_telegram(msg, priority=priority)
-    if delivered:
-        return True
-    return send_private_telegram(msg, priority=priority)
-
-
 # ===== 本地 MLX AI 分析 =====
 if MLX_AGENT_ENABLED:
     print(f"✅ MLX AI agent: {MLX_MODEL} @ {MLX_AGENT_BASE_URL}")
@@ -16057,7 +15764,7 @@ def _build_whoami_text(context=None):
     chat_type = str(context.get("chat_type", "") or "").strip()
 
     whitelist_user_id = user_id
-    if whitelist_user_id in (None, "") and _is_private_chat_id(chat_id):
+    if whitelist_user_id in (None, "") and tg_is_private_chat_id(chat_id):
         whitelist_user_id = chat_id
 
     lines = ["你的 Telegram 資訊"]
@@ -16273,7 +15980,7 @@ def handle_ai_command(text, context=None):
     text = str(text or "").strip()
     context = context if isinstance(context, dict) else {}
     chat_id = context.get("chat_id")
-    is_private_chat = _is_private_chat_id(chat_id)
+    is_private_chat = tg_is_private_chat_id(chat_id)
 
     if text.startswith("/start"):
         if is_private_chat:
@@ -16315,7 +16022,7 @@ def handle_ai_command(text, context=None):
         return _build_bot_settings_text()
 
     if str(text).strip() in {FOLLOW_BUTTON_TEXT_DISABLED, FOLLOW_BUTTON_TEXT_ENABLED} or text.startswith("/follow"):
-        enabled = _toggle_follow_mode_enabled()
+        enabled = tg_toggle_follow_mode_enabled()
         if enabled and _is_real_copy_enabled():
             return "✅ 跟單已開啟（Binance 自動開單已啟用）"
         if enabled:
@@ -16378,7 +16085,7 @@ def handle_ai_command(text, context=None):
         sync_position_panel(_safe_float(WS_PRICE, entry))
 
         sync_msg = ""
-        if _get_follow_mode_enabled() and _is_real_copy_enabled():
+        if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
             try:
                 ok, binance_msg = update_copy_trade_tp_sl(new_tp, new_sl)
                 sync_msg = f"\n{binance_msg}"
@@ -17740,7 +17447,7 @@ def run_bot():
 
     # ===== V7 防洗單（訊號記憶）=====
     last_signal_cache = None
-    if _get_follow_mode_enabled() and _is_real_copy_enabled():
+    if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
             ok, _ = sync_active_trade_from_binance(send_notice=False)
             if ok and active_trade.get("open"):
@@ -17766,7 +17473,7 @@ def run_bot():
         decision = {}
         try:
             # ===== Telegram 指令接收 =====
-            commands, last_update_id = fetch_telegram_commands(last_update_id)
+            commands, last_update_id = tg_fetch_telegram_commands(last_update_id)
 
             for command in commands:
                 try:
@@ -17896,7 +17603,7 @@ def run_bot():
             # closes are observed before local strategy state is used.
             if (
                 _real_order_priority_enabled()
-                and _get_follow_mode_enabled()
+                and tg_get_follow_mode_enabled()
                 and _is_real_copy_enabled()
                 and (time.time() - last_binance_sync_ts) >= 12
             ):
@@ -19346,7 +19053,7 @@ def run_bot():
                 _set_break_even_state(False)
                 # 注意：active_trade["open"] 尚未設為 True，等待跟單確認後再設定
 
-                real_execution_ready = _get_follow_mode_enabled() and _is_real_copy_enabled()
+                real_execution_ready = tg_get_follow_mode_enabled() and _is_real_copy_enabled()
                 if real_execution_ready:
                     _update_panel_execution_snapshot(
                         decision,

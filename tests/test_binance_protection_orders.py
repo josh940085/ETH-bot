@@ -75,7 +75,7 @@ class BinanceProtectionOrderTests(unittest.TestCase):
 
     def test_open_is_blocked_before_market_order_when_tp_sl_invalid(self):
         with (
-            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=True),
             patch.object(eth, "_is_real_copy_enabled", return_value=True),
             patch.object(eth, "_binance_futures_signed_request") as request,
             patch.object(eth, "WS_PRICE", 1900.0),
@@ -93,7 +93,7 @@ class BinanceProtectionOrderTests(unittest.TestCase):
 
     def test_open_uses_explicit_monthly5_leverage_cap(self):
         with (
-            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=True),
             patch.object(eth, "_is_real_copy_enabled", return_value=True),
             patch.object(eth, "_has_valid_tp_sl", return_value=True),
             patch.object(eth, "_is_binance_dual_side_mode", return_value=False),

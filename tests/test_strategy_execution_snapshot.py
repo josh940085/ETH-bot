@@ -53,7 +53,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         self.assertIn("https://example.com/panel?panel_session=v2.test", text)
 
     def test_position_panel_external_url_uses_session_and_realtime_urls(self):
-        with patch.object(eth, "_resolve_private_chat_id_for_controls", return_value="123456"), patch.object(
+        with patch.object(eth, "tg_resolve_private_chat_id_for_controls", return_value="123456"), patch.object(
             eth, "_current_panel_realtime_urls",
             return_value=("https://panel.example.com/api/panel/state", "wss://panel.example.com/ws/panel", ""),
         ), patch.object(eth, "_create_panel_session", return_value="v2.session"):
@@ -672,7 +672,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
     def test_real_position_close_waits_for_binance_confirmation(self):
         with (
-            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=True),
             patch.object(eth, "_is_real_copy_enabled", return_value=True),
             patch.dict(eth.os.environ, {"REAL_ORDER_PRIORITY_ENABLED": "1"}, clear=False),
         ):
@@ -836,7 +836,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
             }
         )
         with (
-            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=True),
             patch.object(eth, "_is_real_copy_enabled", return_value=True),
             patch.object(eth, "_refresh_position_panel_account_state"),
             patch.object(eth, "_write_json_atomic") as write_snapshot,
@@ -990,7 +990,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         with (
             patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
-            patch.object(eth, "_get_follow_mode_enabled", return_value=False),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=False),
             patch.object(eth, "_is_real_copy_enabled", return_value=False),
             patch.object(eth, "sync_position_panel"),
             patch.object(eth, "send_telegram"),
@@ -1036,7 +1036,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         with (
             patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
-            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=True),
             patch.object(eth, "_is_real_copy_enabled", return_value=True),
             patch.object(eth, "_binance_futures_signed_get", return_value=positions),
             patch.object(eth, "_calc_copy_trade_qty", return_value=0.001),
@@ -1068,7 +1068,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
         )
 
         with (
-            patch.object(eth, "_get_follow_mode_enabled", return_value=True),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=True),
             patch.object(eth, "_is_real_copy_enabled", return_value=True),
             patch.object(
                 eth,
@@ -1225,7 +1225,7 @@ class StrategyExecutionSnapshotTests(unittest.TestCase):
 
         with (
             patch.object(eth, "_update_monthly5_shadow_panel_state", return_value=shadow_state),
-            patch.object(eth, "_get_follow_mode_enabled", return_value=False),
+            patch.object(eth, "tg_get_follow_mode_enabled", return_value=False),
             patch.object(eth, "_is_real_copy_enabled", return_value=False),
             patch.object(eth, "record_position_close"),
             patch.object(eth, "sync_position_panel"),
