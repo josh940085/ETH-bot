@@ -728,22 +728,23 @@ def consume_supervisor_commands():
 
 
 def send_message(chat_id, text, timeout=5, token=None):
-	resolved_token = str(token or TELEGRAM_TOKEN or "").strip()
-	if not resolved_token or chat_id is None:
-		return
+	"""Single-shot send with delivery tracking, for callers that don't need
+	sanitization/control-panel markup/retry (see _send_telegram_message for
+	that). Shares _post_telegram_message as the one place that actually
+	talks to Telegram (n8n-routed with a direct-API fallback), rather than
+	making its own separate HTTP call.
+	"""
+	if not str(token or TELEGRAM_TOKEN or "").strip() or chat_id is None:
+		return None
 
 	try:
-		wait_for_telegram_send_slot()
-		response = HTTP_SESSION.post(
-			f"https://api.telegram.org/bot{resolved_token}/sendMessage",
-			data={"chat_id": chat_id, "text": text},
-			timeout=timeout,
-		)
+		response = _post_telegram_message(chat_id, text, timeout=timeout, token=token)
 		info = note_telegram_delivery_event(
 			chat_id=chat_id,
-			ok=response.status_code == 200,
-			status_code=response.status_code,
-			body=response.text,
+			ok=response is not None and response.status_code == 200,
+			status_code=getattr(response, "status_code", "no-response"),
+			body=getattr(response, "text", ""),
+			error="sendMessage returned no response" if response is None else None,
 			context="telegram.send_message",
 		)
 		if info.get("remove_chat"):
@@ -1177,8 +1178,14 @@ def _sanitize_telegram_text(msg):
 	return safe_text, fallback_text
 
 
-def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
-	if not TELEGRAM_TOKEN or chat_id is None:
+def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5, token=None):
+	"""The one place that actually calls Telegram's sendMessage: n8n-routed
+	first, direct API as fallback. Every higher-level sender (send_message,
+	_send_telegram_message and everything built on it) goes through this
+	instead of making its own HTTP call.
+	"""
+	resolved_token = str(token or TELEGRAM_TOKEN or "").strip()
+	if not resolved_token or chat_id is None:
 		return None
 
 	payload = {
@@ -1189,6 +1196,11 @@ def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
 		payload["reply_markup"] = reply_markup
 
 	wait_for_telegram_send_slot()
+	# n8n routing relies on n8n's own server-side configured token (see
+	# n8n_service.py's ALLOWED_NOTIFICATION_SECRETS) rather than `token` -
+	# an explicit token override here only fully applies to the direct
+	# fallback below. In practice every caller's override already matches
+	# the module-level TELEGRAM_TOKEN, so this doesn't diverge today.
 	n8n_response = post_n8n_notification(
 		"telegram",
 		payload,
@@ -1200,7 +1212,7 @@ def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
 
 	try:
 		return HTTP_SESSION.post(
-			f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+			f"https://api.telegram.org/bot{resolved_token}/sendMessage",
 			json=payload,
 			timeout=timeout,
 		)

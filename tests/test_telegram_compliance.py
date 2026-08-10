@@ -156,6 +156,36 @@ class TelegramComplianceTests(unittest.TestCase):
         self.assertNotIn("intruder", telegram.TELEGRAM_STATE_FILE.read_text(encoding="utf-8"))
         send.assert_not_called()
 
+    def test_send_message_delegates_to_shared_post_primitive(self):
+        # send_message and _send_telegram_message (used by
+        # send_telegram/send_private_telegram) both talk to Telegram
+        # exclusively through _post_telegram_message - no separate direct
+        # HTTP call of its own.
+        response = type("Response", (), {"status_code": 200, "text": "ok"})()
+        with (
+            patch.object(telegram, "_post_telegram_message", return_value=response) as mock_post,
+            patch.object(telegram, "note_telegram_delivery_event", return_value={}),
+            patch.object(telegram, "TELEGRAM_TOKEN", "test-token"),
+        ):
+            result = telegram.send_message(123, "hello", timeout=8, token="override-token")
+
+        mock_post.assert_called_once_with(123, "hello", timeout=8, token="override-token")
+        self.assertIs(result, response)
+
+    def test_send_message_removes_chat_when_delivery_event_says_so(self):
+        response = type("Response", (), {"status_code": 400, "text": "chat not found"})()
+        with (
+            patch.object(telegram, "_post_telegram_message", return_value=response),
+            patch.object(
+                telegram, "note_telegram_delivery_event", return_value={"remove_chat": True}
+            ),
+            patch.object(telegram, "remove_notification_chat") as mock_remove,
+            patch.object(telegram, "TELEGRAM_TOKEN", "test-token"),
+        ):
+            telegram.send_message(123, "hello")
+
+        mock_remove.assert_called_once_with(123)
+
 
 if __name__ == "__main__":
     unittest.main()
