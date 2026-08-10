@@ -5,6 +5,7 @@ os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 
 import eth
 import news
+import telegram
 
 
 class NewsModuleBoundaryTests(unittest.TestCase):
@@ -23,7 +24,11 @@ class NewsModuleBoundaryTests(unittest.TestCase):
                 self.assertIs(getattr(eth, name), getattr(news, name))
 
     def test_discord_delivery_is_delegated(self):
-        self.assertIs(eth._post_discord_webhook, news._post_discord_webhook)
+        # Discord webhook delivery lives in telegram.py (the notification
+        # module) rather than news.py, since Discord is used for both news
+        # pushes and trade-entry notifications.
+        self.assertIs(eth._post_discord_webhook, telegram._post_discord_webhook)
+        self.assertFalse(hasattr(news, "_post_discord_webhook"))
 
     def test_host_learning_state_stays_in_trading_core(self):
         self.assertEqual(

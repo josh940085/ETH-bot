@@ -7,6 +7,7 @@ os.environ["ETH_BOT_DISABLE_LIVE"] = "1"
 import n8n_client
 import n8n_service
 import news
+import telegram
 
 
 class N8nNotificationTests(unittest.TestCase):
@@ -76,14 +77,15 @@ class N8nNotificationTests(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_discord_uses_direct_fallback_when_n8n_is_unavailable(self):
+        # Discord webhook delivery lives in telegram.py, not news.py.
         direct_response = Mock(status_code=200)
         direct_response.raise_for_status.return_value = None
         with (
-            patch.object(news, "DISCORD_AUTO_DELETE_SEC", 0),
-            patch.object(news, "post_n8n_notification", return_value=None),
-            patch.object(news.HTTP_SESSION, "post", return_value=direct_response) as direct_post,
+            patch.object(telegram, "DISCORD_AUTO_DELETE_SEC", 0),
+            patch.object(telegram, "post_n8n_notification", return_value=None),
+            patch.object(telegram.HTTP_SESSION, "post", return_value=direct_response) as direct_post,
         ):
-            news._post_discord_webhook("https://discord.test/webhook", "hello")
+            telegram._post_discord_webhook("https://discord.test/webhook", "hello")
 
         direct_post.assert_called_once_with(
             "https://discord.test/webhook", json={"content": "hello"}, timeout=5
@@ -93,13 +95,13 @@ class N8nNotificationTests(unittest.TestCase):
         response = Mock(status_code=200)
         response.json.return_value = {"id": "discord-message-id"}
         with (
-            patch.object(news, "DISCORD_NEWS", "https://discord.test/news"),
-            patch.object(news, "DISCORD_AUTO_DELETE_SEC", 60),
-            patch.object(news, "post_n8n_notification", return_value=response),
-            patch.object(news, "_schedule_discord_message_delete") as schedule_delete,
-            patch.object(news.HTTP_SESSION, "post") as direct_post,
+            patch.object(telegram, "DISCORD_NEWS", "https://discord.test/news"),
+            patch.object(telegram, "DISCORD_AUTO_DELETE_SEC", 60),
+            patch.object(telegram, "post_n8n_notification", return_value=response),
+            patch.object(telegram, "_schedule_discord_message_delete") as schedule_delete,
+            patch.object(telegram.HTTP_SESSION, "post") as direct_post,
         ):
-            news._post_discord_webhook("https://discord.test/news", "hello")
+            telegram._post_discord_webhook("https://discord.test/news", "hello")
 
         direct_post.assert_not_called()
         schedule_delete.assert_called_once_with(

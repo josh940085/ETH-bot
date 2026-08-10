@@ -1,12 +1,10 @@
-"""News aggregation, classification, panel formatting, and Discord delivery."""
-import datetime, html, json, os, pickle, re, threading, time, warnings
+"""News aggregation, classification, and panel formatting."""
+import datetime, html, json, os, pickle, re, time, warnings
 from collections import deque
 from pathlib import Path
-from urllib.parse import urlparse
 import xml.etree.ElementTree as ET
 import numpy as np
 import requests
-from n8n_client import post_n8n_notification
 from sklearn.ensemble import VotingClassifier
 from sklearn.exceptions import InconsistentVersionWarning
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -73,9 +71,6 @@ NEWS_EVAL_HORIZON_SEC, NEWS_EVAL_MAX_OVERDUE_SEC = 1800, 3600
 NEWS_EVAL_MIN_MOVE_RATE, NEWS_EVAL_STRONG_MOVE_RATE = 0.0012, 0.0035
 NEWS_EVAL_QUEUE_MAX, NEWS_EVAL_PROCESS_INTERVAL_SEC, NEWS_RETRAIN_MIN_INTERVAL_SEC = 400, 15.0, 900.0
 TRANSLATION_CACHE, _CURRENT_MARKET_PRICE = {}, 0.0
-DISCORD_WEBHOOK, DISCORD_NEWS = os.getenv("DISCORD_WEBHOOK", ""), os.getenv("DISCORD_NEWS", "")
-DISCORD_AUTO_DELETE_HOURS = max(0.0, _safe_float(os.getenv("DISCORD_AUTO_DELETE_HOURS", 24.0), 24.0))
-DISCORD_AUTO_DELETE_SEC = int(DISCORD_AUTO_DELETE_HOURS * 3600)
 
 def _normalize_finance_terms_zh(text):
     """將翻譯結果統一為較常見的股市/總經術語。"""
@@ -2217,65 +2212,3 @@ def _process_pending_news_evaluations(current_price):
         )
 
     return evaluated
-
-
-def _discord_webhook_base_url(webhook_url: str) -> str:
-    parsed = urlparse(str(webhook_url or "").strip())
-    if not parsed.scheme or not parsed.netloc or not parsed.path:
-        return ""
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
-
-
-def _schedule_discord_message_delete(webhook_url: str, message_id: str, delay_sec: int):
-    base_url = _discord_webhook_base_url(webhook_url)
-    msg_id = str(message_id or "").strip()
-    if not base_url or not msg_id or delay_sec <= 0:
-        return
-
-    def _delete_message():
-        try:
-            HTTP_SESSION.delete(f"{base_url}/messages/{msg_id}", timeout=8)
-        except Exception as e:
-            print("Discord auto-delete error:", e)
-
-    timer = threading.Timer(delay_sec, _delete_message)
-    timer.daemon = True
-    timer.start()
-
-
-def _post_discord_webhook(webhook_url: str, content: str, timeout: int = 5):
-    url = str(webhook_url or "").strip()
-    if not url:
-        return
-
-    payload = {"content": str(content or "")}
-    destination = "discord_news" if url == str(DISCORD_NEWS or "").strip() else "discord_trade"
-    res = post_n8n_notification(
-        destination,
-        payload,
-        wait_for_response=DISCORD_AUTO_DELETE_SEC > 0,
-        timeout=timeout,
-        session=HTTP_SESSION,
-    )
-
-    if res is None:
-        if DISCORD_AUTO_DELETE_SEC <= 0:
-            HTTP_SESSION.post(url, json=payload, timeout=timeout)
-            return
-
-        # 需要 wait=true 才能拿到 message id，供後續刪除
-        res = HTTP_SESSION.post(url, json=payload, params={"wait": "true"}, timeout=timeout)
-        res.raise_for_status()
-    elif DISCORD_AUTO_DELETE_SEC <= 0:
-        return
-
-    message_id = ""
-    try:
-        body = res.json() if res is not None else {}
-        if isinstance(body, dict):
-            message_id = str(body.get("id", "") or "")
-    except Exception:
-        message_id = ""
-
-    if message_id:
-        _schedule_discord_message_delete(url, message_id, DISCORD_AUTO_DELETE_SEC)

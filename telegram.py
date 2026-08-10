@@ -10,11 +10,14 @@ except Exception:  # pragma: no cover - urllib3 variant fallback
 if NotOpenSSLWarning is not None:
 	warnings.filterwarnings("ignore", category=NotOpenSSLWarning)
 
+import hashlib
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from cryptography.fernet import Fernet, InvalidToken
@@ -24,7 +27,16 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback
 	fcntl = None
 
+from n8n_client import post_n8n_notification
+from runtime_config import is_truthy as _is_truthy
 from runtime_paths import data_path
+
+
+def _safe_float(value, default=0.0):
+	try:
+		return float(value)
+	except Exception:
+		return default
 
 
 TELEGRAM_STATE_FILE = data_path(".telegram_state.json")
@@ -49,6 +61,15 @@ TELEGRAM_HEALTH_RETENTION_SEC = 7 * 86400
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.headers.update({"User-Agent": "ETH-bot-telegram/1.0"})
+
+DISCORD_WEBHOOK = os.getenv("DISCORD_WEBHOOK", "")
+DISCORD_NEWS = os.getenv("DISCORD_NEWS", "")
+DISCORD_AUTO_DELETE_HOURS = max(0.0, _safe_float(os.getenv("DISCORD_AUTO_DELETE_HOURS", 24.0), 24.0))
+DISCORD_AUTO_DELETE_SEC = int(DISCORD_AUTO_DELETE_HOURS * 3600)
+
+LAST_TELEGRAM_TS = 0
+
+_control_panel_builder = None
 
 
 def _chmod_private(path):
@@ -1133,3 +1154,339 @@ def fetch_telegram_commands(
 		)
 
 	return commands, newest_update_id
+
+
+def set_control_panel_builder(fn):
+	"""Register the caller's trading-bot-specific control-panel keyboard builder.
+
+	telegram.py has no notion of trading state (active_trade,
+	POSITION_PANEL_STATE); the caller (eth.py) registers a callback here
+	instead of telegram.py importing back from eth.py, which would be
+	circular.
+	"""
+	global _control_panel_builder
+	_control_panel_builder = fn
+
+
+def _sanitize_telegram_text(msg):
+	raw = str(msg or "")
+	# Telegram sendMessage is sent without parse_mode here. Preserve ampersands
+	# because signed panel URLs rely on query separators such as &state_url=.
+	safe_text = raw.replace("<", "").replace(">", "")
+	fallback_text = raw.replace("<", "").replace(">", "")
+	return safe_text, fallback_text
+
+
+def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5):
+	if not TELEGRAM_TOKEN or chat_id is None:
+		return None
+
+	payload = {
+		"chat_id": chat_id,
+		"text": text,
+	}
+	if reply_markup is not None:
+		payload["reply_markup"] = reply_markup
+
+	wait_for_telegram_send_slot()
+	n8n_response = post_n8n_notification(
+		"telegram",
+		payload,
+		timeout=timeout,
+		session=HTTP_SESSION,
+	)
+	if n8n_response is not None:
+		return n8n_response
+
+	try:
+		return HTTP_SESSION.post(
+			f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+			json=payload,
+			timeout=timeout,
+		)
+	except Exception:
+		return None
+
+
+def _send_telegram_message(chat_id, msg, include_control_panel=False, timeout=5):
+	safe_text, fallback_text = _sanitize_telegram_text(msg)
+	reply_markup = (
+		_control_panel_builder(chat_id)
+		if include_control_panel and _control_panel_builder is not None and is_private_chat_id(chat_id)
+		else None
+	)
+
+	res = _post_telegram_message(chat_id, safe_text, reply_markup=reply_markup, timeout=timeout)
+	if res is not None and res.status_code == 400 and fallback_text != safe_text:
+		res = _post_telegram_message(chat_id, fallback_text, reply_markup=reply_markup, timeout=timeout)
+	return res
+
+
+def _is_telegram_chat_not_found(status, body) -> bool:
+	try:
+		status_int = int(status)
+	except (TypeError, ValueError):
+		status_int = 0
+	if status_int != 400:
+		return False
+
+	text = str(body or "")
+	low = text.lower()
+	return "chat not found" in low or '"description":"bad request: chat not found"' in low
+
+
+def send_telegram(msg, priority=False, include_private=True):
+	global LAST_TELEGRAM_TS
+
+	now = time.time()
+
+	# ===== 只有低優先才限流 =====
+	if not priority and now - LAST_TELEGRAM_TS < 10:
+		return False
+
+	if include_private:
+		targets = get_notification_chat_ids()
+	else:
+		targets = []  # 群聊推播已停用
+
+	if not targets and _is_truthy(os.getenv("TELEGRAM_FALLBACK_PRIVATE_WHEN_NO_BROADCAST_TARGET", "1")):
+		private_target = resolve_private_chat_id_for_controls()
+		if private_target:
+			targets = [private_target]
+
+	if not TELEGRAM_TOKEN or not targets:
+		print("⚠️ Telegram 目標未設定，略過發送")
+		return False
+
+	try:
+		sent_count = 0
+		for chat_id in targets:
+			res = _send_telegram_message(chat_id, msg, include_control_panel=True)
+
+			if res is None or res.status_code != 200:
+				status = getattr(res, "status_code", "no-response")
+				body = getattr(res, "text", "")
+				delivery = note_telegram_delivery_event(
+					chat_id=chat_id,
+					ok=False,
+					status_code=status,
+					body=body,
+					error="sendMessage returned no response" if res is None else None,
+					context="telegram.send_telegram.broadcast",
+				)
+				print(f"❌ Telegram 發送失敗 [{chat_id}]:", status, body)
+
+				if delivery.get("remove_chat") or _is_telegram_chat_not_found(status, body):
+					remove_notification_chat(chat_id)
+					continue
+
+				try:
+					retry_after = max(1, int(delivery.get("retry_after", 0) or 0))
+					time.sleep(min(30, retry_after))
+					res2 = _send_telegram_message(chat_id, msg, include_control_panel=True)
+					retry_status = getattr(res2, "status_code", "no-response")
+					retry_body = getattr(res2, "text", "")
+					retry_delivery = note_telegram_delivery_event(
+						chat_id=chat_id,
+						ok=res2 is not None and res2.status_code == 200,
+						status_code=retry_status,
+						body=retry_body,
+						error="retry sendMessage returned no response" if res2 is None else None,
+						context="telegram.send_telegram.broadcast_retry",
+					)
+					print(f"🔁 retry [{chat_id}]:", retry_status)
+					if res2 is not None and res2.status_code == 200:
+						sent_count += 1
+					elif retry_delivery.get("remove_chat"):
+						remove_notification_chat(chat_id)
+				except Exception as e:
+					note_telegram_delivery_event(
+						chat_id=chat_id,
+						ok=False,
+						status_code="exception",
+						error=e,
+						context="telegram.send_telegram.broadcast_retry",
+					)
+					print(f"❌ retry失敗 [{chat_id}]:", e)
+			else:
+				note_telegram_delivery_event(
+					chat_id=chat_id,
+					ok=True,
+					status_code=res.status_code,
+					body=getattr(res, "text", ""),
+					context="telegram.send_telegram.broadcast",
+				)
+				sent_count += 1
+
+		if sent_count > 0:
+			print(f"✅ Telegram 已送出 ({sent_count}/{len(targets)})")
+
+		# Discord只發「進場通知」
+		try:
+			if DISCORD_WEBHOOK and "進場" in msg:
+				_post_discord_webhook(DISCORD_WEBHOOK, msg, timeout=5)
+		except Exception as e:
+			print("Discord error:", e)
+
+		LAST_TELEGRAM_TS = now
+
+	except Exception as e:
+		print("❌ Telegram error:", e, "| msg:", msg[:50])
+		return False
+
+	return sent_count > 0
+
+
+def send_private_telegram(msg, priority=False):
+	global LAST_TELEGRAM_TS
+
+	now = time.time()
+	if not priority and now - LAST_TELEGRAM_TS < 10:
+		return False
+
+	dedupe_key = ""
+	dedupe_cache = {}
+	if _is_truthy(os.getenv("TELEGRAM_PRIVATE_DEDUPE_ENABLED", "1")):
+		dedupe_text = str(msg or "").strip()
+		if dedupe_text:
+			dedupe_key = hashlib.sha256(dedupe_text.encode("utf-8", errors="ignore")).hexdigest()
+			dedupe_cache = getattr(send_private_telegram, "_dedupe_cache", {})
+			cooldown = max(
+				30.0,
+				_safe_float(
+					os.getenv(
+						"TELEGRAM_PRIVATE_PRIORITY_DEDUPE_SEC" if priority else "TELEGRAM_PRIVATE_DEDUPE_SEC",
+						180 if priority else 60,
+					),
+					180 if priority else 60,
+				),
+			)
+			last_sent = _safe_float(dedupe_cache.get(dedupe_key), 0.0)
+			if now - last_sent < cooldown:
+				if now - _safe_float(getattr(send_private_telegram, "_last_dedupe_log_ts", 0.0), 0.0) > 60:
+					print("🔕 私聊重複通知已略過")
+					send_private_telegram._last_dedupe_log_ts = now
+				return False
+
+	target = resolve_private_chat_id_for_controls()
+	if not TELEGRAM_TOKEN or not target:
+		print("⚠️ 私聊目標未設定，略過發送")
+		return False
+
+	try:
+		res = _send_telegram_message(target, msg, include_control_panel=True)
+
+		if res is None or res.status_code != 200:
+			status = getattr(res, "status_code", "no-response")
+			body = getattr(res, "text", "")
+			delivery = note_telegram_delivery_event(
+				chat_id=target,
+				ok=False,
+				status_code=status,
+				body=body,
+				error="sendMessage returned no response" if res is None else None,
+				context="telegram.send_private_telegram",
+			)
+			print(f"❌ 私聊發送失敗 [{target}]", status, body)
+
+			if delivery.get("remove_chat") or _is_telegram_chat_not_found(status, body):
+				remove_notification_chat(target)
+
+			return False
+
+		note_telegram_delivery_event(
+			chat_id=target,
+			ok=True,
+			status_code=res.status_code,
+			body=getattr(res, "text", ""),
+			context="telegram.send_private_telegram",
+		)
+		LAST_TELEGRAM_TS = now
+		if dedupe_key:
+			dedupe_cache[dedupe_key] = now
+			if len(dedupe_cache) > 300:
+				cutoff = now - 3600.0
+				dedupe_cache = {key: ts for key, ts in dedupe_cache.items() if _safe_float(ts, 0.0) >= cutoff}
+			send_private_telegram._dedupe_cache = dedupe_cache
+		summary = str(msg or "").strip().splitlines()[0][:48]
+		print(f"✅ 私聊通知已送出: {summary}" if summary else "✅ 私聊通知已送出")
+		return True
+	except Exception as e:
+		note_telegram_delivery_event(
+			chat_id=target,
+			ok=False,
+			status_code="exception",
+			error=e,
+			context="telegram.send_private_telegram",
+		)
+		print("❌ 私聊通知錯誤:", e)
+		return False
+
+
+def _send_trade_notification(msg, priority=True):
+	delivered = send_telegram(msg, priority=priority)
+	if delivered:
+		return True
+	return send_private_telegram(msg, priority=priority)
+
+
+def _discord_webhook_base_url(webhook_url: str) -> str:
+	parsed = urlparse(str(webhook_url or "").strip())
+	if not parsed.scheme or not parsed.netloc or not parsed.path:
+		return ""
+	return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
+def _schedule_discord_message_delete(webhook_url: str, message_id: str, delay_sec: int):
+	base_url = _discord_webhook_base_url(webhook_url)
+	msg_id = str(message_id or "").strip()
+	if not base_url or not msg_id or delay_sec <= 0:
+		return
+
+	def _delete_message():
+		try:
+			HTTP_SESSION.delete(f"{base_url}/messages/{msg_id}", timeout=8)
+		except Exception as e:
+			print("Discord auto-delete error:", e)
+
+	timer = threading.Timer(delay_sec, _delete_message)
+	timer.daemon = True
+	timer.start()
+
+
+def _post_discord_webhook(webhook_url: str, content: str, timeout: int = 5):
+	url = str(webhook_url or "").strip()
+	if not url:
+		return
+
+	payload = {"content": str(content or "")}
+	destination = "discord_news" if url == str(DISCORD_NEWS or "").strip() else "discord_trade"
+	res = post_n8n_notification(
+		destination,
+		payload,
+		wait_for_response=DISCORD_AUTO_DELETE_SEC > 0,
+		timeout=timeout,
+		session=HTTP_SESSION,
+	)
+
+	if res is None:
+		if DISCORD_AUTO_DELETE_SEC <= 0:
+			HTTP_SESSION.post(url, json=payload, timeout=timeout)
+			return
+
+		# 需要 wait=true 才能拿到 message id，供後續刪除
+		res = HTTP_SESSION.post(url, json=payload, params={"wait": "true"}, timeout=timeout)
+		res.raise_for_status()
+	elif DISCORD_AUTO_DELETE_SEC <= 0:
+		return
+
+	message_id = ""
+	try:
+		body = res.json() if res is not None else {}
+		if isinstance(body, dict):
+			message_id = str(body.get("id", "") or "")
+	except Exception:
+		message_id = ""
+
+	if message_id:
+		_schedule_discord_message_delete(url, message_id, DISCORD_AUTO_DELETE_SEC)
