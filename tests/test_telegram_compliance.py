@@ -186,6 +186,68 @@ class TelegramComplianceTests(unittest.TestCase):
 
         mock_remove.assert_called_once_with(123)
 
+    def test_post_telegram_message_records_exception_for_last_send_error(self):
+        import requests
+
+        timeout_error = requests.exceptions.Timeout("timed out")
+        with (
+            patch.object(telegram, "TELEGRAM_TOKEN", "test-token"),
+            patch.object(telegram, "post_n8n_notification", return_value=None),
+            patch.object(telegram, "wait_for_telegram_send_slot"),
+            patch.object(telegram.HTTP_SESSION, "post", side_effect=timeout_error),
+        ):
+            result = telegram._post_telegram_message(123, "hello")
+            recorded = telegram.last_send_error()
+
+        self.assertIsNone(result)
+        self.assertIs(recorded, timeout_error)
+
+    def test_post_telegram_message_clears_last_error_on_success(self):
+        response = type("Response", (), {"status_code": 200, "text": "ok"})()
+        with (
+            patch.object(telegram, "TELEGRAM_TOKEN", "test-token"),
+            patch.object(telegram, "post_n8n_notification", return_value=None),
+            patch.object(telegram, "wait_for_telegram_send_slot"),
+            patch.object(telegram.HTTP_SESSION, "post", return_value=response),
+        ):
+            telegram._post_telegram_message(123, "hello")
+
+        self.assertEqual(
+            telegram.last_send_error("no error should remain"), "no error should remain"
+        )
+
+    def test_last_send_error_falls_back_to_default_when_nothing_recorded(self):
+        if hasattr(telegram._post_telegram_message, "last_error"):
+            delattr(telegram._post_telegram_message, "last_error")
+
+        self.assertEqual(telegram.last_send_error("fallback text"), "fallback text")
+
+    def test_send_telegram_broadcast_uses_recorded_exception_for_diagnostics(self):
+        # Set the attribute directly on the real _post_telegram_message
+        # function object (rather than via patch.object, whose target
+        # expression would be evaluated before an outer patch.object(telegram,
+        # "_post_telegram_message") swaps it for a Mock in the module
+        # namespace - last_send_error() always reads through the current
+        # module-level name, not this local reference).
+        timeout_error = TimeoutError("net down")
+        original_last_error = getattr(telegram._post_telegram_message, "last_error", None)
+        telegram._post_telegram_message.last_error = timeout_error
+        try:
+            with (
+                patch.object(telegram, "TELEGRAM_TOKEN", "test-token"),
+                patch.object(telegram, "get_notification_chat_ids", return_value=["123"]),
+                patch.object(telegram, "_send_telegram_message", return_value=None),
+                patch.object(telegram, "note_telegram_delivery_event", return_value={}) as mock_note,
+                patch.object(telegram, "DISCORD_WEBHOOK", ""),
+                patch("time.sleep"),
+            ):
+                telegram.send_telegram("hello", priority=True)
+        finally:
+            telegram._post_telegram_message.last_error = original_last_error
+
+        first_call_kwargs = mock_note.call_args_list[0].kwargs
+        self.assertIs(first_call_kwargs["error"], timeout_error)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -744,7 +744,7 @@ def send_message(chat_id, text, timeout=5, token=None):
 			ok=response is not None and response.status_code == 200,
 			status_code=getattr(response, "status_code", "no-response"),
 			body=getattr(response, "text", ""),
-			error="sendMessage returned no response" if response is None else None,
+			error=last_send_error() if response is None else None,
 			context="telegram.send_message",
 		)
 		if info.get("remove_chat"):
@@ -1211,13 +1211,30 @@ def _post_telegram_message(chat_id, text, reply_markup=None, timeout=5, token=No
 		return n8n_response
 
 	try:
-		return HTTP_SESSION.post(
+		response = HTTP_SESSION.post(
 			f"https://api.telegram.org/bot{resolved_token}/sendMessage",
 			json=payload,
 			timeout=timeout,
 		)
-	except Exception:
+		_post_telegram_message.last_error = None
+		return response
+	except Exception as e:
+		# Callers treat a None return as "no response" and can't tell a
+		# timeout from a connection error from the return value alone -
+		# stash the real exception so note_telegram_delivery_event's
+		# isinstance(error, requests.exceptions.Timeout) check still works.
+		# See last_send_error() below.
+		_post_telegram_message.last_error = e
 		return None
+
+
+def last_send_error(default="sendMessage returned no response"):
+	"""The exception _post_telegram_message's last direct-API attempt raised
+	(if any), for passing to note_telegram_delivery_event's error= so
+	failure categorization (timeout vs. network vs. unknown) stays accurate
+	even though _post_telegram_message itself never raises to its callers.
+	"""
+	return getattr(_post_telegram_message, "last_error", None) or default
 
 
 def _send_telegram_message(chat_id, msg, include_control_panel=False, timeout=5):
@@ -1283,7 +1300,7 @@ def send_telegram(msg, priority=False, include_private=True):
 					ok=False,
 					status_code=status,
 					body=body,
-					error="sendMessage returned no response" if res is None else None,
+					error=last_send_error() if res is None else None,
 					context="telegram.send_telegram.broadcast",
 				)
 				print(f"❌ Telegram 發送失敗 [{chat_id}]:", status, body)
@@ -1303,7 +1320,7 @@ def send_telegram(msg, priority=False, include_private=True):
 						ok=res2 is not None and res2.status_code == 200,
 						status_code=retry_status,
 						body=retry_body,
-						error="retry sendMessage returned no response" if res2 is None else None,
+						error=last_send_error("retry sendMessage returned no response") if res2 is None else None,
 						context="telegram.send_telegram.broadcast_retry",
 					)
 					print(f"🔁 retry [{chat_id}]:", retry_status)
@@ -1396,7 +1413,7 @@ def send_private_telegram(msg, priority=False):
 				ok=False,
 				status_code=status,
 				body=body,
-				error="sendMessage returned no response" if res is None else None,
+				error=last_send_error() if res is None else None,
 				context="telegram.send_private_telegram",
 			)
 			print(f"❌ 私聊發送失敗 [{target}]", status, body)
