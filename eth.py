@@ -10604,7 +10604,22 @@ def detect_market_regime(df_1h, df_4h):
         and abs(strength_4h_rate) <= range_strength_threshold * 1.4
         and vol <= range_vol_threshold * 1.15
     )
-    if weak_4h or timeframe_conflict:
+
+    # ===== 長窗口區間壓縮（研究候選，預設關閉）=====
+    # 短期（5根4H）斜率雜訊會把「大格局橫盤」誤判成趨勢；
+    # 額外檢查較長窗口的高低點壓縮幅度，避免結構性停損被反覆巴。
+    long_window_range = False
+    if _is_truthy(os.getenv("MARKET_RANGE_LONG_WINDOW_ENABLED", "0")):
+        long_window_bars = max(6, _safe_int(os.getenv("MARKET_RANGE_LONG_WINDOW_BARS", 30), 30))
+        long_window_pct = max(0.01, _safe_float(os.getenv("MARKET_RANGE_LONG_WINDOW_PCT", 0.055), 0.055))
+        recent_4h = df_4h.tail(long_window_bars)
+        if len(recent_4h) >= 6:
+            window_high = _safe_float(recent_4h["high"].max(), close_4h)
+            window_low = _safe_float(recent_4h["low"].min(), close_4h)
+            window_range_rate = (window_high - window_low) / max(window_low, 1e-9)
+            long_window_range = window_range_rate <= long_window_pct
+
+    if weak_4h or timeframe_conflict or long_window_range:
         return "range"
 
     # ===== v2 分類（強弱趨勢）=====
