@@ -1306,11 +1306,10 @@ def _check_n8n_health():
 def _check_trade_open_status():
     load_local_env(overwrite=True, names=(".env",))
     truthy = {"1", "true", "yes", "on"}
-    real_copy_enabled = str(os.getenv("BINANCE_REAL_COPY_ENABLED", "0") or "0").strip().lower() in truthy
-    api_ready = bool(
-        str(os.getenv("BINANCE_API_KEY", "") or "").strip()
-        and str(os.getenv("BINANCE_API_SECRET", "") or "").strip()
-    )
+    exchange = str(os.getenv("EXECUTION_EXCHANGE", "binance") or "binance").strip().lower()
+    enabled_key = "OKX_REAL_COPY_ENABLED" if exchange == "okx" else "BINANCE_REAL_COPY_ENABLED"
+    real_copy_enabled = str(os.getenv(enabled_key, os.getenv("BINANCE_REAL_COPY_ENABLED", "0")) or "0").strip().lower() in truthy
+    api_ready = (bool(str(os.getenv("OKX_API_KEY", "") or "").strip() and str(os.getenv("OKX_API_SECRET", "") or "").strip() and str(os.getenv("OKX_API_PASSPHRASE", "") or "").strip()) if exchange == "okx" else bool(str(os.getenv("BINANCE_API_KEY", "") or "").strip() and str(os.getenv("BINANCE_API_SECRET", "") or "").strip()))
 
     telegram_state = read_telegram_state_locked()
     follow_enabled = bool(telegram_state.get("follow_mode_enabled", False))
@@ -1342,6 +1341,8 @@ def _check_trade_open_status():
     status_patterns = (
         "Binance 自動開單成功",
         "Binance 自動開單失敗",
+        "OKX 已自動開單",
+        "OKX 自動開單失敗",
         "跟單未開啟",
         "已開啟跟單，但未啟用實單",
         "進場延遲確認 |",
@@ -1357,7 +1358,7 @@ def _check_trade_open_status():
     if not real_copy_enabled:
         blockers.append("實單開關關閉")
     if not api_ready:
-        blockers.append("Binance API未完整設定")
+        blockers.append(f"{exchange.upper()} API未完整設定")
     if not follow_enabled:
         blockers.append("跟單模式關閉")
     if not loop_healthy:

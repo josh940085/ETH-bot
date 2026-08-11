@@ -48,7 +48,9 @@ def _real_execution_busy(env=None) -> bool:
     priority_enabled = str(env.get("REAL_ORDER_PRIORITY_ENABLED", "1") or "1").strip().lower() in {
         "1", "true", "yes", "on",
     }
-    real_copy_enabled = str(env.get("BINANCE_REAL_COPY_ENABLED", "0") or "0").strip().lower() in {
+    exchange = str(env.get("EXECUTION_EXCHANGE", "binance") or "binance").strip().lower()
+    enabled_key = "OKX_REAL_COPY_ENABLED" if exchange == "okx" else "BINANCE_REAL_COPY_ENABLED"
+    real_copy_enabled = str(env.get(enabled_key, env.get("BINANCE_REAL_COPY_ENABLED", "0")) or "0").strip().lower() in {
         "1", "true", "yes", "on",
     }
     if not (priority_enabled and real_copy_enabled):
@@ -59,7 +61,7 @@ def _real_execution_busy(env=None) -> bool:
         return False
     if not isinstance(payload, dict):
         return False
-    if payload.get("open") and str(payload.get("position_source") or "binance") == "binance":
+    if payload.get("open") and str(payload.get("position_source") or exchange) == exchange:
         return True
     return str(payload.get("strategy_execution_status") or "") in {"pending_confirmation", "submitting"}
 

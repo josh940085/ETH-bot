@@ -47,6 +47,7 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.preprocessing import StandardScaler
 from local_chat import extract_chat_text as _extract_chat_text
 import market_data_sources
+import okx_execution
 from runtime_config import (
     env_float as _safe_float_env,
     env_int as _safe_int_env,
@@ -203,6 +204,18 @@ COPY_TRADE_MIN_QTY = max(0.001, _safe_float_env("COPY_TRADE_MIN_QTY", 0.001))
 BINANCE_POSITION_SYNC_GRACE_SEC = 90
 BINANCE_PROTECTION_ORDER_TYPES = {"STOP", "STOP_MARKET", "TAKE_PROFIT", "TAKE_PROFIT_MARKET"}
 BINANCE_PROTECTION_CLIENT_PREFIX = "ethbot_"
+
+
+def _execution_exchange() -> str:
+    """The configured execution venue; market-data routing is deliberately separate."""
+    configured = str(os.getenv("EXECUTION_EXCHANGE", "") or "").strip().lower()
+    if configured:
+        return configured
+    return "okx" if okx_execution.configured() else "binance"
+
+
+def _is_okx_execution() -> bool:
+    return _execution_exchange() == "okx"
 
 
 def _normalize_mini_app_url(raw_url) -> str:
@@ -595,30 +608,26 @@ def _perform_manual_close():
         try:
             direction = str(active_trade.get("direction", "long")).lower()
             qty = _get_active_trade_position_qty()
-            dual_side = _is_binance_dual_side_mode()
-            position_side = "LONG" if direction == "long" else "SHORT"
-            close_side = "SELL" if direction == "long" else "BUY"
-
-            # 1. 取消所有 TP/SL 保護單
-            _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
-
-            # 2. 送出市價平倉單
-            if qty > 0:
-                order_params = {
-                    "symbol": COPY_TRADE_SYMBOL,
-                    "side": close_side,
-                    "type": "MARKET",
-                    "quantity": round(qty, 3),
-                }
-                if dual_side:
-                    order_params["positionSide"] = position_side
-                else:
-                    order_params["reduceOnly"] = "true"
-
-                _binance_futures_signed_request("POST", "/fapi/v1/order", order_params)
-                binance_close_msg = f"✅ Binance 市價平倉已送出 qty={qty:.3f}"
+            if _is_okx_execution():
+                if qty <= 0:
+                    raise RuntimeError("無法取得 OKX 持倉數量")
+                closed = okx_execution.close_position(direction, qty)
+                binance_close_msg = f"✅ OKX 市價平倉已送出 qty={_safe_float(closed.get('base_qty'), 0.0):.6f} BTC"
             else:
-                binance_close_msg = "⚠️ 無法取得持倉數量，僅取消保護單"
+                dual_side = _is_binance_dual_side_mode()
+                position_side = "LONG" if direction == "long" else "SHORT"
+                close_side = "SELL" if direction == "long" else "BUY"
+                _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
+                if qty > 0:
+                    order_params = {"symbol": COPY_TRADE_SYMBOL, "side": close_side, "type": "MARKET", "quantity": round(qty, 3)}
+                    if dual_side:
+                        order_params["positionSide"] = position_side
+                    else:
+                        order_params["reduceOnly"] = "true"
+                    _binance_futures_signed_request("POST", "/fapi/v1/order", order_params)
+                    binance_close_msg = f"✅ Binance 市價平倉已送出 qty={qty:.3f}"
+                else:
+                    binance_close_msg = "⚠️ 無法取得持倉數量，僅取消保護單"
         except Exception as e:
             binance_close_msg = f"⚠️ Binance 平倉失敗: {e}"
             print(f"❌ Binance 一鍵平倉錯誤: {e}")
@@ -651,18 +660,22 @@ def _close_trade_at_max_hold(current_price, candle_high=0.0, candle_low=0.0, max
         try:
             qty = _get_active_trade_position_qty()
             if qty <= 0:
-                return False, f"⚠️ {label} 到期但無法取得 Binance 持倉數量，保留本地持倉並重試"
-            dual_side = _is_binance_dual_side_mode()
-            position_side = "LONG" if direction == "long" else "SHORT"
-            close_side = "SELL" if direction == "long" else "BUY"
-            _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
-            params = {"symbol": COPY_TRADE_SYMBOL, "side": close_side, "type": "MARKET", "quantity": round(qty, 3)}
-            if dual_side:
-                params["positionSide"] = position_side
+                return False, f"⚠️ {label} 到期但無法取得 {_execution_exchange().upper()} 持倉數量，保留本地持倉並重試"
+            if _is_okx_execution():
+                closed = okx_execution.close_position(direction, qty)
+                close_msg = f"✅ OKX {label} 到期市價平倉已送出 qty={_safe_float(closed.get('base_qty'), 0.0):.6f} BTC"
             else:
-                params["reduceOnly"] = "true"
-            _binance_futures_signed_request("POST", "/fapi/v1/order", params)
-            close_msg = f"✅ Binance {label} 到期市價平倉已送出 qty={qty:.3f}"
+                dual_side = _is_binance_dual_side_mode()
+                position_side = "LONG" if direction == "long" else "SHORT"
+                close_side = "SELL" if direction == "long" else "BUY"
+                _cancel_existing_binance_protection_orders(close_side, position_side, dual_side)
+                params = {"symbol": COPY_TRADE_SYMBOL, "side": close_side, "type": "MARKET", "quantity": round(qty, 3)}
+                if dual_side:
+                    params["positionSide"] = position_side
+                else:
+                    params["reduceOnly"] = "true"
+                _binance_futures_signed_request("POST", "/fapi/v1/order", params)
+                close_msg = f"✅ Binance {label} 到期市價平倉已送出 qty={qty:.3f}"
         except Exception as e:
             return False, f"⚠️ Binance {label} 到期平倉失敗: {e}"
 
@@ -765,6 +778,9 @@ def _get_active_trade_position_qty():
 
     if tg_get_follow_mode_enabled() and _is_real_copy_enabled():
         try:
+            if _is_okx_execution():
+                row = okx_execution.active_position()
+                return _okx_position_base_qty(row) if row is not None else 0.0
             rows = _binance_futures_signed_get("/fapi/v2/positionRisk", {"symbol": COPY_TRADE_SYMBOL})
             for row in rows if isinstance(rows, list) else []:
                 if not isinstance(row, dict):
@@ -3087,6 +3103,12 @@ def get_derivatives_flow_snapshot(symbol=COPY_TRADE_SYMBOL, force=False):
 
 
 def _is_real_copy_enabled() -> bool:
+    if _is_okx_execution():
+        # A configured migration keeps the existing real-trade switch as the
+        # operator's explicit opt-in; no separate fourth secret/config is needed.
+        return okx_execution.configured() and _is_truthy(
+            os.getenv("OKX_REAL_COPY_ENABLED", os.getenv("BINANCE_REAL_COPY_ENABLED", "0"))
+        )
     return _is_truthy(os.getenv("BINANCE_REAL_COPY_ENABLED", "0"))
 
 
@@ -3142,6 +3164,12 @@ def _local_tp_sl_hits(trade, current_price, candle_high, candle_low):
 
 def _get_binance_available_balance() -> float:
     """查詢 Binance 合約帳戶可用餘額（USDT）。失敗時回傳 0.0。"""
+    if _is_okx_execution():
+        try:
+            return max(0.0, _safe_float(okx_execution.account_snapshot().get("available_balance"), 0.0))
+        except Exception as e:
+            print(f"⚠️ 查詢 OKX 餘額失敗: {e}")
+            return 0.0
     snapshot = _get_binance_account_snapshot(log_on_error=True)
     return max(0.0, _safe_float(snapshot.get("available_balance"), 0.0))
 
@@ -3354,7 +3382,16 @@ def _get_binance_total_assets_snapshot(log_on_error=False, force=False):
 
 
 def _refresh_position_panel_account_state(force=False, log_on_error=False):
-    snapshot = _get_binance_total_assets_snapshot(log_on_error=log_on_error, force=force)
+    if _is_okx_execution():
+        try:
+            snapshot = okx_execution.account_snapshot()
+            snapshot.update({"spot_total_assets_usdt": 0.0, "futures_total_assets_usdt": _safe_float(snapshot.get("margin_balance"), 0.0), "total_assets_usdt": _safe_float(snapshot.get("margin_balance"), 0.0), "spot_asset_count": 0})
+        except Exception as e:
+            if log_on_error:
+                print(f"⚠️ 查詢 OKX 帳戶失敗: {e}")
+            snapshot = {"available_balance": 0.0, "wallet_balance": 0.0, "margin_balance": 0.0, "unrealized_profit": 0.0, "spot_total_assets_usdt": 0.0, "futures_total_assets_usdt": 0.0, "total_assets_usdt": 0.0, "spot_asset_count": 0}
+    else:
+        snapshot = _get_binance_total_assets_snapshot(log_on_error=log_on_error, force=force)
     POSITION_PANEL_STATE["account_available_balance_usdt"] = max(0.0, _safe_float(snapshot.get("available_balance"), 0.0))
     POSITION_PANEL_STATE["account_wallet_balance_usdt"] = max(0.0, _safe_float(snapshot.get("wallet_balance"), 0.0))
     POSITION_PANEL_STATE["account_margin_balance_usdt"] = max(0.0, _safe_float(snapshot.get("margin_balance"), 0.0))
@@ -3990,9 +4027,87 @@ def _emergency_close_unprotected_position(direction, position_side, dual_side, q
         return False, f"緊急平倉失敗: {exc}"
 
 
+def _okx_position_base_qty(row):
+    return okx_execution.base_for_contracts(abs(_safe_float((row or {}).get("pos"), 0.0)))
+
+
+def _execute_okx_copy_trade_open(direction, size_ratio, tp, sl, leverage):
+    if not okx_execution.configured():
+        return False, "⚠️ OKX API未完整設定"
+    desired_leverage = max(1, min(COPY_TRADE_MAX_LEVERAGE, _safe_int(leverage or os.getenv("COPY_TRADE_LEVERAGE", DEFAULT_LEV), DEFAULT_LEV)))
+    try:
+        actual_leverage = okx_execution.set_leverage(desired_leverage, direction=direction)
+        base_qty = _calc_copy_trade_qty(size_ratio, leverage=actual_leverage, asset_price=_safe_float(WS_PRICE, 0.0))
+        contracts, spec = okx_execution.contracts_for_base(base_qty, enforce_min=False)
+        if contracts < spec["min_sz"]:
+            return False, f"❌ OKX 自動開單已阻止：計算量 {base_qty:.6f} BTC 小於 OKX 最低 {okx_execution.base_for_contracts(spec['min_sz'], spec):.6f} BTC"
+        order = okx_execution.place_market(direction, base_qty)
+        actual_qty = max(0.0, _safe_float(order.get("base_qty"), 0.0))
+        # Query exchange state before protecting; no local quantity is treated as authoritative.
+        row = okx_execution.active_position()
+        if row is not None:
+            actual_qty = _okx_position_base_qty(row)
+            entry = _safe_float(row.get("avgPx"), 0.0)
+            if entry > 0:
+                active_trade["entry"] = entry
+                active_trade["avg_entry"] = entry
+        if actual_qty <= 0:
+            return False, "❌ OKX 開倉後未確認持倉，已阻止後續保護單流程"
+        try:
+            okx_execution.install_protections(direction, actual_qty, tp, sl)
+        except Exception as protection_error:
+            try:
+                okx_execution.close_position(direction, actual_qty)
+                return False, f"❌ OKX 保護單建立失敗，已緊急平倉：{protection_error}"
+            except Exception as close_error:
+                return False, f"🚨 OKX 實單缺少完整 TP/SL：{protection_error}；緊急平倉失敗：{close_error}"
+        active_trade["position_qty"] = actual_qty
+        return True, f"✅ OKX 已自動開單 | 方向: {direction} | 數量: {actual_qty:.6f} BTC | 槓桿: {actual_leverage}x | orderId: {order.get('order_id')}\n🛡️ OKX 已確認 MARK_PRICE TP/SL"
+    except Exception as exc:
+        return False, f"❌ OKX 自動開單失敗: {exc}"
+
+
+def _update_okx_copy_trade_tp_sl(tp, sl):
+    try:
+        row = okx_execution.active_position()
+        if row is None:
+            return False, "OKX 無持倉，僅更新本地 TP/SL"
+        direction = okx_execution.position_direction(row)
+        okx_execution.install_protections(direction, _okx_position_base_qty(row), tp, sl)
+        return True, "✅ OKX TP/SL 已同步更新並確認"
+    except Exception as exc:
+        return False, f"⚠️ OKX TP/SL 更新未完成: {exc}"
+
+
+def _execute_okx_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=None):
+    try:
+        row = okx_execution.active_position()
+        if row is None:
+            return False, "OKX 無持倉，無法縮放"
+        position_qty = _okx_position_base_qty(row)
+        leverage = max(1, _safe_int(row.get("lever"), DEFAULT_LEV))
+        price = _safe_float(mark_price, 0.0) or _safe_float(row.get("markPx"), 0.0) or _safe_float(WS_PRICE, 0.0)
+        requested = _calc_copy_trade_qty(delta_ratio, leverage=leverage, asset_price=price) if reduce else _calc_copy_trade_qty_with_buffer(delta_ratio, leverage=leverage, asset_price=price, enforce_min=False)
+        if reduce:
+            requested = min(requested, position_qty)
+        contracts, spec = okx_execution.contracts_for_base(requested, enforce_min=False)
+        qty = okx_execution.base_for_contracts(contracts, spec)
+        if reduce and qty >= position_qty - 1e-9:
+            return False, "MIN_POSITION_NO_REDUCE: 減倉會全平目前 OKX 最小倉位，保留持倉不減倉"
+        if contracts < spec["min_sz"]:
+            return False, "補倉已暫停：計算量低於 OKX 最低合約張數" if not reduce else "下單量低於 OKX 最小值"
+        order = okx_execution.place_market(direction, qty, reduce=reduce)
+        return True, f"{'減倉' if reduce else '補倉'} OKX 實單成功 qty={_safe_float(order.get('base_qty'), 0.0):.6f} BTC"
+    except Exception as exc:
+        return False, f"{'減倉' if reduce else '補倉'} OKX 實單失敗: {exc}"
+
+
 def update_copy_trade_tp_sl(tp=None, sl=None):
     if not _is_real_copy_enabled():
         return False, "實單未啟用，僅更新本地 TP/SL"
+
+    if _is_okx_execution():
+        return _update_okx_copy_trade_tp_sl(tp, sl)
 
     positions = _binance_futures_signed_get("/fapi/v2/positionRisk")
     active_rows = []
@@ -4037,10 +4152,10 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None, leverage=No
         return False, "⚠️ 跟單失敗：方向無效"
 
     if not tg_get_follow_mode_enabled():
-        return False, "⏹️ 跟單未開啟，已略過 Binance 自動開單"
+        return False, f"⏹️ 跟單未開啟，已略過 {_execution_exchange().upper()} 自動開單"
 
     if not _is_real_copy_enabled():
-        return False, "⚠️ 已開啟跟單，但未啟用實單（請設定 BINANCE_REAL_COPY_ENABLED=1）"
+        return False, f"⚠️ 已開啟跟單，但未啟用實單（請設定 {_execution_exchange().upper()} 實單設定）"
 
     if not _has_valid_tp_sl(
         {
@@ -4054,6 +4169,11 @@ def execute_copy_trade_open(direction, size_ratio, tp=None, sl=None, leverage=No
         }
     ):
         return False, "❌ Binance 自動開單已阻止：缺少有效 TP/SL"
+
+    if _is_okx_execution():
+        if active_trade.get("open"):
+            return False, f"⚠️ 已有 {active_trade.get('direction')} 倉位開啟中，禁止同時開單"
+        return _execute_okx_copy_trade_open(direction, size_ratio, tp, sl, leverage)
 
     # 【防呆】已有持倉禁止重複開倉
     if active_trade.get("open"):
@@ -4285,7 +4405,50 @@ def _build_trade_close_message(reason, direction, current_price, candle_high=0.0
     )
 
 
+def _sync_active_trade_from_okx(send_notice=False):
+    """Synchronize authoritative OKX SWAP state without touching Binance orders."""
+    try:
+        row = okx_execution.active_position()
+    except Exception as exc:
+        return False, f"OKX 同步失敗: {exc}"
+    if row is None:
+        had_local_open = bool(active_trade.get("open"))
+        close_price = _safe_float(WS_PRICE, _safe_float(active_trade.get("avg_entry", active_trade.get("entry")), 0.0))
+        if had_local_open:
+            direction = str(active_trade.get("direction") or "")
+            reason = _infer_remote_close_reason(direction, close_price, active_trade.get("tp"), active_trade.get("sl"))
+            record_position_close(reason, close_price, close_price, close_price)
+        _reset_active_trade_state()
+        sync_position_panel(close_price)
+        msg = f"✅ 已同步 OKX：目前 {okx_execution.inst_id()} 無持倉"
+        if send_notice:
+            send_telegram(msg, priority=True)
+        return True, msg
+
+    direction = okx_execution.position_direction(row)
+    actual_qty = _okx_position_base_qty(row)
+    entry_price = _safe_float(row.get("avgPx"), 0.0)
+    mark_price = _safe_float(row.get("markPx"), _safe_float(WS_PRICE, entry_price))
+    leverage = max(1, _safe_int(row.get("lever"), DEFAULT_LEV))
+    notional = abs(_safe_float(row.get("notionalUsd"), actual_qty * mark_price))
+    margin = max(0.0, _safe_float(row.get("imr"), notional / leverage if leverage else 0.0))
+    account = _refresh_position_panel_account_state(force=True, log_on_error=False)
+    size_ratio = _estimate_size_ratio_from_position_margin(margin, account)
+    if size_ratio <= 0:
+        size_ratio = max(0.0, _safe_float(active_trade.get("size"), 0.0))
+    tp, sl = _safe_float(active_trade.get("tp"), 0.0), _safe_float(active_trade.get("sl"), 0.0)
+    active_trade.update({"direction": direction, "entry": entry_price, "avg_entry": entry_price, "open": True, "size": size_ratio, "position_qty": actual_qty, "open_time": _safe_float(active_trade.get("open_time"), 0.0) or time.time(), "time_horizon": "short"})
+    POSITION_PANEL_STATE.update({"pair": DEFAULT_PAIR, "lev": leverage, "size": size_ratio, "size_ratio": size_ratio, "capital_usage_ratio": _compute_capital_usage_ratio(margin, account), "binance_qty": actual_qty, "binance_mark_price": mark_price, "binance_mark_price_ts": int(time.time()), "position_notional_usdt": notional, "position_margin_usdt": margin, "binance_unrealized_pnl_usdt": _safe_float(row.get("upl"), 0.0), "binance_unrealized_pnl_ts": int(time.time()), "position_source": "okx"})
+    sync_position_panel(mark_price)
+    msg = f"✅ 已同步 OKX 倉位\n方向: {direction} | 數量: {actual_qty:.6f} BTC\n進場: {entry_price:.2f} | 現價: {mark_price:.2f} | 槓桿: {leverage}x\nTP: {tp:.2f} | SL: {sl:.2f}"
+    if send_notice:
+        send_telegram(msg, priority=True)
+    return True, msg
+
+
 def sync_active_trade_from_binance(send_notice=False):
+    if _is_okx_execution():
+        return _sync_active_trade_from_okx(send_notice=send_notice)
     try:
         positions = _binance_futures_signed_get("/fapi/v2/positionRisk")
     except Exception as e:
@@ -6142,6 +6305,9 @@ def _execute_copy_trade_scale(direction, delta_ratio, reduce=False, mark_price=N
 
     if not tg_get_follow_mode_enabled() or not _is_real_copy_enabled():
         return False, "實單未啟用"
+
+    if _is_okx_execution():
+        return _execute_okx_copy_trade_scale(direction, delta_ratio, reduce=reduce, mark_price=mark_price)
 
     try:
         positions = _binance_futures_signed_get("/fapi/v2/positionRisk")

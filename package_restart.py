@@ -36,7 +36,8 @@ def _position_busy():
         return True
     if not isinstance(payload, dict):
         return True
-    if payload.get("open") and str(payload.get("position_source") or "binance") == "binance":
+    exchange = str(os.getenv("EXECUTION_EXCHANGE", "binance") or "binance").strip().lower()
+    if payload.get("open") and str(payload.get("position_source") or exchange) == exchange:
         return True
     return str(payload.get("strategy_execution_status") or "") in {
         "pending_confirmation",
