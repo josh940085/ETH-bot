@@ -15846,7 +15846,7 @@ def run_bot():
         decision = {}
         try:
             # ===== Telegram 指令接收 =====
-            commands, last_update_id = tg_fetch_telegram_commands(last_update_id)
+            commands, last_update_id = tg_fetch_telegram_commands(last_update_id, bot_supervisor=True)
 
             for command in commands:
                 try:
