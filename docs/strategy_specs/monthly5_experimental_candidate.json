@@ -1,0 +1,41 @@
+{
+  "strategy_id": "monthly5_atr_walkforward_volume_adx_recovery_experimental_v1",
+  "status": "experimental_unbacktested_combination",
+  "symbol": "BTCUSDT",
+  "relationship_to_live_shadow_candidate": "Fully independent of monthly5_postlock_hourly_v0 (the SELECTED_CANDIDATE in monthly5_shadow.py). Does not read or write monthly5_shadow.py's state/history files, and is never called from eth.py or any real-order path.",
+  "how_to_run": "python3 monthly5_experimental_candidate_runner.py (manual or self-scheduled; not wired into supervisord.conf or eth.py by default)",
+  "state_files": {
+    "state": ".runtime/data/btcusdt_monthly5_experimental_candidate_state.json",
+    "history": ".runtime/data/btcusdt_monthly5_experimental_candidate_history.jsonl"
+  },
+  "components": [
+    {
+      "id": "walkforward_regime_direction",
+      "source": "monthly5_volatility_walkforward.py",
+      "description": "Monthly walk-forward switch between two ATR-normalized 4h regime configs (atr_d0.7_s0.05_confirm4_grace3, atr_d0.7_s0.1_confirm1_grace6), using the lb24_tail selection rule (lookback_months=24, score_mode=tail) that scored best in that module's own holdout backtest (avg +2.44%/mo, -12.68% max dd, 21/31 holdout months >=5%).",
+      "known_limitation": "That holdout result itself is not deployment_ready in its own research artifact (blockers: holdout_all_months_ge_5_failed, candidate_matched_tick_execution_evidence_missing, live_shadow_promotion_not_met)."
+    },
+    {
+      "id": "volume_confirmation_gate",
+      "source": "monthly5_volume_forward_shadow.py",
+      "description": "24-bar trailing relative-volume gate (MIN_VOLUME_RATIO=0.5): zeroes the position when current 4h volume is below half the trailing median.",
+      "known_limitation": "monthly5_volume_forward_shadow.RESEARCH_VALID is False - its original historical backtest was invalidated for a look-ahead bug (historical_4h_confirmation_counted_aligned_5m_rows). Only its own forward-collected data (from FORWARD_START) is trustworthy, and that forward trial had not cleared its own promotion bar as of this module's introduction."
+    },
+    {
+      "id": "graduated_adx_recovery",
+      "source": "monthly5_intramonth_recovery_research.py",
+      "description": "adx_trigger-0.06_scale0.25_exit-0.01: while month-to-date paper PnL is <= -6%, direction is sourced from an ADX(14)-gated regime classifier (adx_threshold=25.0, confirmation_bars=1, range_grace_bars=6) instead of the primary walk-forward signal, at 0.25x exposure scale, until month-to-date PnL recovers to >= -1%.",
+      "known_limitation": "This module's own grid search flags evaluation_period_reused_during_research=True, and its official winner is baseline_no_recovery (no signal swap at all). The ADX variant used here only edges out that baseline by roughly +0.12pp/month and -0.28pp max drawdown on holdout - a narrow margin from a methodologically caveated search, not a clear result."
+    }
+  ],
+  "combination_evidence": "None prior to this module. Each component above was validated (or is still being validated) independently; running all three together has zero backtest or forward evidence as a combination before this module started collecting it.",
+  "promotion_requirements": [
+    "Forward span >= 45 days (MIN_FORWARD_DAYS, stricter than monthly5_volume_forward_shadow's 30 days given the added combination risk)",
+    "Sufficient completed-bar coverage over that span (MIN_FORWARD_COVERAGE=0.80)",
+    "Forward monthly-equivalent return >= 5%",
+    "Forward candidate return must beat the walkforward-only baseline (baseline_signal: primary walk-forward direction with no volume gate and no recovery override)",
+    "monthly5_volume_forward_shadow.RESEARCH_VALID must be True",
+    "Flat-time <= MAX_FLAT_TIME_PCT (80%)"
+  ],
+  "explicitly_not_a_promotion_gate": "This module never gates real trades or feeds into monthly5_shadow.py's build_market_selection. Even a promotion_ready=True state here is only 'cleared this module's own bar' and should prompt a human design review, not an automatic change to the live shadow candidate."
+}
