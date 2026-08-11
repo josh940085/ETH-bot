@@ -14686,7 +14686,7 @@ def _build_bot_help_text():
         "/settings - 顯示跟單與控制面板設定\n"
         "/panel 或 /menu - 開啟倉位面板\n"
         "/follow - 開關跟單\n"
-        "/sync - 同步幣安倉位\n"
+        f"/sync - 同步{_execution_exchange().upper()}倉位\n"
         "/tp 2300 - 設定止盈\n"
         "/sl 2350 - 設定止損\n"
         "/tpsl 2300 2350 - 同時設定 TP/SL\n"
@@ -14706,7 +14706,7 @@ def _build_bot_settings_text():
         "設定入口：\n"
         "- 用 /panel 或 /menu 開啟控制面板\n"
         "- 用 /follow 切換跟單開關\n"
-        "- 用 /sync 同步幣安倉位\n"
+        f"- 用 /sync 同步{_execution_exchange().upper()}倉位\n"
         "- 用 /whoami 查自己的 Telegram user id\n"
         "- 用 /tp、/sl、/tpsl 調整持倉保護\n"
         "- 若要手動平倉，請使用控制面板上的「⛔ 一鍵平倉」"
@@ -14987,7 +14987,7 @@ def handle_ai_command(text, context=None):
             return f"✅ 跟單已開啟（目前僅訊號，請完成 {_execution_exchange().upper()} 實單設定後重啟啟用）"
         return "⏹️ 跟單已關閉"
 
-    if text.startswith("/sync") or str(text).strip() == "同步幣安倉位":
+    if text.startswith("/sync") or str(text).strip() in {"同步幣安倉位", "同步OKX倉位", f"同步{_execution_exchange().upper()}倉位"}:
         ok, message = sync_active_trade_from_binance(send_notice=False)
         return message
 
@@ -15826,7 +15826,7 @@ def run_bot():
             if ok and active_trade.get("open"):
                 last_binance_sync_ts = time.time()
         except Exception as e:
-            print(f"⚠️ 啟動時同步 Binance 倉位失敗: {e}")
+            print(f"⚠️ 啟動時同步 {_execution_exchange().upper()} 倉位失敗: {e}")
 
     pending_training_sample = _load_pending_training_sample_state()
     if pending_training_sample and active_trade.get("open"):
