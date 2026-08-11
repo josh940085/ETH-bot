@@ -14982,9 +14982,9 @@ def handle_ai_command(text, context=None):
     if str(text).strip() in {FOLLOW_BUTTON_TEXT_DISABLED, FOLLOW_BUTTON_TEXT_ENABLED} or text.startswith("/follow"):
         enabled = tg_toggle_follow_mode_enabled()
         if enabled and _is_real_copy_enabled():
-            return "✅ 跟單已開啟（Binance 自動開單已啟用）"
+            return f"✅ 跟單已開啟（{_execution_exchange().upper()} 自動開單已啟用）"
         if enabled:
-            return "✅ 跟單已開啟（目前僅訊號，請設 BINANCE_REAL_COPY_ENABLED=1 後重啟啟用實單）"
+            return f"✅ 跟單已開啟（目前僅訊號，請完成 {_execution_exchange().upper()} 實單設定後重啟啟用）"
         return "⏹️ 跟單已關閉"
 
     if text.startswith("/sync") or str(text).strip() == "同步幣安倉位":
@@ -15802,7 +15802,7 @@ def run_bot():
     print(
         "✅ 執行順位: "
         + (
-            "Binance 實單第一；成交確認後才通知與寫入學習"
+            f"{_execution_exchange().upper()} 實單第一；成交確認後才通知與寫入學習"
             if _real_order_priority_enabled()
             else "允許本地追蹤模式"
         )
