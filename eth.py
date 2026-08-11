@@ -6244,7 +6244,7 @@ def sync_position_panel(current_price=None):
                 else "local_tracking"
             ),
             "position_source": (
-                "binance"
+                _execution_exchange()
                 if active_trade.get("open") and tg_get_follow_mode_enabled() and _is_real_copy_enabled()
                 else "none"
                 if not active_trade.get("open")

@@ -1399,7 +1399,7 @@ def _check_market_kline_source():
         raise RuntimeError("Kraken-first kline routing was removed")
     return {
         "status": "ok",
-        "detail": "Kraken primary; TradingView fallback; Binance reserved for execution",
+        "detail": "Kraken primary; TradingView fallback; Binance market data remains separate from execution",
     }
 
 
